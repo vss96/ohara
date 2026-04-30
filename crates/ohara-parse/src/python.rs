@@ -96,6 +96,8 @@ pub fn extract(file_path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symb
     // Dedupe by (span_start, span_end). Prefer Method/Class over Function when
     // the same span is captured by multiple patterns (e.g. a method inside a
     // class is also matched by the top-level `function_definition` pattern).
+    // Dedup key is (span_start, span_end) only — safe because all symbols here
+    // share the same file_path (we're inside a single `extract` call).
     let mut by_span: HashMap<(u32, u32), Symbol> = HashMap::new();
     for sym in out {
         let key = (sym.span_start, sym.span_end);

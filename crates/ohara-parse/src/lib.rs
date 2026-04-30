@@ -31,6 +31,7 @@ impl GitSymbolSource {
 
 #[async_trait::async_trait]
 impl SymbolSource for GitSymbolSource {
+    #[tracing::instrument(skip(self), fields(repo = %self.repo_path.display()))]
     async fn extract_head_symbols(&self) -> ohara_core::Result<Vec<Symbol>> {
         let path = self.repo_path.clone();
         tokio::task::spawn_blocking(move || -> ohara_core::Result<Vec<Symbol>> {
@@ -47,17 +48,23 @@ impl SymbolSource for GitSymbolSource {
                     };
                     let p = format!("{}{}", dir, name);
                     let blob_sha = entry.id().to_string();
-                    if let Ok(blob) = repo.find_blob(entry.id()) {
-                        if let Ok(s) = std::str::from_utf8(blob.content()) {
-                            if let Ok(mut syms) = extract_for_path(&p, s, &blob_sha) {
-                                out.append(&mut syms);
+                    match repo.find_blob(entry.id()) {
+                        Ok(blob) => {
+                            // Err on from_utf8 means binary file; expected, ignored.
+                            if let Ok(s) = std::str::from_utf8(blob.content()) {
+                                match extract_for_path(&p, s, &blob_sha) {
+                                    Ok(mut syms) => out.append(&mut syms),
+                                    Err(e) => tracing::warn!(path = %p, error = %e, "symbol extraction failed; skipping file"),
+                                }
                             }
                         }
+                        Err(e) => tracing::warn!(path = %p, error = %e, "blob lookup failed; skipping file"),
                     }
                 }
                 git2::TreeWalkResult::Ok
             })
             .map_err(|e| ohara_core::OhraError::Git(e.to_string()))?;
+            tracing::info!(symbols_extracted = out.len(), "head symbol extraction complete");
             Ok(out)
         })
         .await
