@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
-use git2::{DiffFormat, DiffOptions, Oid, Repository};
+use git2::{DiffFindOptions, DiffFormat, DiffOptions, Oid, Repository};
 use ohara_core::types::{ChangeKind, Hunk};
 use std::path::Path;
+use tracing::debug;
 
 pub fn hunks_for_commit(repo: &Repository, sha: &str) -> Result<Vec<Hunk>> {
     let oid = Oid::from_str(sha).context("parse oid")?;
@@ -16,10 +17,14 @@ pub fn hunks_for_commit(repo: &Repository, sha: &str) -> Result<Vec<Hunk>> {
     let mut opts = DiffOptions::new();
     opts.context_lines(3).interhunk_lines(0).ignore_whitespace_eol(true);
 
-    let diff = match parent_tree.as_ref() {
+    let mut diff = match parent_tree.as_ref() {
         Some(p) => repo.diff_tree_to_tree(Some(p), Some(&tree), Some(&mut opts))?,
         None => repo.diff_tree_to_tree(None, Some(&tree), Some(&mut opts))?,
     };
+
+    let mut find_opts = DiffFindOptions::new();
+    find_opts.renames(true).rename_threshold(50);
+    diff.find_similar(Some(&mut find_opts))?;
 
     let mut hunks: Vec<Hunk> = Vec::new();
     let mut current: Option<(String, ChangeKind)> = None;
@@ -54,6 +59,7 @@ pub fn hunks_for_commit(repo: &Repository, sha: &str) -> Result<Vec<Hunk>> {
     if let Some((p, ck)) = current.take() {
         hunks.push(make_hunk(sha, &p, ck, buf));
     }
+    debug!(sha, files = hunks.len(), "extracted hunks for commit");
     Ok(hunks)
 }
 
@@ -120,5 +126,24 @@ mod tests {
         assert!(matches!(hunks[0].change_kind, ChangeKind::Modified));
         assert!(hunks[0].diff_text.contains("println"));
         assert_eq!(hunks[0].language.as_deref(), Some("rust"));
+    }
+
+    #[test]
+    fn extract_diff_for_root_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        let sig = git2::Signature::now("a", "a@a").unwrap();
+        std::fs::write(dir.path().join("first.rs"), "fn first() {}\n").unwrap();
+        let mut idx = repo.index().unwrap();
+        idx.add_path(std::path::Path::new("first.rs")).unwrap();
+        idx.write().unwrap();
+        let t = idx.write_tree().unwrap();
+        let oid = repo.commit(Some("HEAD"), &sig, &sig, "root", &repo.find_tree(t).unwrap(), &[]).unwrap();
+
+        let hunks = hunks_for_commit(&repo, &oid.to_string()).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].file_path, "first.rs");
+        assert!(matches!(hunks[0].change_kind, ChangeKind::Added));
+        assert!(hunks[0].diff_text.contains("first"));
     }
 }
