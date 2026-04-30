@@ -100,7 +100,7 @@ pub fn knn(
         };
         // Distance from sqlite-vec is L2; smaller is closer. Convert to a
         // similarity-like score where larger is better.
-        let similarity = -distance;
+        let similarity = 1.0 / (1.0 + distance);
         Ok(HunkHit { hunk, commit, similarity })
     })?;
 

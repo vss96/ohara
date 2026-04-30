@@ -261,4 +261,44 @@ mod tests {
         assert!(s.blob_was_seen("blob1", "bge-small-v1.5").await.unwrap());
         assert!(!s.blob_was_seen("blob1", "voyage-code-3").await.unwrap());
     }
+
+    #[tokio::test]
+    async fn knn_hunks_similarity_is_bounded_in_zero_to_one() {
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        let cm = CommitMeta { sha: "c1".into(), parent_sha: None, is_merge: false, author: None, ts: 1, message: "m".into() };
+        s.put_commit(&id, &CommitRecord { meta: cm, message_emb: vec![0.0; 384] }).await.unwrap();
+
+        // Three hunks with very different magnitudes — produces a wide range of L2 distances.
+        let mk = |val: f32, name: &str| HunkRecord {
+            hunk: Hunk {
+                commit_sha: "c1".into(),
+                file_path: format!("{name}.rs"),
+                language: Some("rust".into()),
+                change_kind: ChangeKind::Added,
+                diff_text: format!("+{name}"),
+            },
+            diff_emb: vec![val; 384],
+        };
+        s.put_hunks(&id, &[mk(0.0, "near"), mk(1.0, "far"), mk(10.0, "very_far")]).await.unwrap();
+
+        let q = vec![0.0_f32; 384];
+        let hits = s.knn_hunks(&id, &q, 3, None, None).await.unwrap();
+        assert_eq!(hits.len(), 3);
+
+        // Every similarity must be in (0.0, 1.0].
+        for h in &hits {
+            assert!(
+                h.similarity > 0.0 && h.similarity <= 1.0,
+                "similarity {} out of bounds for {:?}",
+                h.similarity, h.hunk.file_path,
+            );
+        }
+
+        // Closest match (distance 0) should have similarity == 1.0.
+        let near = hits.iter().find(|h| h.hunk.file_path == "near.rs").unwrap();
+        assert!((near.similarity - 1.0).abs() < 1e-6, "near.rs should have similarity ≈ 1.0, got {}", near.similarity);
+
+        // Ordering: nearest first.
+        assert_eq!(hits[0].hunk.file_path, "near.rs");
+    }
 }
