@@ -120,4 +120,35 @@ mod tests {
             .unwrap();
         assert!(!v.is_empty());
     }
+
+    #[tokio::test]
+    async fn second_pool_connection_inherits_pragmas_and_vec() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = SqlitePoolBuilder::new(dir.path().join("idx.sqlite")).build().await.unwrap();
+        // Hold one checkout so the pool must lazily create a fresh connection
+        // for the next request. The first checkout reuses the connection that
+        // `build()` already pragma'd; the second forces a new one.
+        let first = pool.get().await.unwrap();
+        // Fetch a second checkout — forces deadpool to create a new connection.
+        let second = pool.get().await.unwrap();
+        // Note: rusqlite's bundled libsqlite3-sys is compiled with
+        // SQLITE_DEFAULT_FOREIGN_KEYS=1, so foreign_keys is ON by default on
+        // every fresh connection. We additionally check `synchronous` (default
+        // FULL=2; we set NORMAL=1) to detect whether the post_create pragmas
+        // actually ran on this connection.
+        let (fk, sync_mode, vec_v): (i64, i64, String) = second
+            .interact(|c| {
+                let fk: i64 = c.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+                let s: i64 = c.query_row("PRAGMA synchronous", [], |r| r.get(0))?;
+                let v: String = c.query_row("SELECT vec_version()", [], |r| r.get(0))?;
+                Ok::<_, rusqlite::Error>((fk, s, v))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        drop(first);
+        assert_eq!(fk, 1, "foreign_keys must be ON on every pool connection");
+        assert_eq!(sync_mode, 1, "synchronous must be NORMAL (1) on every pool connection");
+        assert!(!vec_v.is_empty(), "vec extension must be available on every pool connection");
+    }
 }
