@@ -1940,6 +1940,7 @@ dependencies = [
  "async-trait",
  "fastembed",
  "ohara-core",
+ "tokio",
  "tracing",
 ]
 
