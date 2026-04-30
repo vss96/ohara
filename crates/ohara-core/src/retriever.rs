@@ -80,6 +80,45 @@ impl Retriever {
     }
 }
 
+impl Retriever {
+    pub async fn find_pattern(
+        &self,
+        repo_id: &crate::types::RepoId,
+        query: &crate::query::PatternQuery,
+        now_unix: i64,
+    ) -> crate::Result<Vec<crate::query::PatternHit>> {
+        let q_text = vec![query.query.clone()];
+        let mut q_embs = self.embedder.embed_batch(&q_text).await?;
+        let q_emb = q_embs.pop().ok_or_else(|| crate::OhraError::Embedding("empty".into()))?;
+
+        let candidates = self
+            .storage
+            .knn_hunks(
+                repo_id,
+                &q_emb,
+                query.k.clamp(1, 20),
+                query.language.as_deref(),
+                query.since_unix,
+            )
+            .await?;
+
+        // Cosine similarity between the query embedding and each candidate's commit message.
+        // We embed the messages in a single batch.
+        let messages: Vec<String> = candidates.iter().map(|h| h.commit.message.clone()).collect();
+        let msg_embs = if messages.is_empty() { vec![] } else { self.embedder.embed_batch(&messages).await? };
+        let msg_sims: Vec<f32> = msg_embs.iter().map(|e| cosine(&q_emb, e)).collect();
+
+        Ok(self.rank_hits(candidates, &msg_sims, now_unix))
+    }
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na * nb) }
+}
+
 fn truncate_diff(s: &str, max_lines: usize) -> (String, bool) {
     // Count total lines, treating a trailing partial line (no \n) as a line.
     let nl = s.bytes().filter(|&b| b == b'\n').count();
@@ -231,5 +270,63 @@ mod tests {
         // The non-NaN entry should still have a finite combined_score.
         let finite_count = out.iter().filter(|h| h.combined_score.is_finite()).count();
         assert_eq!(finite_count, 1);
+    }
+
+    use crate::query::PatternQuery;
+    use crate::storage::{CommitRecord, HunkRecord};
+    use crate::types::{RepoId, Symbol};
+
+    struct FakeEmbedder;
+    #[async_trait::async_trait]
+    impl crate::EmbeddingProvider for FakeEmbedder {
+        fn dimension(&self) -> usize { 4 }
+        fn model_id(&self) -> &str { "fake" }
+        async fn embed_batch(&self, texts: &[String]) -> crate::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|t| match t.as_str() {
+                "retry" => vec![1.0, 0.0, 0.0, 0.0],
+                "added retry logic" => vec![1.0, 0.1, 0.0, 0.0],
+                "renamed file" => vec![0.0, 1.0, 0.0, 0.0],
+                _ => vec![0.0; 4],
+            }).collect())
+        }
+    }
+
+    struct FakeStorage { hits: Vec<HunkHit> }
+    #[async_trait::async_trait]
+    impl crate::Storage for FakeStorage {
+        async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> crate::Result<()> { Ok(()) }
+        async fn get_index_status(&self, _: &RepoId) -> crate::Result<crate::query::IndexStatus> { Ok(crate::query::IndexStatus { last_indexed_commit: None, commits_behind_head: 0, indexed_at: None }) }
+        async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> crate::Result<()> { Ok(()) }
+        async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> crate::Result<()> { Ok(()) }
+        async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> crate::Result<()> { Ok(()) }
+        async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> crate::Result<()> { Ok(()) }
+        async fn knn_hunks(&self, _: &RepoId, _: &[f32], _: u8, _: Option<&str>, _: Option<i64>) -> crate::Result<Vec<HunkHit>> { Ok(self.hits.clone()) }
+        async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> { Ok(false) }
+        async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> { Ok(()) }
+    }
+
+    fn fake_hit_with_msg(sha: &str, ts: i64, sim: f32, msg: &str) -> HunkHit {
+        HunkHit {
+            hunk: Hunk { commit_sha: sha.into(), file_path: "a.rs".into(), language: Some("rust".into()), change_kind: ChangeKind::Added, diff_text: "+x".into() },
+            commit: CommitMeta { sha: sha.into(), parent_sha: None, is_merge: false, author: None, ts, message: msg.into() },
+            similarity: sim,
+        }
+    }
+
+    #[tokio::test]
+    async fn find_pattern_message_match_breaks_ties() {
+        let now = 1_700_000_000;
+        let storage = Arc::new(FakeStorage {
+            hits: vec![
+                fake_hit_with_msg("a", now - 86400, 0.8, "added retry logic"),
+                fake_hit_with_msg("b", now - 86400, 0.8, "renamed file"),
+            ],
+        });
+        let embedder = Arc::new(FakeEmbedder);
+        let r = Retriever::new(storage, embedder);
+        let q = PatternQuery { query: "retry".into(), k: 5, language: None, since_unix: None };
+        let id = RepoId::from_parts("x", "/y");
+        let out = r.find_pattern(&id, &q, now).await.unwrap();
+        assert_eq!(out[0].commit_sha, "a", "retry-related commit message should win the tie");
     }
 }
