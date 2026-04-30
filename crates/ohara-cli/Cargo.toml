@@ -9,6 +9,9 @@ license.workspace = true
 name = "ohara"
 path = "src/main.rs"
 
+[lib]
+path = "src/lib.rs"
+
 [dependencies]
 ohara-core = { path = "../ohara-core" }
 ohara-storage = { path = "../ohara-storage" }
@@ -20,3 +23,7 @@ clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+git2.workspace = true

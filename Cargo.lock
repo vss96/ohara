@@ -1907,11 +1907,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "git2",
  "ohara-core",
  "ohara-embed",
  "ohara-git",
  "ohara-parse",
  "ohara-storage",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
