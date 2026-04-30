@@ -65,11 +65,44 @@ impl Storage for SqliteStorage {
         let rec = record.clone();
         with_conn(&self.pool, move |c| crate::commit::put(c, &rec)).await
     }
-    async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> CoreResult<()> { unimplemented!() }
-    async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> CoreResult<()> { unimplemented!() }
-    async fn knn_hunks(&self, _: &RepoId, _: &[f32], _: u8, _: Option<&str>, _: Option<i64>) -> CoreResult<Vec<HunkHit>> { unimplemented!() }
-    async fn blob_was_seen(&self, _: &str, _: &str) -> CoreResult<bool> { unimplemented!() }
-    async fn record_blob_seen(&self, _: &str, _: &str) -> CoreResult<()> { unimplemented!() }
+    async fn put_hunks(&self, _repo_id: &RepoId, records: &[HunkRecord]) -> CoreResult<()> {
+        let recs = records.to_vec();
+        with_conn(&self.pool, move |c| crate::hunk::put_many(c, &recs)).await
+    }
+
+    async fn put_head_symbols(&self, _repo_id: &RepoId, _symbols: &[Symbol]) -> CoreResult<()> {
+        // No-op in Plan 1 since find_pattern doesn't read symbols.
+        // Plan 2 will populate symbol + symbol_lineage tables.
+        Ok(())
+    }
+
+    async fn knn_hunks(
+        &self,
+        _repo_id: &RepoId,
+        query_emb: &[f32],
+        k: u8,
+        language: Option<&str>,
+        since_unix: Option<i64>,
+    ) -> CoreResult<Vec<HunkHit>> {
+        let qe = query_emb.to_vec();
+        let lang = language.map(str::to_string);
+        with_conn(&self.pool, move |c| {
+            crate::hunk::knn(c, &qe, k, lang.as_deref(), since_unix)
+        })
+        .await
+    }
+
+    async fn blob_was_seen(&self, blob_sha: &str, model: &str) -> CoreResult<bool> {
+        let blob = blob_sha.to_string();
+        let m = model.to_string();
+        with_conn(&self.pool, move |c| crate::blob_cache::was_seen(c, &blob, &m)).await
+    }
+
+    async fn record_blob_seen(&self, blob_sha: &str, model: &str) -> CoreResult<()> {
+        let blob = blob_sha.to_string();
+        let m = model.to_string();
+        with_conn(&self.pool, move |c| crate::blob_cache::record(c, &blob, &m)).await
+    }
 }
 
 #[cfg(test)]
@@ -154,5 +187,78 @@ mod tests {
         for (i, (a, b)) in original.iter().zip(recovered.iter()).enumerate() {
             assert!((a - b).abs() < 1e-6, "mismatch at index {i}: orig={a}, got={b}");
         }
+    }
+
+    use ohara_core::types::{ChangeKind, Hunk};
+
+    async fn fixture_storage_with_repo() -> (tempfile::TempDir, SqliteStorage, RepoId) {
+        let dir = tempfile::tempdir().unwrap();
+        let s = SqliteStorage::open(dir.path().join("i.sqlite")).await.unwrap();
+        let id = RepoId::from_parts("first", "/repo");
+        s.open_repo(&id, "/repo", "first").await.unwrap();
+        (dir, s, id)
+    }
+
+    #[tokio::test]
+    async fn put_hunks_creates_file_paths_and_vec_rows() {
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+
+        let cm = CommitMeta { sha: "c1".into(), parent_sha: None, is_merge: false, author: None, ts: 1, message: "m".into() };
+        s.put_commit(&id, &CommitRecord { meta: cm, message_emb: vec![0.0; 384] }).await.unwrap();
+
+        let h = HunkRecord {
+            hunk: Hunk {
+                commit_sha: "c1".into(),
+                file_path: "src/x.rs".into(),
+                language: Some("rust".into()),
+                change_kind: ChangeKind::Added,
+                diff_text: "+fn x() {}\n".into(),
+            },
+            diff_emb: vec![0.5f32; 384],
+        };
+        s.put_hunks(&id, &[h]).await.unwrap();
+
+        let pool = s.pool().clone();
+        let n: i64 = pool.get().await.unwrap()
+            .interact(|c| c.query_row("SELECT count(*) FROM hunk", [], |r| r.get(0)))
+            .await.unwrap().unwrap();
+        assert_eq!(n, 1);
+        let vn: i64 = pool.get().await.unwrap()
+            .interact(|c| c.query_row("SELECT count(*) FROM vec_hunk", [], |r| r.get(0)))
+            .await.unwrap().unwrap();
+        assert_eq!(vn, 1);
+    }
+
+    #[tokio::test]
+    async fn knn_hunks_returns_nearest() {
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        let cm = CommitMeta { sha: "c1".into(), parent_sha: None, is_merge: false, author: None, ts: 1, message: "m".into() };
+        s.put_commit(&id, &CommitRecord { meta: cm, message_emb: vec![0.0; 384] }).await.unwrap();
+
+        let mk_hunk = |emb_val: f32, name: &str| HunkRecord {
+            hunk: Hunk {
+                commit_sha: "c1".into(),
+                file_path: format!("src/{name}.rs"),
+                language: Some("rust".into()),
+                change_kind: ChangeKind::Added,
+                diff_text: format!("+fn {name}() {{}}\n"),
+            },
+            diff_emb: vec![emb_val; 384],
+        };
+        s.put_hunks(&id, &[mk_hunk(0.1, "a"), mk_hunk(0.5, "b"), mk_hunk(0.9, "c")]).await.unwrap();
+
+        let q = vec![0.49f32; 384];
+        let hits = s.knn_hunks(&id, &q, 2, None, None).await.unwrap();
+        assert_eq!(hits.len(), 2);
+        assert!(hits[0].hunk.file_path.ends_with("b.rs"));
+    }
+
+    #[tokio::test]
+    async fn blob_cache_round_trips() {
+        let (_dir, s, _id) = fixture_storage_with_repo().await;
+        assert!(!s.blob_was_seen("blob1", "bge-small-v1.5").await.unwrap());
+        s.record_blob_seen("blob1", "bge-small-v1.5").await.unwrap();
+        assert!(s.blob_was_seen("blob1", "bge-small-v1.5").await.unwrap());
+        assert!(!s.blob_was_seen("blob1", "voyage-code-3").await.unwrap());
     }
 }

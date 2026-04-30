@@ -1,6 +1,8 @@
 //! SQLite + sqlite-vec implementation of `ohara_core::Storage`.
 
+pub mod blob_cache;
 pub mod commit;
+pub mod hunk;
 pub mod migrations;
 pub mod pool;
 pub mod repo;
