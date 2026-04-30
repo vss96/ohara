@@ -1949,9 +1949,11 @@ name = "ohara-git"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "git2",
  "ohara-core",
  "tempfile",
+ "tokio",
  "tracing",
 ]
 
