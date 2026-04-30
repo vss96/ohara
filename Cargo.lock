@@ -1906,6 +1906,7 @@ name = "ohara-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "git2",
  "ohara-core",
@@ -1913,6 +1914,7 @@ dependencies = [
  "ohara-git",
  "ohara-parse",
  "ohara-storage",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",
