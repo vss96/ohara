@@ -119,4 +119,40 @@ mod tests {
             .await.unwrap().unwrap();
         assert_eq!(vec_count, 1);
     }
+
+    #[tokio::test]
+    async fn put_commit_embedding_round_trips_through_sqlite() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = SqliteStorage::open(dir.path().join("i.sqlite")).await.unwrap();
+        let id = RepoId::from_parts("first", "/repo");
+        s.open_repo(&id, "/repo", "first").await.unwrap();
+
+        let original: Vec<f32> = (0..384).map(|i| (i as f32) * 0.001 - 0.2).collect();
+        let cm = CommitMeta {
+            sha: "rt".into(),
+            parent_sha: None,
+            is_merge: false,
+            author: None,
+            ts: 1_700_000_000,
+            message: "rt".into(),
+        };
+        s.put_commit(&id, &CommitRecord { meta: cm, message_emb: original.clone() }).await.unwrap();
+
+        let pool = s.pool().clone();
+        let recovered: Vec<f32> = pool.get().await.unwrap()
+            .interact(|c| {
+                let bytes: Vec<u8> = c.query_row(
+                    "SELECT message_emb FROM vec_commit WHERE commit_sha = 'rt'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                Ok::<_, rusqlite::Error>(crate::vec_codec::bytes_to_vec(&bytes))
+            })
+            .await.unwrap().unwrap();
+
+        assert_eq!(recovered.len(), 384);
+        for (i, (a, b)) in original.iter().zip(recovered.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-6, "mismatch at index {i}: orig={a}, got={b}");
+        }
+    }
 }
