@@ -1979,7 +1979,10 @@ name = "ohara-parse"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "git2",
  "ohara-core",
+ "tokio",
  "tracing",
  "tree-sitter",
  "tree-sitter-python",

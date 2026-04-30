@@ -12,3 +12,6 @@ tree-sitter.workspace = true
 tree-sitter-rust.workspace = true
 tree-sitter-python.workspace = true
 tracing.workspace = true
+async-trait = "0.1"
+tokio.workspace = true
+git2.workspace = true
