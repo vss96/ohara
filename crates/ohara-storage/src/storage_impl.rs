@@ -18,7 +18,7 @@ impl SqliteStorage {
     pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let pool = SqlitePoolBuilder::new(path).build().await?;
         let conn = pool.get().await?;
-        conn.interact(|c| migrations::run(c))
+        conn.interact(migrations::run)
             .await
             .map_err(|e| anyhow::anyhow!("interact: {e}"))??;
         Ok(Self { pool })
@@ -27,45 +27,38 @@ impl SqliteStorage {
     pub fn pool(&self) -> &Pool { &self.pool }
 }
 
+async fn with_conn<F, T>(pool: &deadpool_sqlite::Pool, f: F) -> ohara_core::Result<T>
+where
+    F: FnOnce(&mut rusqlite::Connection) -> anyhow::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    pool.get()
+        .await
+        .map_err(|e| ohara_core::OhraError::Storage(e.to_string()))?
+        .interact(f)
+        .await
+        .map_err(|e| ohara_core::OhraError::Storage(e.to_string()))?
+        .map_err(|e| ohara_core::OhraError::Storage(e.to_string()))
+}
+
 #[async_trait::async_trait]
 impl Storage for SqliteStorage {
     async fn open_repo(&self, repo_id: &RepoId, path: &str, first_commit_sha: &str) -> CoreResult<()> {
         let id = repo_id.as_str().to_string();
         let path = path.to_string();
         let fcs = first_commit_sha.to_string();
-        self.pool
-            .get()
-            .await
-            .map_err(|e| ohara_core::OhraError::Storage(e.to_string()))?
-            .interact(move |c| repo::upsert(c, &id, &path, &fcs))
-            .await
-            .map_err(|e| ohara_core::OhraError::Storage(e.to_string()))?
-            .map_err(|e| ohara_core::OhraError::Storage(e.to_string()))
+        with_conn(&self.pool, move |c| repo::upsert(c, &id, &path, &fcs)).await
     }
 
     async fn get_index_status(&self, repo_id: &RepoId) -> CoreResult<IndexStatus> {
         let id = repo_id.as_str().to_string();
-        self.pool
-            .get()
-            .await
-            .map_err(|e| ohara_core::OhraError::Storage(e.to_string()))?
-            .interact(move |c| repo::get_status(c, &id))
-            .await
-            .map_err(|e| ohara_core::OhraError::Storage(e.to_string()))?
-            .map_err(|e| ohara_core::OhraError::Storage(e.to_string()))
+        with_conn(&self.pool, move |c| repo::get_status(c, &id)).await
     }
 
     async fn set_last_indexed_commit(&self, repo_id: &RepoId, sha: &str) -> CoreResult<()> {
         let id = repo_id.as_str().to_string();
         let sha = sha.to_string();
-        self.pool
-            .get()
-            .await
-            .map_err(|e| ohara_core::OhraError::Storage(e.to_string()))?
-            .interact(move |c| repo::set_watermark(c, &id, &sha))
-            .await
-            .map_err(|e| ohara_core::OhraError::Storage(e.to_string()))?
-            .map_err(|e| ohara_core::OhraError::Storage(e.to_string()))
+        with_conn(&self.pool, move |c| repo::set_watermark(c, &id, &sha)).await
     }
 
     async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> CoreResult<()> {
