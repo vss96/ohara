@@ -61,9 +61,9 @@ impl Storage for SqliteStorage {
         with_conn(&self.pool, move |c| repo::set_watermark(c, &id, &sha)).await
     }
 
-    async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> CoreResult<()> {
-        // populated in Task 8
-        unimplemented!()
+    async fn put_commit(&self, _repo_id: &RepoId, record: &CommitRecord) -> CoreResult<()> {
+        let rec = record.clone();
+        with_conn(&self.pool, move |c| crate::commit::put(c, &rec)).await
     }
     async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> CoreResult<()> { unimplemented!() }
     async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> CoreResult<()> { unimplemented!() }
@@ -87,5 +87,36 @@ mod tests {
         s.set_last_indexed_commit(&id, "abc").await.unwrap();
         let st2 = s.get_index_status(&id).await.unwrap();
         assert_eq!(st2.last_indexed_commit.as_deref(), Some("abc"));
+    }
+
+    use ohara_core::types::CommitMeta;
+
+    #[tokio::test]
+    async fn put_commit_persists_meta_and_embedding() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = SqliteStorage::open(dir.path().join("i.sqlite")).await.unwrap();
+        let id = RepoId::from_parts("first", "/repo");
+        s.open_repo(&id, "/repo", "first").await.unwrap();
+
+        let cm = CommitMeta {
+            sha: "abc".into(),
+            parent_sha: None,
+            is_merge: false,
+            author: Some("alice".into()),
+            ts: 1_700_000_000,
+            message: "first commit".into(),
+        };
+        let emb = vec![0.1f32; 384];
+        s.put_commit(&id, &CommitRecord { meta: cm.clone(), message_emb: emb }).await.unwrap();
+
+        let pool = s.pool().clone();
+        let count: i64 = pool.get().await.unwrap()
+            .interact(|c| c.query_row("SELECT count(*) FROM commit_record", [], |r| r.get(0)))
+            .await.unwrap().unwrap();
+        assert_eq!(count, 1);
+        let vec_count: i64 = pool.get().await.unwrap()
+            .interact(|c| c.query_row("SELECT count(*) FROM vec_commit", [], |r| r.get(0)))
+            .await.unwrap().unwrap();
+        assert_eq!(vec_count, 1);
     }
 }
