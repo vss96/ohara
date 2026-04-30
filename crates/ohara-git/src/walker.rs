@@ -13,12 +13,18 @@ impl GitWalker {
         Ok(Self { repo })
     }
 
+    /// Walk first-parent chain from HEAD to the topological root commit.
+    ///
+    /// Used for `RepoId::from_parts` — chosen over author-time-oldest because
+    /// rebases and grafted histories can rewrite author dates, while the
+    /// first-parent topological root is stable across those operations.
     pub fn first_commit_sha(&self) -> Result<String> {
-        let mut walk = self.repo.revwalk()?;
-        walk.set_sorting(Sort::TIME | Sort::REVERSE)?;
-        walk.push_head()?;
-        let oid = walk.next().context("empty repo")??;
-        Ok(oid.to_string())
+        let head = self.repo.head().context("HEAD missing")?;
+        let mut commit = head.peel_to_commit().context("HEAD is not a commit")?;
+        while commit.parent_count() > 0 {
+            commit = commit.parent(0).context("first-parent walk failed")?;
+        }
+        Ok(commit.id().to_string())
     }
 
     pub fn list_commits(&self, since: Option<&str>) -> Result<Vec<CommitMeta>> {
@@ -34,9 +40,11 @@ impl GitWalker {
         for oid in walk {
             let oid = oid?;
             let c = self.repo.find_commit(oid)?;
-            let parent_sha = c.parent_count().checked_sub(1).map(|_| c.parent(0).ok())
-                .flatten()
-                .map(|p| p.id().to_string());
+            let parent_sha = if c.parent_count() > 0 {
+                c.parent(0).ok().map(|p| p.id().to_string())
+            } else {
+                None
+            };
             out.push(CommitMeta {
                 sha: oid.to_string(),
                 parent_sha,
@@ -96,5 +104,18 @@ mod tests {
         let after = w.list_commits(Some(mid)).unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].message.trim(), "c");
+    }
+
+    #[test]
+    fn first_commit_sha_walks_to_topological_root() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo_with_commits(dir.path(), &["root", "second", "third"]);
+        let w = GitWalker::open(dir.path()).unwrap();
+        let first = w.first_commit_sha().unwrap();
+        let cs = w.list_commits(None).unwrap();
+        // The root commit (cs[0] in topological-reverse order) is the one without a parent.
+        assert_eq!(first, cs[0].sha);
+        assert!(cs[0].parent_sha.is_none(), "root commit should have no parent");
+        assert!(cs[1].parent_sha.is_some(), "non-root commit should have a parent");
     }
 }
