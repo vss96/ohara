@@ -47,3 +47,59 @@ mod tests {
         assert_ne!(a, b);
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChangeKind {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum Provenance {
+    Extracted,
+    Inferred,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SymbolKind {
+    Function,
+    Method,
+    Class,
+    Const,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitMeta {
+    pub sha: String,
+    pub parent_sha: Option<String>,
+    pub is_merge: bool,
+    pub author: Option<String>,
+    pub ts: i64,             // unix seconds
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Hunk {
+    pub commit_sha: String,
+    pub file_path: String,
+    pub language: Option<String>,
+    pub change_kind: ChangeKind,
+    pub diff_text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Symbol {
+    pub file_path: String,
+    pub language: String,
+    pub kind: SymbolKind,
+    pub name: String,
+    pub qualified_name: Option<String>,
+    pub span_start: u32,
+    pub span_end: u32,
+    pub blob_sha: String,
+    pub source_text: String,
+}
