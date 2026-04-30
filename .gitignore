@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+.DS_Store
+
+# Build artifacts under fixtures (the repos themselves are scripted, not committed)
+/fixtures/*/repo
+
+# Local index data
+.ohara/

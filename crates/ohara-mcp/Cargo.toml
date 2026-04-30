@@ -1,0 +1,23 @@
+[package]
+name = "ohara-mcp"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ohara-mcp"
+path = "src/main.rs"
+
+[dependencies]
+ohara-core = { path = "../ohara-core" }
+ohara-storage = { path = "../ohara-storage" }
+ohara-embed = { path = "../ohara-embed" }
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true

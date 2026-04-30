@@ -1,0 +1,12 @@
+[package]
+name = "ohara-git"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+ohara-core = { path = "../ohara-core" }
+anyhow.workspace = true
+git2.workspace = true
+tracing.workspace = true

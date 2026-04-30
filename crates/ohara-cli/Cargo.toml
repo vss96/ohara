@@ -1,0 +1,22 @@
+[package]
+name = "ohara-cli"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ohara"
+path = "src/main.rs"
+
+[dependencies]
+ohara-core = { path = "../ohara-core" }
+ohara-storage = { path = "../ohara-storage" }
+ohara-embed = { path = "../ohara-embed" }
+ohara-git = { path = "../ohara-git" }
+ohara-parse = { path = "../ohara-parse" }
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

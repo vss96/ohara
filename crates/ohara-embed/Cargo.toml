@@ -1,0 +1,13 @@
+[package]
+name = "ohara-embed"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+ohara-core = { path = "../ohara-core" }
+anyhow.workspace = true
+fastembed.workspace = true
+async-trait = "0.1"
+tracing.workspace = true
