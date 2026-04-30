@@ -13,6 +13,7 @@ path = "src/main.rs"
 ohara-core = { path = "../ohara-core" }
 ohara-storage = { path = "../ohara-storage" }
 ohara-embed = { path = "../ohara-embed" }
+ohara-git = { path = "../ohara-git" }
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -21,3 +22,5 @@ rmcp.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+async-trait = "0.1"
+chrono.workspace = true
