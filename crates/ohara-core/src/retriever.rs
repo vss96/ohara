@@ -71,14 +71,28 @@ impl Retriever {
                 }
             })
             .collect();
-        out.sort_by(|a, b| b.combined_score.partial_cmp(&a.combined_score).unwrap());
+        out.sort_by(|a, b| {
+            b.combined_score
+                .partial_cmp(&a.combined_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         out
     }
 }
 
 fn truncate_diff(s: &str, max_lines: usize) -> (String, bool) {
-    let mut count = 0;
+    // Count total lines, treating a trailing partial line (no \n) as a line.
+    let nl = s.bytes().filter(|&b| b == b'\n').count();
+    let has_trailing_partial = !s.is_empty() && !s.ends_with('\n');
+    let total_lines = nl + if has_trailing_partial { 1 } else { 0 };
+
+    if total_lines <= max_lines {
+        return (s.to_string(), false);
+    }
+
+    // Find byte index of the end of line `max_lines`.
     let mut end = 0;
+    let mut count = 0;
     for (i, b) in s.bytes().enumerate() {
         if b == b'\n' {
             count += 1;
@@ -88,11 +102,8 @@ fn truncate_diff(s: &str, max_lines: usize) -> (String, bool) {
             }
         }
     }
-    if count < max_lines {
-        return (s.to_string(), false);
-    }
-    let total_lines = s.bytes().filter(|&b| b == b'\n').count();
-    let extra = total_lines.saturating_sub(max_lines);
+
+    let extra = total_lines - max_lines;
     let mut out = s[..end].to_string();
     out.push_str(&format!("... ({} more lines)\n", extra));
     (out, true)
@@ -182,5 +193,43 @@ mod tests {
         let (out, trunc) = super::truncate_diff(small, 80);
         assert!(!trunc);
         assert_eq!(out, small);
+    }
+
+    #[test]
+    fn truncate_does_not_pad_at_exact_boundary() {
+        // When input has exactly max_lines lines and ends with newline, no truncation.
+        let exact = "a\nb\nc\n";
+        let (out, trunc) = super::truncate_diff(exact, 3);
+        assert!(!trunc);
+        assert_eq!(out, exact);
+    }
+
+    #[test]
+    fn truncate_counts_trailing_partial_line() {
+        // Input has 3 newlines + a trailing partial line ("d"). Total = 4 lines.
+        // With max_lines=3, expect truncation reporting 1 more line elided.
+        let with_partial = "a\nb\nc\nd";
+        let (out, trunc) = super::truncate_diff(with_partial, 3);
+        assert!(trunc);
+        assert!(out.contains("(1 more lines)"));
+        assert!(out.starts_with("a\nb\nc\n"));
+    }
+
+    #[test]
+    fn rank_does_not_panic_on_nan_scores() {
+        let now = 1_700_000_000;
+        // Create hits with f32::NAN as the similarity. The combined_score formula
+        // includes 0.7 * similarity, which propagates NaN.
+        let hits = vec![
+            fake_hit("a", now, f32::NAN, "+x"),
+            fake_hit("b", now, 0.5, "+y"),
+        ];
+        let msg_sims = vec![0.0, 0.0];
+        // Should NOT panic. Order of NaN entries is implementation-defined (Equal).
+        let out = retriever_for_test().rank_hits(hits, &msg_sims, now);
+        assert_eq!(out.len(), 2);
+        // The non-NaN entry should still have a finite combined_score.
+        let finite_count = out.iter().filter(|h| h.combined_score.is_finite()).count();
+        assert_eq!(finite_count, 1);
     }
 }
