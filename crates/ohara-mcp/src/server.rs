@@ -4,13 +4,13 @@ use ohara_core::{EmbeddingProvider, Retriever, Storage};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-// Fields are read by Task 18's tool wiring; suppressed here so the stub crate
-// stays clippy-clean during the skeleton commit.
-#[allow(dead_code)]
 pub struct OharaServer {
     pub repo_id: RepoId,
     pub repo_path: PathBuf,
     pub storage: Arc<dyn Storage>,
+    /// Kept alive so the FastEmbed model held inside `retriever` stays loaded
+    /// for the lifetime of the server. Not read directly.
+    #[allow(dead_code)]
     pub embedder: Arc<dyn EmbeddingProvider>,
     pub retriever: Retriever,
 }
@@ -41,8 +41,6 @@ impl OharaServer {
         crate::tools::serve(self).await
     }
 
-    // Used by Task 18's find_pattern tool wiring.
-    #[allow(dead_code)]
     pub async fn index_status_meta(&self) -> Result<ohara_core::query::ResponseMeta> {
         let st = self.storage.get_index_status(&self.repo_id).await?;
         let walker = ohara_git::GitWalker::open(&self.repo_path)?;
