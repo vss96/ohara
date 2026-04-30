@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
-use deadpool_sqlite::{Config, Pool, Runtime};
+use deadpool_sqlite::{Config, Hook, HookError, Manager, Metrics, Pool, Runtime};
 use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Once;
 
 static VEC_AUTO_EXT_REGISTERED: Once = Once::new();
+static VEC_AUTO_EXT_RC: std::sync::OnceLock<std::os::raw::c_int> = std::sync::OnceLock::new();
 
 pub struct SqlitePoolBuilder {
     path: std::path::PathBuf,
@@ -22,20 +23,34 @@ impl SqlitePoolBuilder {
         // Register sqlite-vec as a sqlite auto-extension exactly once per process so every
         // connection (current and future, including ones the pool lazily opens) gets the
         // `vec0` virtual table and `vec_version()` SQL function.
-        register_vec_auto_extension();
+        register_vec_auto_extension()?;
         let cfg = Config::new(&self.path);
-        let pool = cfg.create_pool(Runtime::Tokio1).context("create sqlite pool")?;
-        // Apply pragmas on each connection by running it once on a checkout. Pragmas like
-        // journal_mode=WAL persist on the database file, so a single application is enough.
-        let conn = pool.get().await.context("checkout from pool")?;
-        conn.interact(|c| {
-            apply_pragmas(c)?;
-            // Sanity-check the auto-extension actually registered on this connection.
-            load_vec_extension(c)?;
-            Ok::<_, anyhow::Error>(())
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("interact: {e}"))??;
+        let manager = Manager::from_config(&cfg, Runtime::Tokio1);
+        // Apply pragmas via a `post_create` hook so they run on every connection
+        // the pool creates, not just the first checkout. Per-connection settings
+        // like `synchronous`, `mmap_size`, `cache_size`, `temp_store`, and
+        // `foreign_keys` do NOT persist on the database file — only `journal_mode=WAL`
+        // does. Without this hook, lazily-created connections silently inherit
+        // SQLite defaults for everything else.
+        let pool = Pool::builder(manager)
+            .config(cfg.get_pool_config())
+            .runtime(Runtime::Tokio1)
+            .post_create(Hook::async_fn(|conn, _: &Metrics| {
+                Box::pin(async move {
+                    conn.interact(|c| {
+                        apply_pragmas(c)?;
+                        // Sanity-check the auto-extension actually registered on this connection.
+                        load_vec_extension(c)?;
+                        Ok::<_, anyhow::Error>(())
+                    })
+                    .await
+                    .map_err(|e| HookError::message(format!("interact: {e}")))?
+                    .map_err(|e| HookError::message(e.to_string()))?;
+                    Ok(())
+                })
+            }))
+            .build()
+            .map_err(|e| anyhow::anyhow!("build pool: {e}"))?;
         Ok(pool)
     }
 }
@@ -52,12 +67,12 @@ pub(crate) fn apply_pragmas(c: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Registers `sqlite3_vec_init` as a sqlite auto-extension. After this returns, every
-/// SQLite connection opened in the process has `vec_version()` and `vec0` available.
-/// Idempotent across calls.
-pub(crate) fn register_vec_auto_extension() {
+/// Registers `sqlite3_vec_init` as a sqlite auto-extension. After this returns successfully,
+/// every SQLite connection opened in the process has `vec_version()` and `vec0` available.
+/// Idempotent across calls; the registration result is cached and replayed on subsequent calls.
+pub(crate) fn register_vec_auto_extension() -> Result<()> {
     VEC_AUTO_EXT_REGISTERED.call_once(|| {
-        unsafe {
+        let rc = unsafe {
             // `sqlite3_auto_extension` takes an `Option<unsafe extern "C" fn() -> c_int>`.
             // `sqlite_vec::sqlite3_vec_init` is declared as `extern "C" fn()`, so transmute
             // through a function pointer to satisfy the FFI signature.
@@ -70,9 +85,16 @@ pub(crate) fn register_vec_auto_extension() {
                 ) -> std::os::raw::c_int,
             >(
                 sqlite_vec::sqlite3_vec_init as *const (),
-            )));
-        }
+            )))
+        };
+        let _ = VEC_AUTO_EXT_RC.set(rc);
     });
+    let rc = VEC_AUTO_EXT_RC.get().copied().unwrap_or(rusqlite::ffi::SQLITE_OK);
+    if rc == rusqlite::ffi::SQLITE_OK {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("sqlite3_auto_extension returned rc={rc}"))
+    }
 }
 
 /// Verifies the vec extension is callable on the given connection. The actual registration
