@@ -32,7 +32,7 @@ deadpool-sqlite = "0.8"
 rusqlite = { version = "0.31", features = ["bundled", "load_extension", "blob"] }
 sqlite-vec = "0.1"
 refinery = { version = "0.8", features = ["rusqlite"] }
-fastembed = "4"
+fastembed = "~4.9"
 git2 = { version = "0.18", default-features = false }
 tree-sitter = "0.22"
 tree-sitter-rust = "0.21"

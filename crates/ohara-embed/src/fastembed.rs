@@ -1,4 +1,10 @@
-use anyhow::Result;
+//! BGE-small-en-v1.5 (384d) embedding provider over fastembed-rs.
+//!
+//! Concurrency: `embed_batch` offloads the ONNX forward pass to
+//! `tokio::task::spawn_blocking` and serializes access to the model
+//! via `tokio::sync::Mutex` (see field comment for rationale).
+
+use anyhow::{Context, Result};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use ohara_core::{EmbeddingProvider, Result as CoreResult};
 use std::sync::Arc;
@@ -8,6 +14,8 @@ const DEFAULT_MODEL_ID: &str = "bge-small-en-v1.5";
 const DEFAULT_DIM: usize = 384;
 
 pub struct FastEmbedProvider {
+    // Mutex serializes access: fastembed 4.9 holds mutable tokenizer/batch
+    // state inside `embed(&self, ...)` and concurrent calls are not audited.
     model: Arc<Mutex<TextEmbedding>>,
     model_id: String,
     dim: usize,
@@ -21,7 +29,8 @@ impl FastEmbedProvider {
         // which preserves the plan's intent: load BGE small with downloads silent.
         let opts = InitOptions::new(EmbeddingModel::BGESmallENV15)
             .with_show_download_progress(false);
-        let model = TextEmbedding::try_new(opts)?;
+        let model = TextEmbedding::try_new(opts)
+            .context("loading BGE-small model (downloads ~80MB on first run)")?;
         Ok(Self { model: Arc::new(Mutex::new(model)), model_id: DEFAULT_MODEL_ID.into(), dim: DEFAULT_DIM })
     }
 }
