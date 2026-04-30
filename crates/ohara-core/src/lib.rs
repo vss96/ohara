@@ -6,6 +6,7 @@
 
 pub mod embed;
 pub mod error;
+pub mod indexer;
 pub mod query;
 pub mod retriever;
 pub mod storage;
@@ -13,6 +14,7 @@ pub mod types;
 
 pub use embed::EmbeddingProvider;
 pub use error::{OhraError, Result};
+pub use indexer::{CommitSource, Indexer, IndexerReport, SymbolSource};
 pub use query::*;
 pub use retriever::{RankingWeights, Retriever};
 pub use storage::{CommitRecord, HunkHit, HunkRecord, Storage, Vector};
