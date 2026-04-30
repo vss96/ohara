@@ -18,3 +18,7 @@ sqlite-vec.workspace = true
 refinery.workspace = true
 async-trait = "0.1"
 chrono.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true }
