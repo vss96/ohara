@@ -664,6 +664,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_commit_returns_none_for_unindexed_sha() {
+        // Plan 5 / Task 2.r: explain_change skips unindexed commits, so the
+        // storage layer must surface "not found" as Ok(None) (not an error).
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        let out = s.get_commit(&id, "deadbeefnonexistent").await.unwrap();
+        assert!(out.is_none(), "unindexed sha must return Ok(None)");
+    }
+
+    #[tokio::test]
     async fn bm25_hunks_by_text_returns_empty_for_no_match() {
         let (_dir, s, id) = fixture_storage_with_repo().await;
         seed_hunks_with_texts(
