@@ -55,6 +55,7 @@ async fn find_pattern_returns_retry_commit_first() {
         k: 5,
         language: None,
         since_unix: None,
+        no_rerank: false,
     };
     let now = chrono::Utc::now().timestamp();
     let hits = retriever.find_pattern(&repo_id, &q, now).await.unwrap();

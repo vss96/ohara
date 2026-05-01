@@ -173,9 +173,9 @@ impl Retriever {
         //    reranker), every candidate gets score 1.0 so the surviving
         //    sort order is RRF, modulated by the recency multiplier.
         let candidates: Vec<&str> = hits.iter().map(|h| h.hunk.diff_text.as_str()).collect();
-        let rerank_scores: Vec<f32> = match &self.reranker {
-            Some(r) => r.rerank(&query.query, &candidates).await?,
-            None => vec![1.0_f32; candidates.len()],
+        let rerank_scores: Vec<f32> = match (&self.reranker, query.no_rerank) {
+            (Some(r), false) => r.rerank(&query.query, &candidates).await?,
+            _ => vec![1.0_f32; candidates.len()],
         };
 
         // 6. Recency multiplier as a tie-breaker on the rerank score, then
@@ -465,6 +465,7 @@ mod tests {
             k: 5,
             language: None,
             since_unix: None,
+            no_rerank: false,
         };
         let id = RepoId::from_parts("x", "/y");
         let out = r.find_pattern(&id, &q, now).await.unwrap();
@@ -506,6 +507,7 @@ mod tests {
             k: 5,
             language: None,
             since_unix: None,
+            no_rerank: false,
         };
         let id = RepoId::from_parts("x", "/y");
         let out = r.find_pattern(&id, &q, now).await.unwrap();
@@ -534,6 +536,7 @@ mod tests {
             k: 5,
             language: None,
             since_unix: None,
+            no_rerank: false,
         };
         let id = RepoId::from_parts("x", "/y");
         let out = r.find_pattern(&id, &q, now).await.unwrap();

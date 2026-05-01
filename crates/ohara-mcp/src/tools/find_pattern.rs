@@ -48,6 +48,11 @@ pub struct FindPatternInput {
     /// Optional ISO date or relative ("30d") lower bound on commit age.
     #[serde(default)]
     pub since: Option<String>,
+    /// Skip the cross-encoder rerank stage. Faster (no model invocation)
+    /// at the cost of slightly lower precision on the top result.
+    /// Defaults to false — rerank is on by default.
+    #[serde(default)]
+    pub no_rerank: bool,
 }
 
 fn default_k() -> u8 {
@@ -81,6 +86,7 @@ impl OharaService {
             k: input.k.clamp(1, 20),
             language: input.language,
             since_unix,
+            no_rerank: input.no_rerank,
         };
         let now = chrono::Utc::now().timestamp();
         let hits = self

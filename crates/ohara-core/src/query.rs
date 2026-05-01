@@ -11,6 +11,12 @@ pub struct PatternQuery {
     pub k: u8,
     pub language: Option<String>,
     pub since_unix: Option<i64>,
+    /// Skip the cross-encoder rerank stage even if the Retriever has a
+    /// reranker attached. Returns post-RRF ordering with the recency
+    /// multiplier still applied. Used by MCP's `no_rerank` flag for
+    /// callers that want fast, deterministic results.
+    #[serde(default)]
+    pub no_rerank: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
