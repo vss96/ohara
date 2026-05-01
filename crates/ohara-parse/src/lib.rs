@@ -95,6 +95,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn extract_for_path_routes_kt_and_kts_to_kotlin_module() {
+        // Plan 4 / Task 11: both .kt (production source) and .kts
+        // (script) extensions must route through kotlin::extract.
+        for path in &["Foo.kt", "build.gradle.kts"] {
+            let src = "class Foo { fun bar() {} }\n";
+            let chunks = extract_for_path(path, src, "deadbeef").expect("extract");
+            assert!(
+                !chunks.is_empty(),
+                "expected at least one chunk for {path}, got {chunks:?}"
+            );
+            assert!(
+                chunks.iter().all(|s| s.language == "kotlin"),
+                "all chunks for {path} should carry language=kotlin"
+            );
+        }
+    }
+
+    #[test]
     fn extract_for_path_routes_java_to_java_module() {
         // Plan 4 / Task 6: a .java path must route through java::extract
         // and produce at least one symbol. We assert via the language
