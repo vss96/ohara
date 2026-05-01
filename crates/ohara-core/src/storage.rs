@@ -3,6 +3,7 @@ use crate::types::{CommitMeta, Hunk, RepoId, Symbol};
 use crate::Result;
 use async_trait::async_trait;
 
+
 /// Vector with the same dimension as `EmbeddingProvider::dimension()`.
 pub type Vector = Vec<f32>;
 
@@ -90,4 +91,20 @@ pub trait Storage: Send + Sync {
     async fn blob_was_seen(&self, blob_sha: &str, embedding_model: &str) -> Result<bool>;
 
     async fn record_blob_seen(&self, blob_sha: &str, embedding_model: &str) -> Result<()>;
+
+    /// Fetch a single commit's metadata. Returns `Ok(None)` if the SHA
+    /// isn't indexed (e.g., commit is older than the watermark). Used by
+    /// the `explain_change` orchestrator (Plan 5) to enrich blame results
+    /// with commit message + author + date for display.
+    async fn get_commit(&self, repo_id: &RepoId, sha: &str) -> Result<Option<CommitMeta>>;
+
+    /// Fetch the hunks of a commit that touch a specific file path. Used
+    /// by `explain_change` (Plan 5) to attach a diff excerpt per blame
+    /// hit. JOINs `hunk` against `file_path` filtered by sha + path.
+    async fn get_hunks_for_file_in_commit(
+        &self,
+        repo_id: &RepoId,
+        sha: &str,
+        file_path: &str,
+    ) -> Result<Vec<Hunk>>;
 }

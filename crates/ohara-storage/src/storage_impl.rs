@@ -5,7 +5,7 @@ use deadpool_sqlite::Pool;
 use ohara_core::{
     query::IndexStatus,
     storage::{CommitRecord, HunkHit, HunkRecord, Storage},
-    types::{RepoId, Symbol},
+    types::{CommitMeta, Hunk, RepoId, Symbol},
     Result as CoreResult,
 };
 use std::path::Path;
@@ -155,6 +155,25 @@ impl Storage for SqliteStorage {
         let blob = blob_sha.to_string();
         let m = model.to_string();
         with_conn(&self.pool, move |c| crate::blob_cache::record(c, &blob, &m)).await
+    }
+
+    async fn get_commit(
+        &self,
+        _repo_id: &RepoId,
+        _sha: &str,
+    ) -> CoreResult<Option<CommitMeta>> {
+        // Plan 5 / Task 1: trait scaffolding only; real impl lands in Task 2.
+        unimplemented!("Storage::get_commit is implemented in Plan 5 Task 2")
+    }
+
+    async fn get_hunks_for_file_in_commit(
+        &self,
+        _repo_id: &RepoId,
+        _sha: &str,
+        _file_path: &str,
+    ) -> CoreResult<Vec<Hunk>> {
+        // Plan 5 / Task 1: trait scaffolding only; real impl lands in Task 3.
+        unimplemented!("Storage::get_hunks_for_file_in_commit is implemented in Plan 5 Task 3")
     }
 }
 
