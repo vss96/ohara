@@ -32,11 +32,20 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         .open_repo(&repo_id, &canonical.to_string_lossy(), &first_commit)
         .await?;
 
+    // --force: clear existing HEAD symbol rows so the v0.3 AST sibling-merge
+    // chunker (Track C) can repopulate without duplicates. The watermark and
+    // commit/hunk history are untouched — only HEAD-snapshot symbols are
+    // re-extracted. `force` wins over `incremental`.
+    if args.force {
+        tracing::info!("force: clearing existing HEAD symbol rows");
+        storage.clear_head_symbols(&repo_id).await?;
+    }
+
     // Fast path: when --incremental is set and storage's last_indexed_commit
     // matches HEAD, return immediately without booting the FastEmbed model
     // (which costs ~hundreds of ms even when cached). This is what makes the
     // post-commit hook nearly free on no-op re-indexes.
-    if args.incremental {
+    if args.incremental && !args.force {
         let st = storage.get_index_status(&repo_id).await?;
         let walker = ohara_git::GitWalker::open(&canonical)?;
         let head = walker.head_commit_sha()?;

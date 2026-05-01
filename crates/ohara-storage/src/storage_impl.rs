@@ -80,9 +80,18 @@ impl Storage for SqliteStorage {
     async fn put_head_symbols(&self, _repo_id: &RepoId, symbols: &[Symbol]) -> CoreResult<()> {
         // Plan 3 / Track A: persist symbols + mirror into fts_symbol_name so
         // the BM25-by-symbol-name lane has rows to match against. Track C
-        // will later wire `Symbol::sibling_names` through this path.
+        // wires `Symbol::sibling_names` through this path.
         let syms = symbols.to_vec();
         with_conn(&self.pool, move |c| crate::symbol::put_many(c, &syms)).await
+    }
+
+    async fn clear_head_symbols(&self, _repo_id: &RepoId) -> CoreResult<()> {
+        // Plan 3 / Track D: drop all symbol rows + their FTS5 mirror so a
+        // subsequent put_head_symbols (driven by `ohara index --force`)
+        // doesn't double-count. The symbol table is HEAD-scoped — it holds
+        // only the latest snapshot, never historical, so a blanket DELETE
+        // is the right semantics.
+        with_conn(&self.pool, move |c| crate::symbol::clear_all(c)).await
     }
 
     async fn knn_hunks(

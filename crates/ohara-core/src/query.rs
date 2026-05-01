@@ -184,6 +184,9 @@ mod tests {
         async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> crate::Result<()> {
             Ok(())
         }
+        async fn clear_head_symbols(&self, _: &RepoId) -> crate::Result<()> {
+            unreachable!("compute_index_status should not exercise clear_head_symbols")
+        }
         async fn knn_hunks(
             &self,
             _: &RepoId,

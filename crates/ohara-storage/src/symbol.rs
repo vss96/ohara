@@ -49,6 +49,24 @@ fn put_one(tx: &rusqlite::Transaction<'_>, fp_id: i64, s: &Symbol) -> Result<()>
     Ok(())
 }
 
+/// Drop all symbol rows (and their FTS5 mirror) for the repo's HEAD
+/// snapshot. v0.3 / Plan 3 / Track D `--force` calls this before
+/// re-running `put_head_symbols` so repeated re-extracts don't
+/// accumulate duplicate rows. The schema-level cascade also clears the
+/// related `vec_symbol` rows.
+pub fn clear_all(c: &mut Connection) -> Result<()> {
+    let tx = c.transaction()?;
+    // Drop FTS5 + vec mirrors first (they reference symbol.id), then symbol.
+    // V1 has fts_symbol (qualified_name + source_text); V2 added
+    // fts_symbol_name (kind + name + sibling_names); both must clear.
+    tx.execute("DELETE FROM fts_symbol", [])?;
+    tx.execute("DELETE FROM fts_symbol_name", [])?;
+    tx.execute("DELETE FROM vec_symbol", [])?;
+    tx.execute("DELETE FROM symbol", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Replace HEAD-frame symbols for a repo. v0.3 keeps the no-op semantics
 /// for repos that already have a populated `symbol` table — D's
 /// `clear_head_symbols` (Plan 3) is the explicit reset path. Here we
