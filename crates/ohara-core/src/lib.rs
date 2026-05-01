@@ -7,6 +7,7 @@
 pub mod embed;
 pub mod error;
 pub mod indexer;
+pub mod paths;
 pub mod query;
 pub mod retriever;
 pub mod storage;
