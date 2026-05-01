@@ -160,10 +160,13 @@ impl Storage for SqliteStorage {
     async fn get_commit(
         &self,
         _repo_id: &RepoId,
-        _sha: &str,
+        sha: &str,
     ) -> CoreResult<Option<CommitMeta>> {
-        // Plan 5 / Task 1: trait scaffolding only; real impl lands in Task 2.
-        unimplemented!("Storage::get_commit is implemented in Plan 5 Task 2")
+        // Plan 5 / Task 2: SELECT a single commit row by sha. Returns
+        // Ok(None) for SHAs that aren't yet indexed so the explain_change
+        // orchestrator can skip them gracefully.
+        let sha = sha.to_string();
+        with_conn(&self.pool, move |c| crate::commit::get(c, &sha)).await
     }
 
     async fn get_hunks_for_file_in_commit(
@@ -670,6 +673,37 @@ mod tests {
         let (_dir, s, id) = fixture_storage_with_repo().await;
         let out = s.get_commit(&id, "deadbeefnonexistent").await.unwrap();
         assert!(out.is_none(), "unindexed sha must return Ok(None)");
+    }
+
+    #[tokio::test]
+    async fn get_commit_round_trips() {
+        // Plan 5 / Task 2.g: persist a commit then fetch it back; every
+        // CommitMeta field must round-trip identically.
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        let cm = CommitMeta {
+            sha: "rt-sha".into(),
+            parent_sha: Some("parent-sha".into()),
+            is_merge: true,
+            author: Some("alice@example.com".into()),
+            ts: 1_700_000_042,
+            message: "Switch fetch to retry with backoff".into(),
+        };
+        s.put_commit(
+            &id,
+            &CommitRecord {
+                meta: cm.clone(),
+                message_emb: vec![0.0; 384],
+            },
+        )
+        .await
+        .unwrap();
+        let got = s.get_commit(&id, "rt-sha").await.unwrap().expect("present");
+        assert_eq!(got.sha, cm.sha);
+        assert_eq!(got.parent_sha, cm.parent_sha);
+        assert_eq!(got.is_merge, cm.is_merge);
+        assert_eq!(got.author, cm.author);
+        assert_eq!(got.ts, cm.ts);
+        assert_eq!(got.message, cm.message);
     }
 
     #[tokio::test]
