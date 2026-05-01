@@ -91,7 +91,7 @@ impl Storage for SqliteStorage {
         // doesn't double-count. The symbol table is HEAD-scoped — it holds
         // only the latest snapshot, never historical, so a blanket DELETE
         // is the right semantics.
-        with_conn(&self.pool, move |c| crate::symbol::clear_all(c)).await
+        with_conn(&self.pool, crate::symbol::clear_all).await
     }
 
     async fn knn_hunks(
