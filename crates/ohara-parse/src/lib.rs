@@ -93,6 +93,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn extract_for_path_routes_java_to_java_module() {
+        // Plan 4 / Task 6: a .java path must route through java::extract
+        // and produce at least one symbol. We assert via the language
+        // tag rather than counting symbols so chunker merges don't
+        // change the assertion's meaning.
+        let src = "public class Foo { public void run() {} }\n";
+        let chunks = extract_for_path("Foo.java", src, "deadbeef").expect("extract");
+        assert!(
+            !chunks.is_empty(),
+            "expected at least one chunk for .java, got {chunks:?}"
+        );
+        assert!(
+            chunks.iter().all(|s| s.language == "java"),
+            "all chunks should carry language=java, got {:?}",
+            chunks.iter().map(|s| s.language.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn extract_for_path_emits_sibling_names_for_merged_chunks() {
         // Three small Rust functions; well under the 500-token budget,
         // so the chunker should merge them into a single chunk whose
