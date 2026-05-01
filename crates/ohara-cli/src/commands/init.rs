@@ -12,10 +12,8 @@ pub(crate) const HOOK_MARKER_BEGIN: &str = "# >>> ohara managed (do not edit) >>
 pub(crate) const HOOK_MARKER_END: &str = "# <<< ohara managed <<<";
 
 /// HTML-comment fence opening the ohara stanza in `CLAUDE.md`.
-#[allow(dead_code)]
 pub(crate) const CLAUDE_MARKER_BEGIN: &str = "<!-- ohara:start -->";
 /// HTML-comment fence closing the ohara stanza in `CLAUDE.md`.
-#[allow(dead_code)]
 pub(crate) const CLAUDE_MARKER_END: &str = "<!-- ohara:end -->";
 
 /// Body of the managed post-commit hook. Wrapped in markers when written.
@@ -25,7 +23,6 @@ if command -v ohara >/dev/null 2>&1; then
 fi";
 
 /// Body of the CLAUDE.md stanza. Wrapped in markers when written.
-#[allow(dead_code)]
 pub(crate) const CLAUDE_BODY: &str = "## ohara
 
 This repo is indexed by [ohara](https://github.com/vss96/ohara). Use the `find_pattern` MCP tool to ask \"how have we solved X before?\" — it returns ranked commits with diff excerpts and provenance.
@@ -64,6 +61,42 @@ pub async fn run(args: Args) -> Result<()> {
     write_hook(&hook_path, args.force)?;
     tracing::info!(hook = %hook_path.display(), "wrote post-commit hook");
     println!("installed post-commit hook at {}", hook_path.display());
+
+    if args.write_claude_md {
+        let claude_path = repo_root.join("CLAUDE.md");
+        write_claude_md(&claude_path)?;
+        tracing::info!(claude = %claude_path.display(), "wrote CLAUDE.md stanza");
+        println!("updated {}", claude_path.display());
+    }
+
+    Ok(())
+}
+
+/// Write or update `<repo>/CLAUDE.md`, preserving non-managed content.
+///
+/// Three cases (per Plan 2 §3), mirroring the hook policy but with HTML
+/// comment fences:
+///   - File missing → write a fresh CLAUDE.md containing only the stanza.
+///   - File present, contains markers → replace stanza in place.
+///   - File present, no markers → append the stanza separated by `\n\n`.
+fn write_claude_md(path: &Path) -> Result<()> {
+    let stanza = format!("{CLAUDE_MARKER_BEGIN}\n{CLAUDE_BODY}\n{CLAUDE_MARKER_END}");
+
+    let new_contents = if !path.exists() {
+        format!("{stanza}\n")
+    } else {
+        let existing = fs::read_to_string(path)
+            .with_context(|| format!("read {}", path.display()))?;
+        if existing.contains(CLAUDE_MARKER_BEGIN) && existing.contains(CLAUDE_MARKER_END) {
+            replace_block(&existing, CLAUDE_MARKER_BEGIN, CLAUDE_MARKER_END, &stanza)
+                .ok_or_else(|| anyhow!("failed to replace ohara stanza in {}", path.display()))?
+        } else {
+            append_managed_block(&existing, &stanza)
+        }
+    };
+
+    fs::write(path, new_contents.as_bytes())
+        .with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 
