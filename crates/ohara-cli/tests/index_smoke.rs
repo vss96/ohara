@@ -15,11 +15,23 @@ async fn smoke_index_then_status() {
     let sig = Signature::now("a", "a@a").unwrap();
     fs::write(repo_dir.path().join("a.rs"), "fn alpha() {}\n").unwrap();
     let mut idx = repo.index().unwrap();
-    idx.add_path(std::path::Path::new("a.rs")).unwrap(); idx.write().unwrap();
+    idx.add_path(std::path::Path::new("a.rs")).unwrap();
+    idx.write().unwrap();
     let t = idx.write_tree().unwrap();
-    repo.commit(Some("HEAD"), &sig, &sig, "init", &repo.find_tree(t).unwrap(), &[]).unwrap();
+    repo.commit(
+        Some("HEAD"),
+        &sig,
+        &sig,
+        "init",
+        &repo.find_tree(t).unwrap(),
+        &[],
+    )
+    .unwrap();
 
-    let args = ohara_cli::commands::index::Args { path: repo_dir.path().to_path_buf(), incremental: false };
+    let args = ohara_cli::commands::index::Args {
+        path: repo_dir.path().to_path_buf(),
+        incremental: false,
+    };
     ohara_cli::commands::index::run(args).await.unwrap();
 
     // Note: Task 15 stubs status.rs; status::run currently returns an error.

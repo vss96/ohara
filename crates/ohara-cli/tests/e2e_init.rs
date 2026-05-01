@@ -26,12 +26,17 @@ async fn init_creates_post_commit_hook_in_fresh_repo() {
         write_claude_md: false,
         force: false,
     };
-    ohara_cli::commands::init::run(args).await.expect("init run");
+    ohara_cli::commands::init::run(args)
+        .await
+        .expect("init run");
 
     let hook = repo_dir.path().join(".git/hooks/post-commit");
     assert!(hook.exists(), "post-commit hook not created");
     let body = read(&hook);
-    assert!(body.starts_with("#!/bin/sh"), "hook missing shebang: {body}");
+    assert!(
+        body.starts_with("#!/bin/sh"),
+        "hook missing shebang: {body}"
+    );
     assert!(body.contains("# >>> ohara managed"), "begin marker missing");
     assert!(body.contains("# <<< ohara managed"), "end marker missing");
     assert!(body.contains("command -v ohara"), "PATH guard missing");
@@ -54,11 +59,15 @@ async fn init_is_idempotent_when_run_twice() {
         write_claude_md: false,
         force: false,
     };
-    ohara_cli::commands::init::run(mk()).await.expect("first init");
+    ohara_cli::commands::init::run(mk())
+        .await
+        .expect("first init");
     let hook = repo_dir.path().join(".git/hooks/post-commit");
     let first = read(&hook);
 
-    ohara_cli::commands::init::run(mk()).await.expect("second init");
+    ohara_cli::commands::init::run(mk())
+        .await
+        .expect("second init");
     let second = read(&hook);
 
     assert_eq!(first, second, "init should be idempotent");
@@ -82,14 +91,22 @@ async fn init_appends_to_existing_unmanaged_hook() {
         write_claude_md: false,
         force: false,
     };
-    ohara_cli::commands::init::run(args).await.expect("init run");
+    ohara_cli::commands::init::run(args)
+        .await
+        .expect("init run");
 
     let body = read(&hook);
     assert!(body.contains("echo custom"), "user hook line was clobbered");
-    assert!(body.contains("# >>> ohara managed"), "ohara marker missing after append");
+    assert!(
+        body.contains("# >>> ohara managed"),
+        "ohara marker missing after append"
+    );
     let user_pos = body.find("echo custom").unwrap();
     let begin_pos = body.find("# >>> ohara managed").unwrap();
-    assert!(user_pos < begin_pos, "ohara block should be appended after user content");
+    assert!(
+        user_pos < begin_pos,
+        "ohara block should be appended after user content"
+    );
 }
 
 #[tokio::test]
@@ -102,12 +119,17 @@ async fn init_with_write_claude_md_creates_file() {
         write_claude_md: true,
         force: false,
     };
-    ohara_cli::commands::init::run(args).await.expect("init run");
+    ohara_cli::commands::init::run(args)
+        .await
+        .expect("init run");
 
     let claude = repo_dir.path().join("CLAUDE.md");
     assert!(claude.exists(), "CLAUDE.md not created");
     let body = read(&claude);
-    assert!(body.contains("<!-- ohara:start -->"), "begin marker missing");
+    assert!(
+        body.contains("<!-- ohara:start -->"),
+        "begin marker missing"
+    );
     assert!(body.contains("<!-- ohara:end -->"), "end marker missing");
     assert!(body.contains("## ohara"), "stanza header missing");
     assert!(body.contains("find_pattern"), "stanza body missing");
@@ -122,11 +144,15 @@ async fn init_write_claude_md_is_idempotent() {
         write_claude_md: true,
         force: false,
     };
-    ohara_cli::commands::init::run(mk()).await.expect("first init");
+    ohara_cli::commands::init::run(mk())
+        .await
+        .expect("first init");
     let claude = repo_dir.path().join("CLAUDE.md");
     let first = read(&claude);
 
-    ohara_cli::commands::init::run(mk()).await.expect("second init");
+    ohara_cli::commands::init::run(mk())
+        .await
+        .expect("second init");
     let second = read(&claude);
 
     assert_eq!(first, second, "CLAUDE.md writer should be idempotent");
@@ -147,15 +173,26 @@ async fn init_write_claude_md_preserves_other_content() {
         write_claude_md: true,
         force: false,
     };
-    ohara_cli::commands::init::run(args).await.expect("init run");
+    ohara_cli::commands::init::run(args)
+        .await
+        .expect("init run");
 
     let body = read(&claude);
-    assert!(body.contains("# Project rules"), "user header was clobbered");
-    assert!(body.contains("Do the right thing."), "user body was clobbered");
+    assert!(
+        body.contains("# Project rules"),
+        "user header was clobbered"
+    );
+    assert!(
+        body.contains("Do the right thing."),
+        "user body was clobbered"
+    );
     assert!(body.contains("<!-- ohara:start -->"), "stanza not appended");
     let user_pos = body.find("Do the right thing.").unwrap();
     let stanza_pos = body.find("<!-- ohara:start -->").unwrap();
-    assert!(user_pos < stanza_pos, "ohara stanza should be appended after user content");
+    assert!(
+        user_pos < stanza_pos,
+        "ohara stanza should be appended after user content"
+    );
 }
 
 #[cfg(unix)]
@@ -180,7 +217,9 @@ async fn post_commit_hook_invokes_ohara_index_on_synthetic_commit() {
         write_claude_md: false,
         force: false,
     };
-    ohara_cli::commands::init::run(args).await.expect("init run");
+    ohara_cli::commands::init::run(args)
+        .await
+        .expect("init run");
 
     // Build a shim `ohara` script that touches a sentinel and prepend its
     // dir to PATH so the hook resolves to the shim instead of any real
@@ -242,11 +281,19 @@ echo this-is-stale-content
         write_claude_md: false,
         force: false,
     };
-    ohara_cli::commands::init::run(args).await.expect("init run");
+    ohara_cli::commands::init::run(args)
+        .await
+        .expect("init run");
 
     let body = read(&hook);
-    assert!(!body.contains("this-is-stale-content"), "stale managed block was not replaced");
-    assert!(body.contains("command -v ohara"), "current managed body not written");
+    assert!(
+        !body.contains("this-is-stale-content"),
+        "stale managed block was not replaced"
+    );
+    assert!(
+        body.contains("command -v ohara"),
+        "current managed body not written"
+    );
     assert_eq!(
         body.matches("# >>> ohara managed").count(),
         1,

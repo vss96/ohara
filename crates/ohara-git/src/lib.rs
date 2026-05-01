@@ -23,15 +23,22 @@ impl GitCommitSource {
             .map_err(|e| anyhow::anyhow!("discover repo: {e}"))?;
         // Validate that walker can also open it (sanity check for a clean error path).
         let _ = GitWalker::open(&canonical)?;
-        Ok(Self { repo_path: canonical, repo: Arc::new(Mutex::new(repo)) })
+        Ok(Self {
+            repo_path: canonical,
+            repo: Arc::new(Mutex::new(repo)),
+        })
     }
 
-    pub fn repo_path(&self) -> &std::path::Path { &self.repo_path }
+    pub fn repo_path(&self) -> &std::path::Path {
+        &self.repo_path
+    }
 
     /// Open a fresh `GitWalker` for synchronous use. A new walker is returned
     /// each call because `git2::Repository`'s revwalk borrows mutably and
     /// sharing it across the async boundary is awkward.
-    pub fn walker(&self) -> Result<GitWalker> { GitWalker::open(&self.repo_path) }
+    pub fn walker(&self) -> Result<GitWalker> {
+        GitWalker::open(&self.repo_path)
+    }
 }
 
 #[async_trait::async_trait]
@@ -44,8 +51,8 @@ impl CommitSource for GitCommitSource {
             // list_commits opens its own GitWalker because Repository's revwalk
             // borrows &self mutably; cleaner to construct a fresh walker per call
             // for now (open() cost is one-time on the GitWalker side).
-            let w = GitWalker::open(&path)
-                .map_err(|e| ohara_core::OhraError::Git(e.to_string()))?;
+            let w =
+                GitWalker::open(&path).map_err(|e| ohara_core::OhraError::Git(e.to_string()))?;
             w.list_commits(since.as_deref())
                 .map_err(|e| ohara_core::OhraError::Git(e.to_string()))
         })
@@ -58,7 +65,9 @@ impl CommitSource for GitCommitSource {
         let sha = sha.to_string();
         let repo = self.repo.clone();
         tokio::task::spawn_blocking(move || -> ohara_core::Result<Vec<Hunk>> {
-            let guard = repo.lock().map_err(|e| ohara_core::OhraError::Git(format!("repo lock poisoned: {e}")))?;
+            let guard = repo
+                .lock()
+                .map_err(|e| ohara_core::OhraError::Git(format!("repo lock poisoned: {e}")))?;
             crate::diff::hunks_for_commit(&guard, &sha)
                 .map_err(|e| ohara_core::OhraError::Git(e.to_string()))
         })
@@ -78,7 +87,9 @@ impl GitCommitsBehind {
         let canonical = path.as_ref().to_path_buf();
         // Sanity check that we can open the repo.
         let _ = GitWalker::open(&canonical)?;
-        Ok(Self { repo_path: canonical })
+        Ok(Self {
+            repo_path: canonical,
+        })
     }
 }
 
@@ -88,8 +99,8 @@ impl CommitsBehind for GitCommitsBehind {
         let since = since.map(str::to_string);
         let path = self.repo_path.clone();
         tokio::task::spawn_blocking(move || -> ohara_core::Result<u64> {
-            let w = GitWalker::open(&path)
-                .map_err(|e| ohara_core::OhraError::Git(e.to_string()))?;
+            let w =
+                GitWalker::open(&path).map_err(|e| ohara_core::OhraError::Git(e.to_string()))?;
             let cs = w
                 .list_commits(since.as_deref())
                 .map_err(|e| ohara_core::OhraError::Git(e.to_string()))?;

@@ -67,8 +67,10 @@ pub fn knn(
     }
 
     let mut stmt = c.prepare(&sql)?;
-    let bind_refs: Vec<(&str, &dyn rusqlite::ToSql)> =
-        binds.iter().map(|(k, v)| (*k, v.as_ref() as &dyn rusqlite::ToSql)).collect();
+    let bind_refs: Vec<(&str, &dyn rusqlite::ToSql)> = binds
+        .iter()
+        .map(|(k, v)| (*k, v.as_ref() as &dyn rusqlite::ToSql))
+        .collect();
 
     let rows = stmt.query_map(bind_refs.as_slice(), |row| {
         let commit_sha: String = row.get(0)?;
@@ -101,7 +103,11 @@ pub fn knn(
         // Distance from sqlite-vec is L2; smaller is closer. Convert to a
         // similarity-like score where larger is better.
         let similarity = 1.0 / (1.0 + distance);
-        Ok(HunkHit { hunk, commit, similarity })
+        Ok(HunkHit {
+            hunk,
+            commit,
+            similarity,
+        })
     })?;
 
     let mut out = Vec::new();

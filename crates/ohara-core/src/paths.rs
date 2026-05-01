@@ -37,7 +37,9 @@ mod tests {
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         use std::sync::{Mutex, OnceLock};
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]
@@ -64,7 +66,10 @@ mod tests {
         std::env::set_var("OHARA_HOME", "/tmp/ohara-idx-test");
         let id = RepoId::from_parts("deadbeef", "/Users/x/foo");
         let p = index_db_path(&id).expect("index_db_path should succeed");
-        assert_eq!(p, PathBuf::from(format!("/tmp/ohara-idx-test/{}/index.sqlite", id.as_str())));
+        assert_eq!(
+            p,
+            PathBuf::from(format!("/tmp/ohara-idx-test/{}/index.sqlite", id.as_str()))
+        );
         std::env::remove_var("OHARA_HOME");
     }
 }

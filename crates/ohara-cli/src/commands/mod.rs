@@ -15,7 +15,9 @@ pub fn resolve_repo_id<P: AsRef<Path>>(repo_path: P) -> Result<(RepoId, PathBuf,
     let canonical = std::fs::canonicalize(repo_path.as_ref())
         .map_err(|e| anyhow!("canonicalize {}: {e}", repo_path.as_ref().display()))?;
     let walker = ohara_git::GitWalker::open(&canonical).map_err(|e| anyhow!("open repo: {e}"))?;
-    let first = walker.first_commit_sha().map_err(|e| anyhow!("first commit: {e}"))?;
+    let first = walker
+        .first_commit_sha()
+        .map_err(|e| anyhow!("first commit: {e}"))?;
     let canonical_str = canonical.to_string_lossy().to_string();
     let id = RepoId::from_parts(&first, &canonical_str);
     Ok((id, canonical, first))

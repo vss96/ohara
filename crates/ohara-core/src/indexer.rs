@@ -1,4 +1,3 @@
-use crate::query::IndexStatus;
 use crate::storage::{CommitRecord, HunkRecord};
 use crate::types::{CommitMeta, Hunk, RepoId, Symbol};
 use crate::{EmbeddingProvider, Result, Storage};
@@ -24,12 +23,20 @@ pub struct Indexer {
     storage: Arc<dyn Storage>,
     embedder: Arc<dyn EmbeddingProvider>,
     batch_commits: usize,
+    /// Reserved knob for capping per-batch embedder calls; not yet wired into
+    /// the loop (the inner per-commit batch is bounded by hunk count today).
+    #[allow(dead_code)]
     embed_batch: usize,
 }
 
 impl Indexer {
     pub fn new(storage: Arc<dyn Storage>, embedder: Arc<dyn EmbeddingProvider>) -> Self {
-        Self { storage, embedder, batch_commits: 512, embed_batch: 32 }
+        Self {
+            storage,
+            embedder,
+            batch_commits: 512,
+            embed_batch: 32,
+        }
     }
 
     /// Run a (full or incremental) indexing pass for `repo_id`.
@@ -41,7 +48,9 @@ impl Indexer {
         symbol_source: &dyn SymbolSource,
     ) -> Result<IndexerReport> {
         let status = self.storage.get_index_status(repo_id).await?;
-        let commits = commit_source.list_commits(status.last_indexed_commit.as_deref()).await?;
+        let commits = commit_source
+            .list_commits(status.last_indexed_commit.as_deref())
+            .await?;
         tracing::info!(new_commits = commits.len(), "begin index pass");
 
         let mut latest_sha: Option<String> = status.last_indexed_commit.clone();
@@ -59,13 +68,22 @@ impl Indexer {
                 let (msg_emb, hunk_embs) = embs.split_first().expect("non-empty");
 
                 self.storage
-                    .put_commit(repo_id, &CommitRecord { meta: cm.clone(), message_emb: msg_emb.clone() })
+                    .put_commit(
+                        repo_id,
+                        &CommitRecord {
+                            meta: cm.clone(),
+                            message_emb: msg_emb.clone(),
+                        },
+                    )
                     .await?;
 
                 let records: Vec<HunkRecord> = hunks
                     .into_iter()
                     .zip(hunk_embs.iter().cloned())
-                    .map(|(h, e)| HunkRecord { hunk: h, diff_emb: e })
+                    .map(|(h, e)| HunkRecord {
+                        hunk: h,
+                        diff_emb: e,
+                    })
                     .collect();
                 self.storage.put_hunks(repo_id, &records).await?;
                 latest_sha = Some(cm.sha.clone());
@@ -79,7 +97,11 @@ impl Indexer {
             self.storage.set_last_indexed_commit(repo_id, sha).await?;
         }
 
-        Ok(IndexerReport { new_commits: commits.len(), new_hunks: total_hunks, head_symbols: symbols.len() })
+        Ok(IndexerReport {
+            new_commits: commits.len(),
+            new_hunks: total_hunks,
+            head_symbols: symbols.len(),
+        })
     }
 }
 

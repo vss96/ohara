@@ -5,12 +5,18 @@
 
 pub fn vec_to_bytes(v: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(v.len() * 4);
-    for f in v { out.extend_from_slice(&f.to_le_bytes()); }
+    for f in v {
+        out.extend_from_slice(&f.to_le_bytes());
+    }
     out
 }
 
 pub fn bytes_to_vec(b: &[u8]) -> Vec<f32> {
-    debug_assert!(b.len() % 4 == 0, "vec_codec: byte length {} not f32-aligned", b.len());
+    debug_assert!(
+        b.len() % 4 == 0,
+        "vec_codec: byte length {} not f32-aligned",
+        b.len()
+    );
     let mut out = Vec::with_capacity(b.len() / 4);
     for chunk in b.chunks_exact(4) {
         out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
@@ -25,7 +31,15 @@ mod tests {
     #[test]
     #[allow(clippy::approx_constant)]
     fn round_trip_preserves_values() {
-        let v = vec![0.0_f32, 0.1, -1.5, 3.14, f32::MIN_POSITIVE, f32::MAX, f32::MIN];
+        let v = vec![
+            0.0_f32,
+            0.1,
+            -1.5,
+            3.14,
+            f32::MIN_POSITIVE,
+            f32::MAX,
+            f32::MIN,
+        ];
         let bytes = vec_to_bytes(&v);
         assert_eq!(bytes.len(), v.len() * 4);
         let back = bytes_to_vec(&bytes);

@@ -78,13 +78,19 @@ mod tests {
         for (i, m) in msgs.iter().enumerate() {
             fs::write(dir.join(format!("f{i}.txt")), format!("v{i}")).unwrap();
             let mut idx = repo.index().unwrap();
-            idx.add_path(std::path::Path::new(&format!("f{i}.txt"))).unwrap();
+            idx.add_path(std::path::Path::new(&format!("f{i}.txt")))
+                .unwrap();
             idx.write().unwrap();
             let tree_id = idx.write_tree().unwrap();
             let tree = repo.find_tree(tree_id).unwrap();
-            let parents: Vec<git2::Commit> = parent.iter().map(|p| repo.find_commit(*p).unwrap()).collect();
+            let parents: Vec<git2::Commit> = parent
+                .iter()
+                .map(|p| repo.find_commit(*p).unwrap())
+                .collect();
             let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-            let oid = repo.commit(Some("HEAD"), &sig, &sig, m, &tree, &parent_refs).unwrap();
+            let oid = repo
+                .commit(Some("HEAD"), &sig, &sig, m, &tree, &parent_refs)
+                .unwrap();
             parent = Some(oid);
         }
         repo
@@ -122,7 +128,13 @@ mod tests {
         let cs = w.list_commits(None).unwrap();
         // The root commit (cs[0] in topological-reverse order) is the one without a parent.
         assert_eq!(first, cs[0].sha);
-        assert!(cs[0].parent_sha.is_none(), "root commit should have no parent");
-        assert!(cs[1].parent_sha.is_some(), "non-root commit should have a parent");
+        assert!(
+            cs[0].parent_sha.is_none(),
+            "root commit should have no parent"
+        );
+        assert!(
+            cs[1].parent_sha.is_some(),
+            "non-root commit should have a parent"
+        );
     }
 }

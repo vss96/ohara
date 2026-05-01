@@ -7,7 +7,9 @@ const QUERY_SRC: &str = include_str!("../queries/rust.scm");
 pub fn extract(file_path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symbol>> {
     let mut parser = Parser::new();
     let language = tree_sitter_rust::language();
-    parser.set_language(&language).context("set rust language")?;
+    parser
+        .set_language(&language)
+        .context("set rust language")?;
     let tree = parser.parse(source, None).context("parse rust")?;
     let query = Query::new(&language, QUERY_SRC).context("rust query")?;
     let mut cursor = QueryCursor::new();

@@ -13,7 +13,9 @@ pub struct SqlitePoolBuilder {
 
 impl SqlitePoolBuilder {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
-        Self { path: path.as_ref().to_path_buf() }
+        Self {
+            path: path.as_ref().to_path_buf(),
+        }
     }
 
     pub async fn build(self) -> Result<Pool> {
@@ -84,12 +86,15 @@ pub(crate) fn register_vec_auto_extension() -> Result<()> {
                     *const rusqlite::ffi::sqlite3_api_routines,
                 ) -> std::os::raw::c_int,
             >(
-                sqlite_vec::sqlite3_vec_init as *const (),
+                sqlite_vec::sqlite3_vec_init as *const ()
             )))
         };
         let _ = VEC_AUTO_EXT_RC.set(rc);
     });
-    let rc = VEC_AUTO_EXT_RC.get().copied().unwrap_or(rusqlite::ffi::SQLITE_OK);
+    let rc = VEC_AUTO_EXT_RC
+        .get()
+        .copied()
+        .unwrap_or(rusqlite::ffi::SQLITE_OK);
     if rc == rusqlite::ffi::SQLITE_OK {
         Ok(())
     } else {
@@ -114,7 +119,10 @@ mod tests {
     #[tokio::test]
     async fn pool_opens_and_pragmas_apply() {
         let dir = tempfile::tempdir().unwrap();
-        let pool = SqlitePoolBuilder::new(dir.path().join("idx.sqlite")).build().await.unwrap();
+        let pool = SqlitePoolBuilder::new(dir.path().join("idx.sqlite"))
+            .build()
+            .await
+            .unwrap();
         let conn = pool.get().await.unwrap();
         let mode: String = conn
             .interact(|c| {
@@ -130,7 +138,10 @@ mod tests {
     #[tokio::test]
     async fn vec_extension_is_callable() {
         let dir = tempfile::tempdir().unwrap();
-        let pool = SqlitePoolBuilder::new(dir.path().join("idx.sqlite")).build().await.unwrap();
+        let pool = SqlitePoolBuilder::new(dir.path().join("idx.sqlite"))
+            .build()
+            .await
+            .unwrap();
         let conn = pool.get().await.unwrap();
         let v: String = conn
             .interact(|c| {
@@ -146,7 +157,10 @@ mod tests {
     #[tokio::test]
     async fn second_pool_connection_inherits_pragmas_and_vec() {
         let dir = tempfile::tempdir().unwrap();
-        let pool = SqlitePoolBuilder::new(dir.path().join("idx.sqlite")).build().await.unwrap();
+        let pool = SqlitePoolBuilder::new(dir.path().join("idx.sqlite"))
+            .build()
+            .await
+            .unwrap();
         // Hold one checkout so the pool must lazily create a fresh connection
         // for the next request. The first checkout reuses the connection that
         // `build()` already pragma'd; the second forces a new one.
@@ -170,7 +184,13 @@ mod tests {
             .unwrap();
         drop(first);
         assert_eq!(fk, 1, "foreign_keys must be ON on every pool connection");
-        assert_eq!(sync_mode, 1, "synchronous must be NORMAL (1) on every pool connection");
-        assert!(!vec_v.is_empty(), "vec extension must be available on every pool connection");
+        assert_eq!(
+            sync_mode, 1,
+            "synchronous must be NORMAL (1) on every pool connection"
+        );
+        assert!(
+            !vec_v.is_empty(),
+            "vec extension must be available on every pool connection"
+        );
     }
 }

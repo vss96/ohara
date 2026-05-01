@@ -17,7 +17,7 @@ mod tests {
 
     #[test]
     fn migrations_apply_to_fresh_db() {
-        crate::pool::register_vec_auto_extension().unwrap();   // register vec extension before opening any connection
+        crate::pool::register_vec_auto_extension().unwrap(); // register vec extension before opening any connection
         let mut c = Connection::open_in_memory().unwrap();
         apply_pragmas(&c).unwrap();
         load_vec_extension(&c).unwrap();

@@ -21,7 +21,9 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
     tracing::info!(repo = %canonical.display(), id = repo_id.as_str(), db = %db_path.display(), "indexing");
 
     let storage = Arc::new(ohara_storage::SqliteStorage::open(&db_path).await?);
-    storage.open_repo(&repo_id, &canonical.to_string_lossy(), &first_commit).await?;
+    storage
+        .open_repo(&repo_id, &canonical.to_string_lossy(), &first_commit)
+        .await?;
 
     // Fast path: when --incremental is set and storage's last_indexed_commit
     // matches HEAD, return immediately without booting the FastEmbed model
@@ -34,18 +36,23 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         if st.last_indexed_commit.as_deref() == Some(head.as_str()) {
             tracing::info!(sha = %head, "incremental: index up-to-date, skipping embedder init");
             println!("index up-to-date at {head}");
-            return Ok(IndexerReport { new_commits: 0, new_hunks: 0, head_symbols: 0 });
+            return Ok(IndexerReport {
+                new_commits: 0,
+                new_hunks: 0,
+                head_symbols: 0,
+            });
         }
     }
 
-    let embedder = Arc::new(tokio::task::spawn_blocking(|| {
-        ohara_embed::FastEmbedProvider::new()
-    }).await??);
+    let embedder =
+        Arc::new(tokio::task::spawn_blocking(ohara_embed::FastEmbedProvider::new).await??);
     let commit_source = ohara_git::GitCommitSource::open(&canonical)?;
     let symbol_source = ohara_parse::GitSymbolSource::open(&canonical)?;
 
     let indexer = Indexer::new(storage.clone(), embedder.clone());
-    let report = indexer.run(&repo_id, &commit_source, &symbol_source).await?;
+    let report = indexer
+        .run(&repo_id, &commit_source, &symbol_source)
+        .await?;
     println!(
         "indexed: {} new commits, {} hunks, {} HEAD symbols",
         report.new_commits, report.new_hunks, report.head_symbols

@@ -17,7 +17,8 @@ pub(crate) const CLAUDE_MARKER_BEGIN: &str = "<!-- ohara:start -->";
 pub(crate) const CLAUDE_MARKER_END: &str = "<!-- ohara:end -->";
 
 /// Body of the managed post-commit hook. Wrapped in markers when written.
-pub(crate) const HOOK_BODY: &str = "# Re-index this repo on every commit. Silently skipped if `ohara` is not on PATH.
+pub(crate) const HOOK_BODY: &str =
+    "# Re-index this repo on every commit. Silently skipped if `ohara` is not on PATH.
 if command -v ohara >/dev/null 2>&1; then
   ( cd \"$(git rev-parse --show-toplevel)\" && ohara index --incremental >/dev/null 2>&1 ) || true
 fi";
@@ -54,8 +55,7 @@ pub async fn run(args: Args) -> Result<()> {
     let git_dir = repo.path().to_path_buf();
 
     let hooks_dir = git_dir.join("hooks");
-    fs::create_dir_all(&hooks_dir)
-        .with_context(|| format!("create {}", hooks_dir.display()))?;
+    fs::create_dir_all(&hooks_dir).with_context(|| format!("create {}", hooks_dir.display()))?;
     let hook_path = hooks_dir.join("post-commit");
 
     write_hook(&hook_path, args.force)?;
@@ -85,8 +85,8 @@ fn write_claude_md(path: &Path) -> Result<()> {
     let new_contents = if !path.exists() {
         format!("{stanza}\n")
     } else {
-        let existing = fs::read_to_string(path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let existing =
+            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         if existing.contains(CLAUDE_MARKER_BEGIN) && existing.contains(CLAUDE_MARKER_END) {
             replace_block(&existing, CLAUDE_MARKER_BEGIN, CLAUDE_MARKER_END, &stanza)
                 .ok_or_else(|| anyhow!("failed to replace ohara stanza in {}", path.display()))?
@@ -113,8 +113,8 @@ fn write_hook(path: &Path, force: bool) -> Result<()> {
     let new_contents = if !path.exists() || force {
         format!("#!/bin/sh\n{managed}\n")
     } else {
-        let existing = fs::read_to_string(path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let existing =
+            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         if existing.contains(HOOK_MARKER_BEGIN) && existing.contains(HOOK_MARKER_END) {
             replace_block(&existing, HOOK_MARKER_BEGIN, HOOK_MARKER_END, &managed)
                 .ok_or_else(|| anyhow!("failed to replace managed block in {}", path.display()))?
@@ -161,8 +161,7 @@ fn set_executable(path: &Path) -> Result<()> {
         .with_context(|| format!("stat {}", path.display()))?
         .permissions();
     perms.set_mode(0o755);
-    fs::set_permissions(path, perms)
-        .with_context(|| format!("chmod {}", path.display()))?;
+    fs::set_permissions(path, perms).with_context(|| format!("chmod {}", path.display()))?;
     Ok(())
 }
 

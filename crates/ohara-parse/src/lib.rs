@@ -25,7 +25,9 @@ pub struct GitSymbolSource {
 
 impl GitSymbolSource {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        Ok(Self { repo_path: path.as_ref().to_path_buf() })
+        Ok(Self {
+            repo_path: path.as_ref().to_path_buf(),
+        })
     }
 }
 

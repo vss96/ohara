@@ -61,7 +61,9 @@ pub struct OharaService {
 
 impl OharaService {
     pub fn new(server: OharaServer) -> Self {
-        Self { server: Arc::new(server) }
+        Self {
+            server: Arc::new(server),
+        }
     }
 }
 
@@ -94,7 +96,9 @@ impl OharaService {
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
 
         let body = json!({ "hits": hits, "_meta": meta });
-        Ok(CallToolResult::success(vec![Content::text(body.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            body.to_string(),
+        )]))
     }
 }
 

@@ -27,21 +27,31 @@ impl FastEmbedProvider {
         // constructed via struct-literal syntax from outside the crate. Use the
         // builder API (`InitOptions::new(...).with_show_download_progress(...)`)
         // which preserves the plan's intent: load BGE small with downloads silent.
-        let opts = InitOptions::new(EmbeddingModel::BGESmallENV15)
-            .with_show_download_progress(false);
+        let opts =
+            InitOptions::new(EmbeddingModel::BGESmallENV15).with_show_download_progress(false);
         let model = TextEmbedding::try_new(opts)
             .context("loading BGE-small model (downloads ~80MB on first run)")?;
-        Ok(Self { model: Arc::new(Mutex::new(model)), model_id: DEFAULT_MODEL_ID.into(), dim: DEFAULT_DIM })
+        Ok(Self {
+            model: Arc::new(Mutex::new(model)),
+            model_id: DEFAULT_MODEL_ID.into(),
+            dim: DEFAULT_DIM,
+        })
     }
 }
 
 #[async_trait::async_trait]
 impl EmbeddingProvider for FastEmbedProvider {
-    fn dimension(&self) -> usize { self.dim }
-    fn model_id(&self) -> &str { &self.model_id }
+    fn dimension(&self) -> usize {
+        self.dim
+    }
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
 
     async fn embed_batch(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
-        if texts.is_empty() { return Ok(vec![]); }
+        if texts.is_empty() {
+            return Ok(vec![]);
+        }
         let model = self.model.clone();
         let owned: Vec<String> = texts.to_vec();
         let result = tokio::task::spawn_blocking(move || {

@@ -31,9 +31,11 @@ fn make_commit(repo: &Repository, dir: &Path, file: &str, body: &str, msg: &str)
         None => vec![],
     };
     let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-    repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs).unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs)
+        .unwrap();
 }
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 #[ignore = "downloads embedding model on first run; opt in with --include-ignored"]
 async fn incremental_on_fresh_repo_indexes_everything() {
@@ -43,18 +45,34 @@ async fn incremental_on_fresh_repo_indexes_everything() {
     std::env::set_var("OHARA_HOME", home.path());
 
     let repo = Repository::init(repo_dir.path()).unwrap();
-    make_commit(&repo, repo_dir.path(), "a.rs", "fn alpha() {}\n", "add alpha");
+    make_commit(
+        &repo,
+        repo_dir.path(),
+        "a.rs",
+        "fn alpha() {}\n",
+        "add alpha",
+    );
     make_commit(&repo, repo_dir.path(), "b.rs", "fn beta() {}\n", "add beta");
-    make_commit(&repo, repo_dir.path(), "c.rs", "fn gamma() {}\n", "add gamma");
+    make_commit(
+        &repo,
+        repo_dir.path(),
+        "c.rs",
+        "fn gamma() {}\n",
+        "add gamma",
+    );
 
     let args = ohara_cli::commands::index::Args {
         path: repo_dir.path().to_path_buf(),
         incremental: true,
     };
     let report = ohara_cli::commands::index::run(args).await.unwrap();
-    assert_eq!(report.new_commits, 3, "fresh incremental run should index all commits");
+    assert_eq!(
+        report.new_commits, 3,
+        "fresh incremental run should index all commits"
+    );
 }
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 #[ignore = "downloads embedding model on first run; opt in with --include-ignored"]
 async fn incremental_after_partial_index_only_walks_new_commits() {
@@ -64,7 +82,13 @@ async fn incremental_after_partial_index_only_walks_new_commits() {
     std::env::set_var("OHARA_HOME", home.path());
 
     let repo = Repository::init(repo_dir.path()).unwrap();
-    make_commit(&repo, repo_dir.path(), "a.rs", "fn alpha() {}\n", "add alpha");
+    make_commit(
+        &repo,
+        repo_dir.path(),
+        "a.rs",
+        "fn alpha() {}\n",
+        "add alpha",
+    );
     make_commit(&repo, repo_dir.path(), "b.rs", "fn beta() {}\n", "add beta");
 
     let first = ohara_cli::commands::index::run(ohara_cli::commands::index::Args {
@@ -76,8 +100,20 @@ async fn incremental_after_partial_index_only_walks_new_commits() {
     assert_eq!(first.new_commits, 2);
 
     // Add two more commits; incremental run should pick up exactly those.
-    make_commit(&repo, repo_dir.path(), "c.rs", "fn gamma() {}\n", "add gamma");
-    make_commit(&repo, repo_dir.path(), "d.rs", "fn delta() {}\n", "add delta");
+    make_commit(
+        &repo,
+        repo_dir.path(),
+        "c.rs",
+        "fn gamma() {}\n",
+        "add gamma",
+    );
+    make_commit(
+        &repo,
+        repo_dir.path(),
+        "d.rs",
+        "fn delta() {}\n",
+        "add delta",
+    );
 
     let second = ohara_cli::commands::index::run(ohara_cli::commands::index::Args {
         path: repo_dir.path().to_path_buf(),
@@ -85,9 +121,13 @@ async fn incremental_after_partial_index_only_walks_new_commits() {
     })
     .await
     .unwrap();
-    assert_eq!(second.new_commits, 2, "incremental should walk only the two new commits");
+    assert_eq!(
+        second.new_commits, 2,
+        "incremental should walk only the two new commits"
+    );
 }
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 #[ignore = "downloads embedding model on first run; opt in with --include-ignored"]
 async fn incremental_at_head_is_noop_and_skips_embedder_init() {
@@ -97,7 +137,13 @@ async fn incremental_at_head_is_noop_and_skips_embedder_init() {
     std::env::set_var("OHARA_HOME", home.path());
 
     let repo = Repository::init(repo_dir.path()).unwrap();
-    make_commit(&repo, repo_dir.path(), "a.rs", "fn alpha() {}\n", "add alpha");
+    make_commit(
+        &repo,
+        repo_dir.path(),
+        "a.rs",
+        "fn alpha() {}\n",
+        "add alpha",
+    );
 
     let _first = ohara_cli::commands::index::run(ohara_cli::commands::index::Args {
         path: repo_dir.path().to_path_buf(),
@@ -112,7 +158,10 @@ async fn incremental_at_head_is_noop_and_skips_embedder_init() {
     })
     .await
     .unwrap();
-    assert_eq!(second.new_commits, 0, "second incremental run at HEAD should be a no-op");
+    assert_eq!(
+        second.new_commits, 0,
+        "second incremental run at HEAD should be a no-op"
+    );
     assert_eq!(second.new_hunks, 0);
     assert_eq!(second.head_symbols, 0);
 }

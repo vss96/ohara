@@ -1,6 +1,8 @@
 use crate::query::PatternHit;
 use crate::storage::HunkHit;
-use crate::types::{CommitMeta, Hunk, Provenance};
+use crate::types::Provenance;
+#[cfg(test)]
+use crate::types::{CommitMeta, Hunk};
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
 
@@ -13,7 +15,12 @@ pub struct RankingWeights {
 
 impl Default for RankingWeights {
     fn default() -> Self {
-        Self { similarity: 0.7, recency: 0.2, message_match: 0.1, recency_half_life_days: 365.0 }
+        Self {
+            similarity: 0.7,
+            recency: 0.2,
+            message_match: 0.1,
+            recency_half_life_days: 365.0,
+        }
     }
 }
 
@@ -24,8 +31,15 @@ pub struct Retriever {
 }
 
 impl Retriever {
-    pub fn new(storage: Arc<dyn crate::Storage>, embedder: Arc<dyn crate::EmbeddingProvider>) -> Self {
-        Self { weights: RankingWeights::default(), storage, embedder }
+    pub fn new(
+        storage: Arc<dyn crate::Storage>,
+        embedder: Arc<dyn crate::EmbeddingProvider>,
+    ) -> Self {
+        Self {
+            weights: RankingWeights::default(),
+            storage,
+            embedder,
+        }
     }
 
     pub fn with_weights(mut self, w: RankingWeights) -> Self {
@@ -63,7 +77,7 @@ impl Retriever {
                     change_kind: format!("{:?}", h.hunk.change_kind).to_lowercase(),
                     diff_excerpt: excerpt,
                     diff_truncated: truncated,
-                    related_head_symbols: vec![],   // populated in a later plan if symbol attribution is added
+                    related_head_symbols: vec![], // populated in a later plan if symbol attribution is added
                     similarity: h.similarity,
                     recency_weight: recency,
                     combined_score: combined,
@@ -89,7 +103,9 @@ impl Retriever {
     ) -> crate::Result<Vec<crate::query::PatternHit>> {
         let q_text = vec![query.query.clone()];
         let mut q_embs = self.embedder.embed_batch(&q_text).await?;
-        let q_emb = q_embs.pop().ok_or_else(|| crate::OhraError::Embedding("empty".into()))?;
+        let q_emb = q_embs
+            .pop()
+            .ok_or_else(|| crate::OhraError::Embedding("empty".into()))?;
 
         let candidates = self
             .storage
@@ -104,8 +120,15 @@ impl Retriever {
 
         // Cosine similarity between the query embedding and each candidate's commit message.
         // We embed the messages in a single batch.
-        let messages: Vec<String> = candidates.iter().map(|h| h.commit.message.clone()).collect();
-        let msg_embs = if messages.is_empty() { vec![] } else { self.embedder.embed_batch(&messages).await? };
+        let messages: Vec<String> = candidates
+            .iter()
+            .map(|h| h.commit.message.clone())
+            .collect();
+        let msg_embs = if messages.is_empty() {
+            vec![]
+        } else {
+            self.embedder.embed_batch(&messages).await?
+        };
         let msg_sims: Vec<f32> = msg_embs.iter().map(|e| cosine(&q_emb, e)).collect();
 
         Ok(self.rank_hits(candidates, &msg_sims, now_unix))
@@ -116,7 +139,11 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na * nb) }
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na * nb)
+    }
 }
 
 fn truncate_diff(s: &str, max_lines: usize) -> (String, bool) {
@@ -177,23 +204,73 @@ mod tests {
     struct PanicStorage;
     #[async_trait::async_trait]
     impl crate::Storage for PanicStorage {
-        async fn open_repo(&self, _: &crate::types::RepoId, _: &str, _: &str) -> crate::Result<()> { unreachable!() }
-        async fn get_index_status(&self, _: &crate::types::RepoId) -> crate::Result<crate::query::IndexStatus> { unreachable!() }
-        async fn set_last_indexed_commit(&self, _: &crate::types::RepoId, _: &str) -> crate::Result<()> { unreachable!() }
-        async fn put_commit(&self, _: &crate::types::RepoId, _: &crate::CommitRecord) -> crate::Result<()> { unreachable!() }
-        async fn put_hunks(&self, _: &crate::types::RepoId, _: &[crate::HunkRecord]) -> crate::Result<()> { unreachable!() }
-        async fn put_head_symbols(&self, _: &crate::types::RepoId, _: &[crate::types::Symbol]) -> crate::Result<()> { unreachable!() }
-        async fn knn_hunks(&self, _: &crate::types::RepoId, _: &[f32], _: u8, _: Option<&str>, _: Option<i64>) -> crate::Result<Vec<crate::HunkHit>> { unreachable!() }
-        async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> { unreachable!() }
-        async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> { unreachable!() }
+        async fn open_repo(&self, _: &crate::types::RepoId, _: &str, _: &str) -> crate::Result<()> {
+            unreachable!()
+        }
+        async fn get_index_status(
+            &self,
+            _: &crate::types::RepoId,
+        ) -> crate::Result<crate::query::IndexStatus> {
+            unreachable!()
+        }
+        async fn set_last_indexed_commit(
+            &self,
+            _: &crate::types::RepoId,
+            _: &str,
+        ) -> crate::Result<()> {
+            unreachable!()
+        }
+        async fn put_commit(
+            &self,
+            _: &crate::types::RepoId,
+            _: &crate::CommitRecord,
+        ) -> crate::Result<()> {
+            unreachable!()
+        }
+        async fn put_hunks(
+            &self,
+            _: &crate::types::RepoId,
+            _: &[crate::HunkRecord],
+        ) -> crate::Result<()> {
+            unreachable!()
+        }
+        async fn put_head_symbols(
+            &self,
+            _: &crate::types::RepoId,
+            _: &[crate::types::Symbol],
+        ) -> crate::Result<()> {
+            unreachable!()
+        }
+        async fn knn_hunks(
+            &self,
+            _: &crate::types::RepoId,
+            _: &[f32],
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> crate::Result<Vec<crate::HunkHit>> {
+            unreachable!()
+        }
+        async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
+            unreachable!()
+        }
+        async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
+            unreachable!()
+        }
     }
 
     struct PanicEmbedder;
     #[async_trait::async_trait]
     impl crate::EmbeddingProvider for PanicEmbedder {
-        fn dimension(&self) -> usize { unreachable!() }
-        fn model_id(&self) -> &str { unreachable!() }
-        async fn embed_batch(&self, _: &[String]) -> crate::Result<Vec<Vec<f32>>> { unreachable!() }
+        fn dimension(&self) -> usize {
+            unreachable!()
+        }
+        fn model_id(&self) -> &str {
+            unreachable!()
+        }
+        async fn embed_batch(&self, _: &[String]) -> crate::Result<Vec<Vec<f32>>> {
+            unreachable!()
+        }
     }
 
     fn retriever_for_test() -> Retriever {
@@ -220,7 +297,9 @@ mod tests {
 
     #[test]
     fn truncate_marks_truncation_for_long_diffs() {
-        let big = (0..200).map(|i| format!("line {}\n", i)).collect::<String>();
+        let big = (0..200)
+            .map(|i| format!("line {}\n", i))
+            .collect::<String>();
         let (out, trunc) = super::truncate_diff(&big, 80);
         assert!(trunc);
         assert!(out.contains("more lines"));
@@ -279,36 +358,87 @@ mod tests {
     struct FakeEmbedder;
     #[async_trait::async_trait]
     impl crate::EmbeddingProvider for FakeEmbedder {
-        fn dimension(&self) -> usize { 4 }
-        fn model_id(&self) -> &str { "fake" }
+        fn dimension(&self) -> usize {
+            4
+        }
+        fn model_id(&self) -> &str {
+            "fake"
+        }
         async fn embed_batch(&self, texts: &[String]) -> crate::Result<Vec<Vec<f32>>> {
-            Ok(texts.iter().map(|t| match t.as_str() {
-                "retry" => vec![1.0, 0.0, 0.0, 0.0],
-                "added retry logic" => vec![1.0, 0.1, 0.0, 0.0],
-                "renamed file" => vec![0.0, 1.0, 0.0, 0.0],
-                _ => vec![0.0; 4],
-            }).collect())
+            Ok(texts
+                .iter()
+                .map(|t| match t.as_str() {
+                    "retry" => vec![1.0, 0.0, 0.0, 0.0],
+                    "added retry logic" => vec![1.0, 0.1, 0.0, 0.0],
+                    "renamed file" => vec![0.0, 1.0, 0.0, 0.0],
+                    _ => vec![0.0; 4],
+                })
+                .collect())
         }
     }
 
-    struct FakeStorage { hits: Vec<HunkHit> }
+    struct FakeStorage {
+        hits: Vec<HunkHit>,
+    }
     #[async_trait::async_trait]
     impl crate::Storage for FakeStorage {
-        async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> crate::Result<()> { Ok(()) }
-        async fn get_index_status(&self, _: &RepoId) -> crate::Result<crate::query::IndexStatus> { Ok(crate::query::IndexStatus { last_indexed_commit: None, commits_behind_head: 0, indexed_at: None }) }
-        async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> crate::Result<()> { Ok(()) }
-        async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> crate::Result<()> { Ok(()) }
-        async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> crate::Result<()> { Ok(()) }
-        async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> crate::Result<()> { Ok(()) }
-        async fn knn_hunks(&self, _: &RepoId, _: &[f32], _: u8, _: Option<&str>, _: Option<i64>) -> crate::Result<Vec<HunkHit>> { Ok(self.hits.clone()) }
-        async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> { Ok(false) }
-        async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> { Ok(()) }
+        async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn get_index_status(&self, _: &RepoId) -> crate::Result<crate::query::IndexStatus> {
+            Ok(crate::query::IndexStatus {
+                last_indexed_commit: None,
+                commits_behind_head: 0,
+                indexed_at: None,
+            })
+        }
+        async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn knn_hunks(
+            &self,
+            _: &RepoId,
+            _: &[f32],
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> crate::Result<Vec<HunkHit>> {
+            Ok(self.hits.clone())
+        }
+        async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
+            Ok(false)
+        }
+        async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
+            Ok(())
+        }
     }
 
     fn fake_hit_with_msg(sha: &str, ts: i64, sim: f32, msg: &str) -> HunkHit {
         HunkHit {
-            hunk: Hunk { commit_sha: sha.into(), file_path: "a.rs".into(), language: Some("rust".into()), change_kind: ChangeKind::Added, diff_text: "+x".into() },
-            commit: CommitMeta { sha: sha.into(), parent_sha: None, is_merge: false, author: None, ts, message: msg.into() },
+            hunk: Hunk {
+                commit_sha: sha.into(),
+                file_path: "a.rs".into(),
+                language: Some("rust".into()),
+                change_kind: ChangeKind::Added,
+                diff_text: "+x".into(),
+            },
+            commit: CommitMeta {
+                sha: sha.into(),
+                parent_sha: None,
+                is_merge: false,
+                author: None,
+                ts,
+                message: msg.into(),
+            },
             similarity: sim,
         }
     }
@@ -324,9 +454,17 @@ mod tests {
         });
         let embedder = Arc::new(FakeEmbedder);
         let r = Retriever::new(storage, embedder);
-        let q = PatternQuery { query: "retry".into(), k: 5, language: None, since_unix: None };
+        let q = PatternQuery {
+            query: "retry".into(),
+            k: 5,
+            language: None,
+            since_unix: None,
+        };
         let id = RepoId::from_parts("x", "/y");
         let out = r.find_pattern(&id, &q, now).await.unwrap();
-        assert_eq!(out[0].commit_sha, "a", "retry-related commit message should win the tie");
+        assert_eq!(
+            out[0].commit_sha, "a",
+            "retry-related commit message should win the tie"
+        );
     }
 }

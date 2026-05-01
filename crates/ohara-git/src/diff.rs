@@ -15,7 +15,9 @@ pub fn hunks_for_commit(repo: &Repository, sha: &str) -> Result<Vec<Hunk>> {
     };
 
     let mut opts = DiffOptions::new();
-    opts.context_lines(3).interhunk_lines(0).ignore_whitespace_eol(true);
+    opts.context_lines(3)
+        .interhunk_lines(0)
+        .ignore_whitespace_eol(true);
 
     let mut diff = match parent_tree.as_ref() {
         Some(p) => repo.diff_tree_to_tree(Some(p), Some(&tree), Some(&mut opts))?,
@@ -31,8 +33,12 @@ pub fn hunks_for_commit(repo: &Repository, sha: &str) -> Result<Vec<Hunk>> {
     let mut buf = String::new();
 
     diff.print(DiffFormat::Patch, |delta, _hunk, line| {
-        let path = delta.new_file().path().or_else(|| delta.old_file().path())
-            .map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+        let path = delta
+            .new_file()
+            .path()
+            .or_else(|| delta.old_file().path())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
         let ck = match delta.status() {
             git2::Delta::Added => ChangeKind::Added,
             git2::Delta::Deleted => ChangeKind::Deleted,
@@ -41,7 +47,12 @@ pub fn hunks_for_commit(repo: &Repository, sha: &str) -> Result<Vec<Hunk>> {
         };
         match &current {
             Some((p, _)) if *p != path => {
-                hunks.push(make_hunk(sha, p, current.as_ref().unwrap().1, std::mem::take(&mut buf)));
+                hunks.push(make_hunk(
+                    sha,
+                    p,
+                    current.as_ref().unwrap().1,
+                    std::mem::take(&mut buf),
+                ));
                 current = Some((path.clone(), ck));
             }
             None => current = Some((path.clone(), ck)),
@@ -76,14 +87,17 @@ fn make_hunk(sha: &str, file_path: &str, ck: ChangeKind, diff_text: String) -> H
 
 fn detect_language(path: &str) -> Option<String> {
     let ext = Path::new(path).extension()?.to_str()?;
-    Some(match ext {
-        "rs" => "rust",
-        "py" => "python",
-        "ts" | "tsx" => "typescript",
-        "js" | "jsx" | "mjs" | "cjs" => "javascript",
-        "go" => "go",
-        _ => return None,
-    }.to_string())
+    Some(
+        match ext {
+            "rs" => "rust",
+            "py" => "python",
+            "ts" | "tsx" => "typescript",
+            "js" | "jsx" | "mjs" | "cjs" => "javascript",
+            "go" => "go",
+            _ => return None,
+        }
+        .to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -96,17 +110,36 @@ mod tests {
         let sig = Signature::now("a", "a@a").unwrap();
         std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
         let mut idx = repo.index().unwrap();
-        idx.add_path(std::path::Path::new("a.rs")).unwrap(); idx.write().unwrap();
+        idx.add_path(std::path::Path::new("a.rs")).unwrap();
+        idx.write().unwrap();
         let t1 = idx.write_tree().unwrap();
-        let c1 = repo.commit(Some("HEAD"), &sig, &sig, "first", &repo.find_tree(t1).unwrap(), &[]).unwrap();
+        let c1 = repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "first",
+                &repo.find_tree(t1).unwrap(),
+                &[],
+            )
+            .unwrap();
 
         std::fs::write(dir.join("a.rs"), "fn a() { println!(); }\n").unwrap();
         let mut idx = repo.index().unwrap();
-        idx.add_path(std::path::Path::new("a.rs")).unwrap(); idx.write().unwrap();
+        idx.add_path(std::path::Path::new("a.rs")).unwrap();
+        idx.write().unwrap();
         let t2 = idx.write_tree().unwrap();
         {
             let p = repo.find_commit(c1).unwrap();
-            repo.commit(Some("HEAD"), &sig, &sig, "second", &repo.find_tree(t2).unwrap(), &[&p]).unwrap();
+            repo.commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "second",
+                &repo.find_tree(t2).unwrap(),
+                &[&p],
+            )
+            .unwrap();
         }
         repo
     }
@@ -138,7 +171,16 @@ mod tests {
         idx.add_path(std::path::Path::new("first.rs")).unwrap();
         idx.write().unwrap();
         let t = idx.write_tree().unwrap();
-        let oid = repo.commit(Some("HEAD"), &sig, &sig, "root", &repo.find_tree(t).unwrap(), &[]).unwrap();
+        let oid = repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "root",
+                &repo.find_tree(t).unwrap(),
+                &[],
+            )
+            .unwrap();
 
         let hunks = hunks_for_commit(&repo, &oid.to_string()).unwrap();
         assert_eq!(hunks.len(), 1);

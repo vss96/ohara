@@ -20,13 +20,18 @@ impl OharaServer {
 
         let db_path = ohara_core::paths::index_db_path(&repo_id)?;
 
-        let storage: Arc<dyn Storage> = Arc::new(ohara_storage::SqliteStorage::open(&db_path).await?);
-        let embedder: Arc<dyn EmbeddingProvider> = Arc::new(
-            tokio::task::spawn_blocking(ohara_embed::FastEmbedProvider::new).await??
-        );
+        let storage: Arc<dyn Storage> =
+            Arc::new(ohara_storage::SqliteStorage::open(&db_path).await?);
+        let embedder: Arc<dyn EmbeddingProvider> =
+            Arc::new(tokio::task::spawn_blocking(ohara_embed::FastEmbedProvider::new).await??);
         let retriever = Retriever::new(storage.clone(), embedder.clone());
 
-        Ok(Self { repo_id, repo_path: canonical, storage, retriever })
+        Ok(Self {
+            repo_id,
+            repo_path: canonical,
+            storage,
+            retriever,
+        })
     }
 
     pub async fn serve_stdio(self) -> Result<()> {
@@ -35,12 +40,9 @@ impl OharaServer {
 
     pub async fn index_status_meta(&self) -> Result<ohara_core::query::ResponseMeta> {
         let behind = ohara_git::GitCommitsBehind::open(&self.repo_path)?;
-        let st = ohara_core::query::compute_index_status(
-            self.storage.as_ref(),
-            &self.repo_id,
-            &behind,
-        )
-        .await?;
+        let st =
+            ohara_core::query::compute_index_status(self.storage.as_ref(), &self.repo_id, &behind)
+                .await?;
         let hint = if st.last_indexed_commit.is_none() {
             Some("Index not built. Run `ohara index` in this repo.".to_string())
         } else if st.commits_behind_head > 50 {

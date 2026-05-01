@@ -23,9 +23,8 @@ pub async fn run(args: Args) -> Result<()> {
     let (repo_id, _, _) = super::resolve_repo_id(&args.path)?;
     let db_path = super::index_db_path(&repo_id)?;
     let storage = Arc::new(ohara_storage::SqliteStorage::open(&db_path).await?);
-    let embedder = Arc::new(tokio::task::spawn_blocking(|| {
-        ohara_embed::FastEmbedProvider::new()
-    }).await??);
+    let embedder =
+        Arc::new(tokio::task::spawn_blocking(ohara_embed::FastEmbedProvider::new).await??);
 
     let retriever = Retriever::new(storage, embedder);
     let q = PatternQuery {

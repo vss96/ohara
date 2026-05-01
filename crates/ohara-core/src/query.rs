@@ -17,7 +17,7 @@ pub struct PatternHit {
     pub commit_sha: String,
     pub commit_message: String,
     pub commit_author: Option<String>,
-    pub commit_date: String,            // ISO 8601
+    pub commit_date: String, // ISO 8601
     pub file_path: String,
     pub change_kind: String,
     pub diff_excerpt: String,
@@ -33,7 +33,7 @@ pub struct PatternHit {
 pub struct IndexStatus {
     pub last_indexed_commit: Option<String>,
     pub commits_behind_head: u64,
-    pub indexed_at: Option<String>,     // ISO 8601
+    pub indexed_at: Option<String>, // ISO 8601
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,7 +59,9 @@ pub async fn compute_index_status(
     behind: &dyn CommitsBehind,
 ) -> Result<IndexStatus> {
     let st = storage.get_index_status(repo_id).await?;
-    let n = behind.count_since(st.last_indexed_commit.as_deref()).await?;
+    let n = behind
+        .count_since(st.last_indexed_commit.as_deref())
+        .await?;
     Ok(IndexStatus {
         last_indexed_commit: st.last_indexed_commit,
         commits_behind_head: n,
@@ -120,7 +122,9 @@ mod tests {
 
     #[async_trait]
     impl Storage for FakeStorage {
-        async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> crate::Result<()> { Ok(()) }
+        async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> crate::Result<()> {
+            Ok(())
+        }
         async fn get_index_status(&self, _: &RepoId) -> crate::Result<IndexStatus> {
             Ok(IndexStatus {
                 last_indexed_commit: self.last_sha.clone(),
@@ -128,15 +132,34 @@ mod tests {
                 indexed_at: self.indexed_at.clone(),
             })
         }
-        async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> crate::Result<()> { Ok(()) }
-        async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> crate::Result<()> { Ok(()) }
-        async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> crate::Result<()> { Ok(()) }
-        async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> crate::Result<()> { Ok(()) }
+        async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> crate::Result<()> {
+            Ok(())
+        }
         async fn knn_hunks(
-            &self, _: &RepoId, _: &[f32], _: u8, _: Option<&str>, _: Option<i64>,
-        ) -> crate::Result<Vec<HunkHit>> { Ok(vec![]) }
-        async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> { Ok(false) }
-        async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> { Ok(()) }
+            &self,
+            _: &RepoId,
+            _: &[f32],
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> crate::Result<Vec<HunkHit>> {
+            Ok(vec![])
+        }
+        async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
+            Ok(false)
+        }
+        async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
+            Ok(())
+        }
     }
 
     struct FakeBehind {

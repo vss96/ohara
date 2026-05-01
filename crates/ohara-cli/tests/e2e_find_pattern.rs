@@ -5,11 +5,19 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn ensure_fixture() -> PathBuf {
-    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf();
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let script = workspace.join("fixtures/build_tiny.sh");
     let repo = workspace.join("fixtures/tiny/repo");
     if !repo.join(".git").exists() {
-        let s = Command::new("bash").arg(&script).status().expect("run fixture script");
+        let s = Command::new("bash")
+            .arg(&script)
+            .status()
+            .expect("run fixture script");
         assert!(s.success(), "fixture script failed");
     }
     repo
@@ -23,7 +31,10 @@ async fn find_pattern_returns_retry_commit_first() {
     std::env::set_var("OHARA_HOME", home.path());
 
     // index
-    let args = ohara_cli::commands::index::Args { path: repo.clone(), incremental: false };
+    let args = ohara_cli::commands::index::Args {
+        path: repo.clone(),
+        incremental: false,
+    };
     ohara_cli::commands::index::run(args).await.unwrap();
 
     // build a Retriever directly to avoid parsing CLI stdout
@@ -31,7 +42,10 @@ async fn find_pattern_returns_retry_commit_first() {
     let db = ohara_cli::commands::index_db_path(&repo_id).unwrap();
     let storage = std::sync::Arc::new(ohara_storage::SqliteStorage::open(&db).await.unwrap());
     let embedder = std::sync::Arc::new(
-        tokio::task::spawn_blocking(|| ohara_embed::FastEmbedProvider::new()).await.unwrap().unwrap()
+        tokio::task::spawn_blocking(ohara_embed::FastEmbedProvider::new)
+            .await
+            .unwrap()
+            .unwrap(),
     );
     let retriever = ohara_core::Retriever::new(storage, embedder);
 

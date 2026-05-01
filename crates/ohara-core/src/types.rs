@@ -78,7 +78,7 @@ pub struct CommitMeta {
     pub parent_sha: Option<String>,
     pub is_merge: bool,
     pub author: Option<String>,
-    pub ts: i64,             // unix seconds
+    pub ts: i64, // unix seconds
     pub message: String,
 }
 

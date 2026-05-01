@@ -8,7 +8,9 @@ const QUERY_SRC: &str = include_str!("../queries/python.scm");
 pub fn extract(file_path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symbol>> {
     let mut parser = Parser::new();
     let language = tree_sitter_python::language();
-    parser.set_language(&language).context("set python language")?;
+    parser
+        .set_language(&language)
+        .context("set python language")?;
     let tree = parser.parse(source, None).context("parse python")?;
     let query = Query::new(&language, QUERY_SRC).context("python query")?;
     let mut cursor = QueryCursor::new();
