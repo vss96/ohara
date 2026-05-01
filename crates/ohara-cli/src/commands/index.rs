@@ -23,6 +23,21 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
     let storage = Arc::new(ohara_storage::SqliteStorage::open(&db_path).await?);
     storage.open_repo(&repo_id, &canonical.to_string_lossy(), &first_commit).await?;
 
+    // Fast path: when --incremental is set and storage's last_indexed_commit
+    // matches HEAD, return immediately without booting the FastEmbed model
+    // (which costs ~hundreds of ms even when cached). This is what makes the
+    // post-commit hook nearly free on no-op re-indexes.
+    if args.incremental {
+        let st = storage.get_index_status(&repo_id).await?;
+        let walker = ohara_git::GitWalker::open(&canonical)?;
+        let head = walker.head_commit_sha()?;
+        if st.last_indexed_commit.as_deref() == Some(head.as_str()) {
+            tracing::info!(sha = %head, "incremental: index up-to-date, skipping embedder init");
+            println!("index up-to-date at {head}");
+            return Ok(IndexerReport { new_commits: 0, new_hunks: 0, head_symbols: 0 });
+        }
+    }
+
     let embedder = Arc::new(tokio::task::spawn_blocking(|| {
         ohara_embed::FastEmbedProvider::new()
     }).await??);

@@ -27,6 +27,13 @@ impl GitWalker {
         Ok(commit.id().to_string())
     }
 
+    /// SHA at the tip of the current branch. O(1) — does not walk history.
+    pub fn head_commit_sha(&self) -> Result<String> {
+        let head = self.repo.head().context("HEAD missing")?;
+        let commit = head.peel_to_commit().context("HEAD is not a commit")?;
+        Ok(commit.id().to_string())
+    }
+
     pub fn list_commits(&self, since: Option<&str>) -> Result<Vec<CommitMeta>> {
         let mut walk = self.repo.revwalk()?;
         walk.set_sorting(Sort::TOPOLOGICAL | Sort::REVERSE)?;

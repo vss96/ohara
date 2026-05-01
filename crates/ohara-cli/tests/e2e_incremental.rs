@@ -7,6 +7,17 @@
 use git2::{Repository, Signature};
 use std::fs;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
+
+/// All tests in this file mutate `OHARA_HOME` (a process-global env var).
+/// `cargo test` runs them in parallel by default, so we serialize them
+/// behind a single mutex.
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
 
 fn make_commit(repo: &Repository, dir: &Path, file: &str, body: &str, msg: &str) {
     fs::write(dir.join(file), body).unwrap();
@@ -26,6 +37,7 @@ fn make_commit(repo: &Repository, dir: &Path, file: &str, body: &str, msg: &str)
 #[tokio::test]
 #[ignore = "downloads embedding model on first run; opt in with --include-ignored"]
 async fn incremental_on_fresh_repo_indexes_everything() {
+    let _g = env_lock();
     let repo_dir = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("OHARA_HOME", home.path());
@@ -46,6 +58,7 @@ async fn incremental_on_fresh_repo_indexes_everything() {
 #[tokio::test]
 #[ignore = "downloads embedding model on first run; opt in with --include-ignored"]
 async fn incremental_after_partial_index_only_walks_new_commits() {
+    let _g = env_lock();
     let repo_dir = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("OHARA_HOME", home.path());
@@ -78,6 +91,7 @@ async fn incremental_after_partial_index_only_walks_new_commits() {
 #[tokio::test]
 #[ignore = "downloads embedding model on first run; opt in with --include-ignored"]
 async fn incremental_at_head_is_noop_and_skips_embedder_init() {
+    let _g = env_lock();
     let repo_dir = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("OHARA_HOME", home.path());
