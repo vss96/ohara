@@ -9,3 +9,9 @@
 
 (interface_declaration
   name: (identifier) @class_name) @def_class
+
+(method_declaration
+  name: (identifier) @method_name) @def_method
+
+(constructor_declaration
+  name: (identifier) @method_name) @def_method
