@@ -83,7 +83,7 @@ pub enum SymbolKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitMeta {
-    pub sha: String,
+    pub commit_sha: String,
     pub parent_sha: Option<String>,
     pub is_merge: bool,
     pub author: Option<String>,

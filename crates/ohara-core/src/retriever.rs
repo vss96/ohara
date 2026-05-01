@@ -189,7 +189,7 @@ impl Retriever {
                     .unwrap_or_default();
                 let (excerpt, truncated) = truncate_diff(&h.hunk.diff_text, 80);
                 PatternHit {
-                    commit_sha: h.commit.sha,
+                    commit_sha: h.commit.commit_sha,
                     commit_message: h.commit.message,
                     commit_author: h.commit.author,
                     commit_date: date,
@@ -265,7 +265,7 @@ mod tests {
                 diff_text: diff.into(),
             },
             commit: CommitMeta {
-                sha: sha.into(),
+                commit_sha: sha.into(),
                 parent_sha: None,
                 is_merge: false,
                 author: Some("a".into()),

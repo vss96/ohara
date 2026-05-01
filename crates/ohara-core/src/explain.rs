@@ -186,7 +186,7 @@ pub async fn explain_change(
     for (cm, lines) in indexed {
         let (excerpt, truncated) = if query.include_diff {
             let hunks = storage
-                .get_hunks_for_file_in_commit(repo_id, &cm.sha, &query.file)
+                .get_hunks_for_file_in_commit(repo_id, &cm.commit_sha, &query.file)
                 .await?;
             let joined: String = hunks
                 .iter()
@@ -201,7 +201,7 @@ pub async fn explain_change(
             .map(|d| d.to_rfc3339())
             .unwrap_or_default();
         hits.push(ExplainHit {
-            commit_sha: cm.sha,
+            commit_sha: cm.commit_sha,
             commit_message: cm.message,
             commit_author: cm.author,
             commit_date: date,
@@ -360,7 +360,7 @@ mod tests {
             }
         }
         fn seed_commit(&mut self, cm: CommitMeta) {
-            self.commits.insert(cm.sha.clone(), cm);
+            self.commits.insert(cm.commit_sha.clone(), cm);
         }
         fn seed_hunk(&mut self, sha: &str, file: &str, diff_text: &str) {
             self.hunks
@@ -477,7 +477,7 @@ mod tests {
 
     fn cm(sha: &str, ts: i64, message: &str) -> CommitMeta {
         CommitMeta {
-            sha: sha.into(),
+            commit_sha: sha.into(),
             parent_sha: None,
             is_merge: false,
             author: Some("alice".into()),

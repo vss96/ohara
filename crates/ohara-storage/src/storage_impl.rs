@@ -214,7 +214,7 @@ mod tests {
         s.open_repo(&id, "/repo", "first").await.unwrap();
 
         let cm = CommitMeta {
-            sha: "abc".into(),
+            commit_sha: "abc".into(),
             parent_sha: None,
             is_merge: false,
             author: Some("alice".into()),
@@ -264,7 +264,7 @@ mod tests {
 
         let original: Vec<f32> = (0..384).map(|i| (i as f32) * 0.001 - 0.2).collect();
         let cm = CommitMeta {
-            sha: "rt".into(),
+            commit_sha: "rt".into(),
             parent_sha: None,
             is_merge: false,
             author: None,
@@ -324,7 +324,7 @@ mod tests {
         let (_dir, s, id) = fixture_storage_with_repo().await;
 
         let cm = CommitMeta {
-            sha: "c1".into(),
+            commit_sha: "c1".into(),
             parent_sha: None,
             is_merge: false,
             author: None,
@@ -378,7 +378,7 @@ mod tests {
     async fn knn_hunks_returns_nearest() {
         let (_dir, s, id) = fixture_storage_with_repo().await;
         let cm = CommitMeta {
-            sha: "c1".into(),
+            commit_sha: "c1".into(),
             parent_sha: None,
             is_merge: false,
             author: None,
@@ -431,7 +431,7 @@ mod tests {
     async fn knn_hunks_similarity_is_bounded_in_zero_to_one() {
         let (_dir, s, id) = fixture_storage_with_repo().await;
         let cm = CommitMeta {
-            sha: "c1".into(),
+            commit_sha: "c1".into(),
             parent_sha: None,
             is_merge: false,
             author: None,
@@ -503,7 +503,7 @@ mod tests {
         hunks: &[(&str, &str, Option<&str>)], // (file_name, diff_text, language)
     ) {
         let cm = CommitMeta {
-            sha: commit_sha.into(),
+            commit_sha: commit_sha.into(),
             parent_sha: None,
             is_merge: false,
             author: None,
@@ -666,7 +666,7 @@ mod tests {
             1,
             "since_unix filter must drop pre-cutoff commits"
         );
-        assert_eq!(hits[0].commit.sha, "new");
+        assert_eq!(hits[0].commit.commit_sha, "new");
     }
 
     #[tokio::test]
@@ -686,7 +686,7 @@ mod tests {
         // the matching file's hunk.
         let (_dir, s, id) = fixture_storage_with_repo().await;
         let cm = CommitMeta {
-            sha: "filter-sha".into(),
+            commit_sha: "filter-sha".into(),
             parent_sha: None,
             is_merge: false,
             author: None,
@@ -756,7 +756,7 @@ mod tests {
         // CommitMeta field must round-trip identically.
         let (_dir, s, id) = fixture_storage_with_repo().await;
         let cm = CommitMeta {
-            sha: "rt-sha".into(),
+            commit_sha: "rt-sha".into(),
             parent_sha: Some("parent-sha".into()),
             is_merge: true,
             author: Some("alice@example.com".into()),
@@ -773,7 +773,7 @@ mod tests {
         .await
         .unwrap();
         let got = s.get_commit(&id, "rt-sha").await.unwrap().expect("present");
-        assert_eq!(got.sha, cm.sha);
+        assert_eq!(got.commit_sha, cm.commit_sha);
         assert_eq!(got.parent_sha, cm.parent_sha);
         assert_eq!(got.is_merge, cm.is_merge);
         assert_eq!(got.author, cm.author);

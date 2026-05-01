@@ -182,7 +182,7 @@ fn row_to_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<HunkHit> {
         diff_text,
     };
     let commit = CommitMeta {
-        sha: commit_sha,
+        commit_sha,
         parent_sha,
         is_merge: is_merge != 0,
         author,

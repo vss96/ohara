@@ -53,7 +53,7 @@ impl GitWalker {
                 None
             };
             out.push(CommitMeta {
-                sha: oid.to_string(),
+                commit_sha: oid.to_string(),
                 parent_sha,
                 is_merge: c.parent_count() > 1,
                 author: Some(c.author().name().unwrap_or("").to_string()).filter(|s| !s.is_empty()),
@@ -113,7 +113,7 @@ mod tests {
         init_repo_with_commits(dir.path(), &["a", "b", "c"]);
         let w = GitWalker::open(dir.path()).unwrap();
         let all = w.list_commits(None).unwrap();
-        let mid = &all[1].sha; // "b"
+        let mid = &all[1].commit_sha; // "b"
         let after = w.list_commits(Some(mid)).unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].message.trim(), "c");
@@ -127,7 +127,7 @@ mod tests {
         let first = w.first_commit_sha().unwrap();
         let cs = w.list_commits(None).unwrap();
         // The root commit (cs[0] in topological-reverse order) is the one without a parent.
-        assert_eq!(first, cs[0].sha);
+        assert_eq!(first, cs[0].commit_sha);
         assert!(
             cs[0].parent_sha.is_none(),
             "root commit should have no parent"

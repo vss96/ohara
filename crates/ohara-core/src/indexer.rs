@@ -115,7 +115,7 @@ impl Indexer {
         for chunk in commits.chunks(self.batch_commits) {
             for cm in chunk {
                 let extract_start = Instant::now();
-                let hunks = commit_source.hunks_for_commit(&cm.sha).await?;
+                let hunks = commit_source.hunks_for_commit(&cm.commit_sha).await?;
                 timings.diff_extract_ms += extract_start.elapsed().as_millis() as u64;
                 total_hunks += hunks.len();
 
@@ -160,7 +160,7 @@ impl Indexer {
                     .collect();
                 self.storage.put_hunks(repo_id, &records).await?;
                 timings.storage_write_ms += write_start.elapsed().as_millis() as u64;
-                latest_sha = Some(cm.sha.clone());
+                latest_sha = Some(cm.commit_sha.clone());
                 commits_done += 1;
                 self.progress.commit_done(commits_done, total_hunks);
                 if commits_done % PROGRESS_INTERVAL == 0 {
@@ -440,7 +440,7 @@ mod phase_timing_tests {
 
     fn fake_commit(sha: &str) -> CommitMeta {
         CommitMeta {
-            sha: sha.into(),
+            commit_sha: sha.into(),
             parent_sha: None,
             is_merge: false,
             author: Some("a@a".into()),

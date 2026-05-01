@@ -122,7 +122,7 @@ pub fn knn(
             diff_text,
         };
         let commit = CommitMeta {
-            sha: commit_sha,
+            commit_sha,
             parent_sha,
             is_merge: is_merge != 0,
             author,
@@ -213,7 +213,7 @@ pub fn bm25_by_text(
             diff_text,
         };
         let commit = CommitMeta {
-            sha: commit_sha,
+            commit_sha,
             parent_sha,
             is_merge: is_merge != 0,
             author,

@@ -11,7 +11,7 @@ pub fn put(c: &mut Connection, record: &CommitRecord) -> Result<()> {
         "INSERT OR REPLACE INTO commit_record (sha, parent_sha, is_merge, ts, author, message)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
-            &record.meta.sha,
+            &record.meta.commit_sha,
             &record.meta.parent_sha,
             record.meta.is_merge as i64,
             record.meta.ts,
@@ -22,11 +22,11 @@ pub fn put(c: &mut Connection, record: &CommitRecord) -> Result<()> {
     let bytes = vec_codec::vec_to_bytes(&record.message_emb);
     tx.execute(
         "INSERT OR REPLACE INTO vec_commit (commit_sha, message_emb) VALUES (?1, ?2)",
-        params![&record.meta.sha, bytes],
+        params![&record.meta.commit_sha, bytes],
     )?;
     tx.execute(
         "INSERT OR REPLACE INTO fts_commit (sha, message) VALUES (?1, ?2)",
-        params![&record.meta.sha, &record.meta.message],
+        params![&record.meta.commit_sha, &record.meta.message],
     )?;
     tx.commit()?;
     Ok(())
@@ -45,14 +45,14 @@ pub fn get(c: &Connection, sha: &str) -> Result<Option<CommitMeta>> {
              WHERE sha = ?1",
             params![sha],
             |r| {
-                let sha: String = r.get(0)?;
+                let commit_sha: String = r.get(0)?;
                 let parent_sha: Option<String> = r.get(1)?;
                 let is_merge: i64 = r.get(2)?;
                 let ts: i64 = r.get(3)?;
                 let author: Option<String> = r.get(4)?;
                 let message: String = r.get(5)?;
                 Ok(CommitMeta {
-                    sha,
+                    commit_sha,
                     parent_sha,
                     is_merge: is_merge != 0,
                     author,
