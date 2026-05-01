@@ -34,6 +34,65 @@ pub struct Args {
     /// still emits `tracing::info!` events every 100 commits.
     #[arg(long)]
     pub no_progress: bool,
+    /// Emit the per-phase wall-time + hunk-inflation breakdown as a
+    /// single JSON object on stdout after the run finishes. Used by
+    /// the v0.6 throughput baseline (see
+    /// `docs/perf/v0.6-baseline.md`); pipe to `jq` or paste into the
+    /// markdown template. The summary line still prints to stdout
+    /// before the JSON; structured tracing on stderr is unaffected.
+    #[arg(long)]
+    pub profile: bool,
+}
+
+/// Render `PhaseTimings` as the JSON object emitted by `--profile`.
+/// Pulled out of `run` so the JSON shape is unit-testable without
+/// driving a real index pass.
+pub fn phase_timings_json(pt: &PhaseTimings) -> String {
+    serde_json::to_string(pt).expect("PhaseTimings serializes via derive(Serialize)")
+}
+
+#[cfg(test)]
+mod profile_json_tests {
+    use super::*;
+
+    #[test]
+    fn phase_timings_json_contains_every_field() {
+        // Contract: every PhaseTimings field is present in the JSON
+        // emitted by --profile. The lead's manual baseline run pastes
+        // this output into docs/perf/v0.6-baseline.md, so a missing
+        // key here breaks the template downstream.
+        let pt = PhaseTimings {
+            commit_walk_ms: 1,
+            diff_extract_ms: 2,
+            tree_sitter_parse_ms: 3,
+            embed_ms: 4,
+            storage_write_ms: 5,
+            fts_insert_ms: 6,
+            head_symbols_ms: 7,
+            total_diff_bytes: 8,
+            total_added_lines: 9,
+        };
+        let s = phase_timings_json(&pt);
+        let v: serde_json::Value = serde_json::from_str(&s).expect("parse JSON");
+        for key in [
+            "commit_walk_ms",
+            "diff_extract_ms",
+            "tree_sitter_parse_ms",
+            "embed_ms",
+            "storage_write_ms",
+            "fts_insert_ms",
+            "head_symbols_ms",
+            "total_diff_bytes",
+            "total_added_lines",
+        ] {
+            assert!(
+                v.get(key).is_some(),
+                "PhaseTimings JSON must expose `{key}`"
+            );
+        }
+        assert_eq!(v.get("commit_walk_ms").and_then(|x| x.as_u64()), Some(1));
+        assert_eq!(v.get("total_added_lines").and_then(|x| x.as_u64()), Some(9));
+    }
 }
 
 pub async fn run(args: Args) -> Result<IndexerReport> {
@@ -116,5 +175,11 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         "indexed: {} new commits, {} hunks, {} HEAD symbols",
         report.new_commits, report.new_hunks, report.head_symbols
     );
+    if args.profile {
+        // Single-line JSON keeps it `jq`-friendly and easy to
+        // copy-paste into docs/perf/v0.6-baseline.md without
+        // wrestling pretty-printed whitespace.
+        println!("{}", phase_timings_json(&report.phase_timings));
+    }
     Ok(report)
 }

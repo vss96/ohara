@@ -76,6 +76,7 @@ async fn cross_encoder_picks_better_message_among_near_duplicates() {
         commit_batch: 512,
         threads: 0,
         no_progress: true,
+        profile: false,
     })
     .await
     .unwrap();

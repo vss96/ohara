@@ -35,6 +35,7 @@ async fn smoke_index_then_status() {
         commit_batch: 512,
         threads: 0,
         no_progress: true,
+        profile: false,
     };
     ohara_cli::commands::index::run(args).await.unwrap();
 
