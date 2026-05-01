@@ -1,13 +1,10 @@
-//! Retrieval pipeline (Plan 3 / Track D).
+//! Retrieval pipeline.
 //!
 //! Three lanes — vector KNN, BM25 over hunk text, BM25 over symbol names —
 //! gather candidates in parallel; Reciprocal Rank Fusion (`k = 60`) merges
 //! the lanes; an optional cross-encoder rerank scores the surviving
 //! candidates against the query; a small recency multiplier acts as a
 //! tie-breaker on the rerank score.
-//!
-//! The v0.2 hand-tuned linear ranker (`0.7·sim + 0.2·recency + 0.1·msg_sim`)
-//! is gone. So is the "embed query, cosine-vs-commit-message" path.
 
 use crate::diff_text::{truncate_diff, DIFF_EXCERPT_MAX_LINES};
 use crate::embed::RerankProvider;
@@ -18,10 +15,7 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Tunable knobs for the v0.3 retrieval pipeline. The v0.2 fields
-/// (`similarity`, `recency`, `message_match`) are gone — any caller still
-/// constructing `RankingWeights { .. }` with the old shape will fail to
-/// compile, by design.
+/// Tunable knobs for the retrieval pipeline.
 #[derive(Debug, Clone)]
 pub struct RankingWeights {
     /// Multiplier on the recency factor in the final score:

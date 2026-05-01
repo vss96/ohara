@@ -1,4 +1,4 @@
-//! Kotlin symbol extractor (Plan 4).
+//! Kotlin symbol extractor.
 //!
 //! Walks a tree-sitter-kotlin parse tree and emits one `Symbol` per
 //! top-level + nested type/function declaration, in source byte order.

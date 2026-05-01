@@ -239,7 +239,7 @@ pub struct IndexerReport {
     pub head_symbols: usize,
     /// Per-phase wall-time + input-size breakdown for the run, captured
     /// when the `--profile` flag (or any caller plumbing
-    /// `Indexer::run`) wants the same numbers used for v0.6 throughput
+    /// `Indexer::run`) wants the same numbers used for throughput
     /// analysis. Always present so consumers don't branch on
     /// `Option`; fields default to zero on a no-op pass.
     pub phase_timings: PhaseTimings,
@@ -249,7 +249,8 @@ pub struct IndexerReport {
 /// invocation. Field semantics are cumulative across the commit walk:
 /// `embed_ms` is the sum of every per-commit `embed_batch` call, etc.
 /// `total_diff_bytes / total_added_lines` gives the hunk-text inflation
-/// ratio called out in the v0.6 RFC (high ratio ⇒ trim git2 context).
+/// ratio (high ratio ⇒ the embedder is seeing more context bytes than
+/// signal-bearing added lines, a hint to trim git2 context).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PhaseTimings {
     /// Wall-time spent listing commits (`CommitSource::list_commits`).
@@ -279,8 +280,7 @@ pub struct PhaseTimings {
     pub head_symbols_ms: u64,
     /// Sum of every diff-text byte-length fed to the embedder during
     /// the run. Pairs with `total_added_lines` to compute
-    /// `bytes_per_added_line` — the cheap-win measurement from the
-    /// v0.6 RFC (Task 0.3).
+    /// `bytes_per_added_line`, the inflation-ratio diagnostic.
     pub total_diff_bytes: u64,
     /// Sum of every "+"-prefixed line count across all hunks during
     /// the run. Counts only added lines (context / removed lines are

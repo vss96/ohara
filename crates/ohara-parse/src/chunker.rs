@@ -1,10 +1,10 @@
 //! AST-aware sibling-merge chunker.
 //!
-//! Track C / step C-2 of plan 3. Walks a list of source-order top-level
-//! symbol "atoms" left-to-right, greedily merging consecutive atoms into
-//! a single chunk while the running token total stays under
-//! `max_tokens`. An atom that already exceeds the budget on its own is
-//! emitted as a single-symbol chunk (no subdivision).
+//! Walks a list of source-order top-level symbol "atoms" left-to-right,
+//! greedily merging consecutive atoms into a single chunk while the
+//! running token total stays under `max_tokens`. An atom that already
+//! exceeds the budget on its own is emitted as a single-symbol chunk
+//! (no subdivision).
 //!
 //! The emitted `Symbol`'s `name` is the first atom's name (the
 //! "primary"); `sibling_names` carries the *other* atoms' names in

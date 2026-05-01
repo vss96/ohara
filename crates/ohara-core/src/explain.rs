@@ -1,11 +1,10 @@
 //! `explain_change` orchestrator — given a file + line range, return the
 //! commits that introduced and shaped that code, ordered newest-first.
 //!
-//! Plan 5 / Track A. Counterpart to `find_pattern`: where the retriever
-//! answers "how was X done before" via embeddings + BM25 + rerank, this
-//! module answers "why does THIS code look the way it does" via
-//! deterministic `git blame`. No embeddings, no rerank — every result has
-//! `provenance = EXACT`.
+//! Counterpart to `find_pattern`: where the retriever answers "how was X
+//! done before" via embeddings + BM25 + rerank, this module answers "why
+//! does THIS code look the way it does" via deterministic `git blame`.
+//! No embeddings, no rerank — every result has `provenance = EXACT`.
 //!
 //! `ohara-core` stays git-free: the `BlameSource` trait abstracts over
 //! `git2::Repository::blame_file`, with the real implementation living in
@@ -285,7 +284,7 @@ mod tests {
 
     /// Doc-test-style sanity check that the trait surface compiles
     /// against a hand-rolled fake. The orchestrator's behavioural tests
-    /// land in Task 7 once `explain_change` exists.
+    /// live in the surrounding `tests` module.
     struct FakeBlamer;
 
     #[async_trait]

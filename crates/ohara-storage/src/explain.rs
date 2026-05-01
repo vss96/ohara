@@ -1,4 +1,4 @@
-//! Storage queries that back the Plan 5 `explain_change` orchestrator.
+//! Storage queries that back the `explain_change` orchestrator.
 //!
 //! The orchestrator (in `ohara-core::explain`) walks `git blame` lines
 //! → unique commit SHAs, then asks storage for the per-commit hunks

@@ -67,8 +67,8 @@ pub enum Provenance {
     /// git-truth. Used by `find_pattern`.
     Inferred,
     /// Sourced directly from `git blame` — every reported line is
-    /// attributable to the named commit. Used by `explain_change`
-    /// (Plan 5). Distinct from `Extracted` so callers can distinguish
+    /// attributable to the named commit. Used by `explain_change`.
+    /// Distinct from `Extracted` so callers can distinguish
     /// "AST said so" from "git said so".
     Exact,
 }
@@ -108,8 +108,9 @@ pub struct Symbol {
     pub name: String,
     pub qualified_name: Option<String>,
     /// Names of sibling AST nodes merged into the same chunk by the
-    /// AST-aware sibling-merge chunker. Empty for v0.2-era rows or for
-    /// chunks containing a single top-level symbol.
+    /// AST-aware sibling-merge chunker. Empty for legacy rows that
+    /// pre-date the chunker, or for chunks containing a single
+    /// top-level symbol.
     #[serde(default)]
     pub sibling_names: Vec<String>,
     pub span_start: u32,

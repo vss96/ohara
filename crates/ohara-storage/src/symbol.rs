@@ -1,11 +1,10 @@
 //! Symbol persistence + BM25 lookup over `fts_symbol_name`.
 //!
-//! Plan 3 / Track A. Plan 1 left `put_head_symbols` as a no-op stub on
-//! `SqliteStorage`; Plan 3's BM25-by-symbol-name lane requires real
-//! persistence so the FTS5 index has rows to match against. With Track C
-//! landed, `Symbol::sibling_names` is populated by the AST chunker and
-//! we serialize it here as JSON so the FTS row indexes the actual
-//! merged-sibling names (fueling the BM25-by-symbol-name lane).
+//! Persists each `Symbol` to the `symbol` table and mirrors it into the
+//! `fts_symbol_name` virtual table so the BM25-by-symbol-name retrieval
+//! lane has rows to match against. `Symbol::sibling_names` is serialized
+//! as JSON so the FTS row indexes the merged-sibling names produced by
+//! the AST sibling-merge chunker.
 
 use anyhow::Result;
 use ohara_core::storage::HunkHit;
@@ -52,10 +51,10 @@ fn put_one(tx: &rusqlite::Transaction<'_>, fp_id: i64, s: &Symbol) -> Result<()>
 }
 
 /// Drop all symbol rows (and their FTS5 mirror) for the repo's HEAD
-/// snapshot. v0.3 / Plan 3 / Track D `--force` calls this before
-/// re-running `put_head_symbols` so repeated re-extracts don't
-/// accumulate duplicate rows. The schema-level cascade also clears the
-/// related `vec_symbol` rows.
+/// snapshot. `ohara index --force` calls this before re-running
+/// `put_head_symbols` so repeated re-extracts don't accumulate
+/// duplicate rows. The schema-level cascade also clears the related
+/// `vec_symbol` rows.
 pub fn clear_all(c: &mut Connection) -> Result<()> {
     let tx = c.transaction()?;
     // Drop FTS5 + vec mirrors first (they reference symbol.id), then symbol.

@@ -34,9 +34,9 @@ pub fn put(c: &mut Connection, record: &CommitRecord) -> Result<()> {
 
 /// Fetch a single commit's metadata by SHA. Returns `Ok(None)` if the
 /// SHA isn't present in `commit_record` (e.g., the commit is older than
-/// the local index watermark). Used by the Plan 5 `explain_change`
-/// orchestrator to enrich `git blame` results with author / message /
-/// timestamp for display.
+/// the local index watermark). Used by the `explain_change` orchestrator
+/// to enrich `git blame` results with author / message / timestamp for
+/// display.
 pub fn get(c: &Connection, sha: &str) -> Result<Option<CommitMeta>> {
     let row = c
         .query_row(

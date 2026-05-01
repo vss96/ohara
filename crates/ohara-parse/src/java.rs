@@ -1,4 +1,4 @@
-//! Java symbol extractor (Plan 4).
+//! Java symbol extractor.
 //!
 //! Walks a tree-sitter-java parse tree and emits one `Symbol` per
 //! top-level + nested type/method declaration, in source byte order.
