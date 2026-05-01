@@ -399,11 +399,7 @@ mod tests {
         async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
             Ok(())
         }
-        async fn get_commit(
-            &self,
-            _: &RepoId,
-            _: &str,
-        ) -> crate::Result<Option<CommitMeta>> {
+        async fn get_commit(&self, _: &RepoId, _: &str) -> crate::Result<Option<CommitMeta>> {
             unreachable!("retriever tests should not exercise get_commit")
         }
         async fn get_hunks_for_file_in_commit(

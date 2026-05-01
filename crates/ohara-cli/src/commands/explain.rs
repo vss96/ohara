@@ -55,11 +55,7 @@ pub async fn run(args: Args) -> Result<()> {
 /// Parse the `--lines` argument. Mirrors the MCP input semantics: a
 /// missing or `0`-valued upper bound resolves to the file's actual
 /// last line by reading the workdir.
-fn parse_lines(
-    spec: Option<&str>,
-    repo_root: &std::path::Path,
-    file: &str,
-) -> Result<(u32, u32)> {
+fn parse_lines(spec: Option<&str>, repo_root: &std::path::Path, file: &str) -> Result<(u32, u32)> {
     let Some(s) = spec else {
         // No flag: full file. Defer the file-length lookup to here so we
         // only read the file when we actually need it.

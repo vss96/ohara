@@ -253,7 +253,9 @@ fn build_limitation(
     clamped_end: u32,
 ) -> Option<String> {
     if total == 0 {
-        return Some("blame returned no attributable lines (file missing in HEAD or empty range)".into());
+        return Some(
+            "blame returned no attributable lines (file missing in HEAD or empty range)".into(),
+        );
     }
     if !skipped.is_empty() {
         // Don't dump every SHA — keep the message terse but informative.
@@ -299,7 +301,6 @@ fn truncate_diff(s: &str, max_lines: usize) -> (String, bool) {
     out.push_str(&format!("... ({} more lines)\n", extra));
     (out, true)
 }
-
 
 #[cfg(test)]
 mod tests {

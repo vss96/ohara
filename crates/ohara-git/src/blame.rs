@@ -218,7 +218,8 @@ mod tests {
         assert_eq!(out.len(), 2, "two distinct origin commits");
         // The BTreeMap ordering is alphabetical-by-sha; assert against the
         // membership rather than order so the test isn't flaky.
-        let mut seen: std::collections::HashMap<String, Vec<u32>> = std::collections::HashMap::new();
+        let mut seen: std::collections::HashMap<String, Vec<u32>> =
+            std::collections::HashMap::new();
         for r in &out {
             seen.insert(r.commit_sha.clone(), r.lines.clone());
         }

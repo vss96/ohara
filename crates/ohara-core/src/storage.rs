@@ -3,7 +3,6 @@ use crate::types::{CommitMeta, Hunk, RepoId, Symbol};
 use crate::Result;
 use async_trait::async_trait;
 
-
 /// Vector with the same dimension as `EmbeddingProvider::dimension()`.
 pub type Vector = Vec<f32>;
 

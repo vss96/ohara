@@ -157,11 +157,7 @@ impl Storage for SqliteStorage {
         with_conn(&self.pool, move |c| crate::blob_cache::record(c, &blob, &m)).await
     }
 
-    async fn get_commit(
-        &self,
-        _repo_id: &RepoId,
-        sha: &str,
-    ) -> CoreResult<Option<CommitMeta>> {
+    async fn get_commit(&self, _repo_id: &RepoId, sha: &str) -> CoreResult<Option<CommitMeta>> {
         // Plan 5 / Task 2: SELECT a single commit row by sha. Returns
         // Ok(None) for SHAs that aren't yet indexed so the explain_change
         // orchestrator can skip them gracefully.

@@ -12,16 +12,22 @@ Named after Ohara, the island in One Piece whose Tree of Knowledge held 5,000
 years of accumulated history — and whose archaeologists devoted their lives to
 reading it.
 
-**Status: v0.4.** v0.1 shipped Plan 1 (foundation + the `find_pattern`
-MCP tool); v0.2 shipped Plan 2 (`ohara init` post-commit hook + `ohara
-index --incremental` fast path); v0.3 shipped Plan 3 (three-lane
-retrieval pipeline: vector KNN + FTS5 BM25 on hunk text + FTS5 BM25 on
-symbol names → Reciprocal Rank Fusion → cross-encoder rerank
-(`bge-reranker-base`) → recency multiplier; AST sibling-merge chunking).
-v0.4 (this release) adds Java 17/21+ and Kotlin 1.9/2.0+ language
-support: sealed types, records, data classes, objects, companions, and
-annotations on declarations are all indexed. The `explain_change` tool
-arrives in v0.5.
+**Status: v0.5.** Two MCP tools shipped:
+
+- **`find_pattern`** — "how was X done before?" (semantic search over git
+  history with three-lane retrieval pipeline + cross-encoder rerank,
+  shipped in v0.3).
+- **`explain_change`** — "why does THIS code look the way it does?"
+  (deterministic git-blame-based commit lookup for a file + line
+  range; new in v0.5).
+
+History: v0.1 = Plan 1 foundation + `find_pattern`; v0.2 = `ohara init`
+post-commit hook + `--incremental` fast path; v0.3 = three-lane
+retrieval (vector KNN + FTS5 BM25 hunk-text + FTS5 BM25 symbol-name) →
+RRF → cross-encoder rerank (`bge-reranker-base`) → recency multiplier
++ AST sibling-merge chunking; v0.4 = Java 17/21 and Kotlin 1.9/2.0
+language support (sealed types, records, data classes, annotations
+preserved in `source_text` for Spring-friendly retrieval).
 
 Languages: **Rust, Python, Java, Kotlin.** Class- and method-level
 annotations (`@RestController`, `@Service`, `@Component`,
