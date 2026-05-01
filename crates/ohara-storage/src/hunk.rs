@@ -125,6 +125,98 @@ pub fn knn(
     Ok(out)
 }
 
+/// BM25 over `fts_hunk_text`, joined to the hunk's file + commit so we
+/// return the same `HunkHit` shape as `knn`. Ordered best-first.
+pub fn bm25_by_text(
+    c: &Connection,
+    query: &str,
+    k: u8,
+    language: Option<&str>,
+    since_unix: Option<i64>,
+) -> Result<Vec<HunkHit>> {
+    let lang_filter = language.map(|_| "AND fp.language = :lang").unwrap_or("");
+    let ts_filter = since_unix.map(|_| "AND cr.ts >= :ts").unwrap_or("");
+
+    // SQLite's bm25() returns a negative number where most-negative is best.
+    // ORDER BY bm25(fts_hunk_text) ASC puts the strongest match first.
+    let sql = format!(
+        "SELECT h.id, h.commit_sha, fp.path, fp.language, h.change_kind, h.diff_text,
+                cr.parent_sha, cr.is_merge, cr.author, cr.ts, cr.message,
+                bm25(fts_hunk_text) AS rank_score
+         FROM fts_hunk_text f
+         JOIN hunk h ON h.id = f.hunk_id
+         JOIN file_path fp ON fp.id = h.file_path_id
+         JOIN commit_record cr ON cr.sha = h.commit_sha
+         WHERE fts_hunk_text MATCH :query
+           {ts_filter} {lang_filter}
+         ORDER BY rank_score ASC
+         LIMIT :k"
+    );
+
+    let mut binds: Vec<(&str, Box<dyn rusqlite::ToSql>)> = Vec::new();
+    binds.push((":query", Box::new(query.to_string())));
+    binds.push((":k", Box::new(k as i64)));
+    if let Some(lang) = language {
+        binds.push((":lang", Box::new(lang.to_string())));
+    }
+    if let Some(ts) = since_unix {
+        binds.push((":ts", Box::new(ts)));
+    }
+
+    let mut stmt = c.prepare(&sql)?;
+    let bind_refs: Vec<(&str, &dyn rusqlite::ToSql)> = binds
+        .iter()
+        .map(|(k, v)| (*k, v.as_ref() as &dyn rusqlite::ToSql))
+        .collect();
+
+    let rows = stmt.query_map(bind_refs.as_slice(), |row| {
+        let hunk_id: i64 = row.get(0)?;
+        let commit_sha: String = row.get(1)?;
+        let file_path: String = row.get(2)?;
+        let language: Option<String> = row.get(3)?;
+        let change_kind_s: String = row.get(4)?;
+        let diff_text: String = row.get(5)?;
+        let parent_sha: Option<String> = row.get(6)?;
+        let is_merge: i64 = row.get(7)?;
+        let author: Option<String> = row.get(8)?;
+        let ts: i64 = row.get(9)?;
+        let message: String = row.get(10)?;
+        let rank_score: f64 = row.get(11)?;
+
+        let hunk = Hunk {
+            commit_sha: commit_sha.clone(),
+            file_path,
+            language,
+            change_kind: str_to_change_kind(&change_kind_s),
+            diff_text,
+        };
+        let commit = CommitMeta {
+            sha: commit_sha,
+            parent_sha,
+            is_merge: is_merge != 0,
+            author,
+            ts,
+            message,
+        };
+        // Negate -> positive normalized "higher is better" score, same shape
+        // as `knn`'s similarity. Callers should treat this as informational;
+        // ranking is done by RRF on the row order, not on this number.
+        let similarity = 1.0 / (1.0 + (-rank_score) as f32);
+        Ok(HunkHit {
+            hunk_id,
+            hunk,
+            commit,
+            similarity,
+        })
+    })?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 fn upsert_file_path(c: &Connection, path: &str, language: Option<&str>) -> Result<i64> {
     c.execute(
         "INSERT INTO file_path (path, language, active) VALUES (?1, ?2, 1)

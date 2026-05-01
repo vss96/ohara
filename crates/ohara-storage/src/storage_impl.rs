@@ -77,10 +77,12 @@ impl Storage for SqliteStorage {
         with_conn(&self.pool, move |c| crate::hunk::put_many(c, &recs)).await
     }
 
-    async fn put_head_symbols(&self, _repo_id: &RepoId, _symbols: &[Symbol]) -> CoreResult<()> {
-        // No-op in Plan 1 since find_pattern doesn't read symbols.
-        // Plan 2 will populate symbol + symbol_lineage tables.
-        Ok(())
+    async fn put_head_symbols(&self, _repo_id: &RepoId, symbols: &[Symbol]) -> CoreResult<()> {
+        // Plan 3 / Track A: persist symbols + mirror into fts_symbol_name so
+        // the BM25-by-symbol-name lane has rows to match against. Track C
+        // will later wire `Symbol::sibling_names` through this path.
+        let syms = symbols.to_vec();
+        with_conn(&self.pool, move |c| crate::symbol::put_many(c, &syms)).await
     }
 
     async fn knn_hunks(
@@ -102,25 +104,33 @@ impl Storage for SqliteStorage {
     async fn bm25_hunks_by_text(
         &self,
         _repo_id: &RepoId,
-        _query: &str,
-        _k: u8,
-        _language: Option<&str>,
-        _since_unix: Option<i64>,
+        query: &str,
+        k: u8,
+        language: Option<&str>,
+        since_unix: Option<i64>,
     ) -> CoreResult<Vec<HunkHit>> {
-        // Implemented in A-2.g.
-        unreachable!("bm25_hunks_by_text not yet implemented")
+        let q = query.to_string();
+        let lang = language.map(str::to_string);
+        with_conn(&self.pool, move |c| {
+            crate::hunk::bm25_by_text(c, &q, k, lang.as_deref(), since_unix)
+        })
+        .await
     }
 
     async fn bm25_hunks_by_symbol_name(
         &self,
         _repo_id: &RepoId,
-        _query: &str,
-        _k: u8,
-        _language: Option<&str>,
-        _since_unix: Option<i64>,
+        query: &str,
+        k: u8,
+        language: Option<&str>,
+        since_unix: Option<i64>,
     ) -> CoreResult<Vec<HunkHit>> {
-        // Implemented in A-2.g.
-        unreachable!("bm25_hunks_by_symbol_name not yet implemented")
+        let q = query.to_string();
+        let lang = language.map(str::to_string);
+        with_conn(&self.pool, move |c| {
+            crate::symbol::bm25_by_name(c, &q, k, lang.as_deref(), since_unix)
+        })
+        .await
     }
 
     async fn blob_was_seen(&self, blob_sha: &str, model: &str) -> CoreResult<bool> {
