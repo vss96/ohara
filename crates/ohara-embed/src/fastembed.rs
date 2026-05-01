@@ -134,13 +134,12 @@ impl RerankProvider for FastEmbedReranker {
 /// respectively; under normal fastembed behavior the result set is a
 /// permutation of `0..n` so neither path triggers in production.
 fn align_by_index(results: Vec<fastembed::RerankResult>, n: usize) -> Vec<f32> {
-    let mut out = vec![0.0_f32; n];
-    for r in results {
-        if r.index < n {
-            out[r.index] = r.score;
-        }
-    }
-    out
+    // B.3.r intentional bug: this preserves fastembed's score-descending
+    // ordering instead of restoring the input slice's positional order,
+    // violating the RerankProvider contract. B.3.g replaces this with
+    // an index-keyed write into a length-n vec.
+    let _ = n;
+    results.into_iter().map(|r| r.score).collect()
 }
 
 #[cfg(test)]
@@ -158,6 +157,41 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].len(), p.dimension());
         assert!(out[0].iter().any(|&x| x != 0.0));
+    }
+
+    fn rr(index: usize, score: f32) -> fastembed::RerankResult {
+        fastembed::RerankResult {
+            document: None,
+            score,
+            index,
+        }
+    }
+
+    #[test]
+    fn align_by_index_restores_input_order() {
+        // fastembed returns results sorted by score desc; original input order is 0,1,2.
+        let results = vec![rr(1, 9.0), rr(2, 5.0), rr(0, 1.0)];
+        assert_eq!(align_by_index(results, 3), vec![1.0, 9.0, 5.0]);
+    }
+
+    #[test]
+    fn align_by_index_pads_missing_positions_with_zero() {
+        // A truncating reranker (top-k) might omit some indices; remaining
+        // positions stay at 0.0 so callers can still index by position.
+        let results = vec![rr(2, 7.5), rr(0, 3.0)];
+        assert_eq!(align_by_index(results, 4), vec![3.0, 0.0, 7.5, 0.0]);
+    }
+
+    #[test]
+    fn align_by_index_drops_out_of_range_indices() {
+        // Defensive: an index >= n must not panic the caller; just drop it.
+        let results = vec![rr(0, 1.0), rr(5, 9.9)];
+        assert_eq!(align_by_index(results, 2), vec![1.0, 0.0]);
+    }
+
+    #[test]
+    fn align_by_index_empty_results_returns_zero_vec() {
+        assert_eq!(align_by_index(vec![], 3), vec![0.0, 0.0, 0.0]);
     }
 
     #[tokio::test]
