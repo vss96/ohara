@@ -263,7 +263,7 @@ mod tests {
         }
     }
 
-    use ohara_core::types::{ChangeKind, Hunk};
+    use ohara_core::types::{ChangeKind, Hunk, Symbol, SymbolKind};
 
     async fn fixture_storage_with_repo() -> (tempfile::TempDir, SqliteStorage, RepoId) {
         let dir = tempfile::tempdir().unwrap();
@@ -446,5 +446,141 @@ mod tests {
 
         // Ordering: nearest first.
         assert_eq!(hits[0].hunk.file_path, "near.rs");
+    }
+
+    /// Helper: seed a single commit + a set of hunks with distinct diff
+    /// texts so BM25 lane tests can pick a winner. Returns the commit
+    /// timestamp used so callers can derive `since_unix` boundaries.
+    async fn seed_hunks_with_texts(
+        s: &SqliteStorage,
+        id: &RepoId,
+        commit_sha: &str,
+        ts: i64,
+        hunks: &[(&str, &str, Option<&str>)], // (file_name, diff_text, language)
+    ) {
+        let cm = CommitMeta {
+            sha: commit_sha.into(),
+            parent_sha: None,
+            is_merge: false,
+            author: None,
+            ts,
+            message: "m".into(),
+        };
+        s.put_commit(
+            id,
+            &CommitRecord {
+                meta: cm,
+                message_emb: vec![0.0; 384],
+            },
+        )
+        .await
+        .unwrap();
+
+        let recs: Vec<HunkRecord> = hunks
+            .iter()
+            .map(|(name, diff, lang)| HunkRecord {
+                hunk: Hunk {
+                    commit_sha: commit_sha.into(),
+                    file_path: format!("src/{name}.rs"),
+                    language: lang.map(str::to_string),
+                    change_kind: ChangeKind::Added,
+                    diff_text: (*diff).to_string(),
+                },
+                diff_emb: vec![0.0f32; 384],
+            })
+            .collect();
+        s.put_hunks(id, &recs).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bm25_hunks_by_text_orders_best_first() {
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        seed_hunks_with_texts(
+            &s,
+            &id,
+            "c1",
+            1_700_000_000,
+            &[
+                ("a", "+fn retry_with_backoff() { /* retry */ }\n", Some("rust")),
+                ("b", "+fn renamed_helper() {}\n", Some("rust")),
+                ("c", "+fn timeout_helper() {}\n", Some("rust")),
+            ],
+        )
+        .await;
+
+        let hits = s
+            .bm25_hunks_by_text(&id, "retry", 5, None, None)
+            .await
+            .unwrap();
+        assert!(!hits.is_empty(), "BM25 should match the retry hunk");
+        assert!(
+            hits[0].hunk.file_path.ends_with("a.rs"),
+            "rank 0 must be the retry hunk, got {:?}",
+            hits[0].hunk.file_path
+        );
+        // Score must be positive ("higher is better" convention).
+        assert!(hits[0].similarity > 0.0);
+        // hunk_id must be populated for the RRF join key contract.
+        assert!(hits[0].hunk_id > 0, "hunk_id must be a real rowid");
+    }
+
+    #[tokio::test]
+    async fn bm25_hunks_by_symbol_name_filters_by_language() {
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        seed_hunks_with_texts(
+            &s,
+            &id,
+            "c1",
+            1_700_000_000,
+            &[
+                ("a", "+fn alpha_handler() {}\n", Some("rust")),
+                ("b", "+def beta_handler():\n", Some("python")),
+            ],
+        )
+        .await;
+        // Persist symbols whose names match the queries — one per language.
+        s.put_head_symbols(
+            &id,
+            &[
+                Symbol {
+                    file_path: "src/a.rs".into(),
+                    language: "rust".into(),
+                    kind: SymbolKind::Function,
+                    name: "alpha_handler".into(),
+                    qualified_name: None,
+                    span_start: 0,
+                    span_end: 20,
+                    blob_sha: "sha-a".into(),
+                    source_text: "fn alpha_handler() {}".into(),
+                },
+                Symbol {
+                    file_path: "src/b.rs".into(),
+                    language: "python".into(),
+                    kind: SymbolKind::Function,
+                    name: "beta_handler".into(),
+                    qualified_name: None,
+                    span_start: 0,
+                    span_end: 20,
+                    blob_sha: "sha-b".into(),
+                    source_text: "def beta_handler():".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+        let rust_hits = s
+            .bm25_hunks_by_symbol_name(&id, "alpha_handler", 5, Some("rust"), None)
+            .await
+            .unwrap();
+        assert_eq!(rust_hits.len(), 1, "rust filter should keep only a.rs");
+        assert!(rust_hits[0].hunk.file_path.ends_with("a.rs"));
+
+        let py_hits = s
+            .bm25_hunks_by_symbol_name(&id, "beta_handler", 5, Some("python"), None)
+            .await
+            .unwrap();
+        assert_eq!(py_hits.len(), 1);
+        assert!(py_hits[0].hunk.file_path.ends_with("b.rs"));
     }
 }
