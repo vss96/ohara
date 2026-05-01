@@ -23,15 +23,27 @@ maintained fork). All else inherited from Plan 3.
 
 ## 0. Findings to verify before writing code
 
-- [ ] **Pick `tree-sitter-java` version.** Latest crate on crates.io that
-      builds against `tree-sitter = "0.22"`. Verify it supports
-      `sealed_class_declaration`, `record_declaration`, and
-      `annotation_type_declaration` queries. (Likely 0.21.x.)
-- [ ] **Pick `tree-sitter-kotlin` version.** Canonical
-      `tree-sitter-kotlin` crate (fwcd) or an actively-maintained fork.
-      Verify it supports `sealed`, `data class`, `object_declaration`,
-      `companion_object`. If only an unmaintained crate builds, flag as
-      a blocker — ship Java only and defer Kotlin.
+- [x] **Pick `tree-sitter-java` version: `0.21.0`.** Latest 0.21.x on
+      crates.io (newer 0.23.x require `tree-sitter >=0.23` and break our
+      0.22 pin). 0.21.0 declares `tree-sitter >=0.21.0`, compatible with
+      our pin. Confirmed `node-types.json` exposes
+      `class_declaration`, `interface_declaration`, `record_declaration`,
+      `enum_declaration`, `annotation_type_declaration`,
+      `method_declaration`, `constructor_declaration`, `marker_annotation`,
+      and `annotation`. `sealed` shows up as a modifier child of the
+      ordinary `class_declaration` / `interface_declaration` — there is
+      no distinct `sealed_class_declaration` AST type, so we capture all
+      sealed forms via the standard declaration patterns.
+- [x] **Pick `tree-sitter-kotlin` version: `0.3.8`** (canonical
+      `fwcd/tree-sitter-kotlin`). Declares `tree-sitter >=0.21, <0.23`,
+      compatible with our 0.22 pin. Confirmed `node-types.json` exposes
+      `class_declaration`, `object_declaration`, `companion_object`,
+      `function_declaration`, and `annotation`. Kotlin's grammar treats
+      interface as a flavor of `class_declaration` (carrying an
+      `interface` keyword child rather than a distinct AST node), and
+      `sealed`/`data` are modifiers on `class_declaration`. The newer
+      `tree-sitter-kotlin-ng` 1.x crate exists but pins
+      `tree-sitter ^0.25` so it cannot be used here.
 
 ## 1. Interface contracts
 
