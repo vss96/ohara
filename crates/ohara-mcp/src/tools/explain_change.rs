@@ -6,11 +6,12 @@
 //! code look the way it does?". Determined by `git blame`, not
 //! embeddings — every result has `provenance = "EXACT"`.
 
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
-pub const TOOL_DESCRIPTION: &str = "\
+/// Renamed from `TOOL_DESCRIPTION` to disambiguate from
+/// `find_pattern::TOOL_DESCRIPTION` once both are pulled into the same
+/// import scope by the rmcp `#[tool(tool_box)]` impl block.
+pub const EXPLAIN_TOOL_DESCRIPTION: &str = "\
 Explain why specific lines of code look the way they do, by walking
 git history and returning the commits that introduced and shaped them.
 

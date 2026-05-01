@@ -3,8 +3,15 @@
 //!
 //! Adapted from the Task 18 plan for the rmcp 0.1.5 API surface (see
 //! `tools/mod.rs` and the report for the specific deviations).
+//!
+//! `OharaService` also hosts the Plan 5 `explain_change` tool. Both
+//! methods live on the same `#[tool(tool_box)] impl` block — rmcp
+//! 0.1.5's macro only registers the methods on the impl block it
+//! decorates, so splitting them across separate impl blocks would drop
+//! the second tool from the registry.
 
 use crate::server::OharaServer;
+use crate::tools::explain_change::{ExplainChangeInput, EXPLAIN_TOOL_DESCRIPTION};
 use rmcp::{
     model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
     schemars, tool, ServerHandler,
@@ -105,6 +112,82 @@ impl OharaService {
         Ok(CallToolResult::success(vec![Content::text(
             body.to_string(),
         )]))
+    }
+
+    #[tool(description = EXPLAIN_TOOL_DESCRIPTION)]
+    pub async fn explain_change(
+        &self,
+        #[tool(aggr)] input: ExplainChangeInput,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        // Resolve the line_end sentinel ("0" → file length) by reading
+        // the workdir checkout. Defense-in-depth: the orchestrator and
+        // the Blamer both clamp internally, but we still pass a real
+        // upper bound so the schema's intent is honored.
+        let line_start = if input.line_start == 0 {
+            1
+        } else {
+            input.line_start
+        };
+        let line_end = if input.line_end == 0 {
+            let on_disk = self.server.repo_path.join(&input.file);
+            match std::fs::read_to_string(&on_disk) {
+                Ok(s) => count_lines(&s).max(line_start),
+                // File missing in workdir — let the orchestrator emit
+                // the limitation note. Use line_start as the upper
+                // bound so blame returns an empty Vec.
+                Err(_) => line_start,
+            }
+        } else {
+            input.line_end
+        };
+
+        let q = ohara_core::explain::ExplainQuery {
+            file: input.file,
+            line_start,
+            line_end,
+            k: input.k.clamp(1, 20),
+            include_diff: input.include_diff,
+        };
+        let (hits, explain_meta) = ohara_core::explain::explain_change(
+            self.server.storage.as_ref(),
+            self.server.blamer.as_ref(),
+            &self.server.repo_id,
+            &q,
+        )
+        .await
+        .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+        let index_meta = self
+            .server
+            .index_status_meta()
+            .await
+            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+
+        // Same response envelope shape as `find_pattern`: top-level
+        // `hits` + `_meta`, with `explain` placing its blame-specific
+        // diagnostics under `_meta.explain`.
+        let body = json!({
+            "hits": hits,
+            "_meta": {
+                "index_status": index_meta.index_status,
+                "hint": index_meta.hint,
+                "explain": explain_meta,
+            }
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            body.to_string(),
+        )]))
+    }
+}
+
+fn count_lines(s: &str) -> u32 {
+    if s.is_empty() {
+        return 0;
+    }
+    let nl = s.bytes().filter(|&b| b == b'\n').count() as u32;
+    if s.ends_with('\n') {
+        nl
+    } else {
+        nl + 1
     }
 }
 

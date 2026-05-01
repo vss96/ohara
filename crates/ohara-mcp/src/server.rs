@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use ohara_core::embed::RerankProvider;
 use ohara_core::types::RepoId;
 use ohara_core::{EmbeddingProvider, Retriever, Storage};
+use ohara_git::Blamer;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -10,6 +11,10 @@ pub struct OharaServer {
     pub repo_path: PathBuf,
     pub storage: Arc<dyn Storage>,
     pub retriever: Retriever,
+    /// Plan 5: blame source backing the `explain_change` tool. One per
+    /// session; reuses the underlying `git2::Repository` via
+    /// `Arc<Mutex<Repository>>` (set up inside `Blamer::open`).
+    pub blamer: Arc<Blamer>,
 }
 
 impl OharaServer {
@@ -32,11 +37,16 @@ impl OharaServer {
             Arc::new(tokio::task::spawn_blocking(ohara_embed::FastEmbedReranker::new).await??);
         let retriever = Retriever::new(storage.clone(), embedder.clone()).with_reranker(reranker);
 
+        // Plan 5: blame source for `explain_change`. Reads from the same
+        // workdir; no model download or async work needed.
+        let blamer = Arc::new(Blamer::open(&canonical).context("open blamer")?);
+
         Ok(Self {
             repo_id,
             repo_path: canonical,
             storage,
             retriever,
+            blamer,
         })
     }
 
