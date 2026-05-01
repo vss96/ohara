@@ -12,6 +12,7 @@
 
 use crate::server::OharaServer;
 use crate::tools::explain_change::{ExplainChangeInput, EXPLAIN_TOOL_DESCRIPTION};
+use ohara_core::count_lines;
 use rmcp::{
     model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
     schemars, tool, ServerHandler,
@@ -176,18 +177,6 @@ impl OharaService {
         Ok(CallToolResult::success(vec![Content::text(
             body.to_string(),
         )]))
-    }
-}
-
-fn count_lines(s: &str) -> u32 {
-    if s.is_empty() {
-        return 0;
-    }
-    let nl = s.bytes().filter(|&b| b == b'\n').count() as u32;
-    if s.ends_with('\n') {
-        nl
-    } else {
-        nl + 1
     }
 }
 

@@ -8,6 +8,7 @@
 
 use anyhow::{Context, Result};
 use git2::Repository;
+use ohara_core::count_lines;
 use ohara_core::explain::{BlameRange, BlameSource};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -117,18 +118,6 @@ pub(crate) fn blame_range_sync(
         .into_iter()
         .map(|(commit_sha, lines)| BlameRange { commit_sha, lines })
         .collect())
-}
-
-fn count_lines(s: &str) -> u32 {
-    if s.is_empty() {
-        return 0;
-    }
-    let nl = s.bytes().filter(|&b| b == b'\n').count() as u32;
-    if s.ends_with('\n') {
-        nl
-    } else {
-        nl + 1
-    }
 }
 
 #[cfg(test)]

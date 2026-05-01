@@ -6,6 +6,7 @@
 
 use anyhow::{anyhow, Result};
 use clap::Args as ClapArgs;
+use ohara_core::count_lines;
 use ohara_core::explain::{explain_change, ExplainQuery};
 use ohara_git::Blamer;
 use serde_json::json;
@@ -84,15 +85,7 @@ fn parse_lines(spec: Option<&str>, repo_root: &std::path::Path, file: &str) -> R
 fn file_line_count(repo_root: &std::path::Path, file: &str) -> Option<u32> {
     let on_disk = repo_root.join(file);
     let s = std::fs::read_to_string(&on_disk).ok()?;
-    if s.is_empty() {
-        return Some(0);
-    }
-    let nl = s.bytes().filter(|&b| b == b'\n').count() as u32;
-    if s.ends_with('\n') {
-        Some(nl)
-    } else {
-        Some(nl + 1)
-    }
+    Some(count_lines(&s))
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@
 //! `git2::Repository::blame_file`, with the real implementation living in
 //! `ohara-git::Blamer`.
 
+use crate::diff_text::{truncate_diff, DIFF_EXCERPT_MAX_LINES};
 use crate::storage::Storage;
 use crate::types::{Provenance, RepoId};
 use crate::Result;
@@ -79,11 +80,6 @@ pub struct ExplainHit {
     /// inferred. Serializes to `"EXACT"`.
     pub provenance: Provenance,
 }
-
-/// Per-line diff truncation cap for `ExplainHit::diff_excerpt`. Matches
-/// the value used by the `find_pattern` retrieval pipeline so MCP
-/// responses look consistent across both tools.
-const DIFF_EXCERPT_MAX_LINES: usize = 80;
 
 /// `k` clamp matches the spec: 1..=20, default 5 enforced at the caller.
 const K_MAX: u8 = 20;
@@ -274,32 +270,6 @@ fn build_limitation(
         ));
     }
     None
-}
-
-/// Same shape as `ohara-core::retriever::truncate_diff`. Inlined here
-/// rather than re-exported so the orchestrator stays self-contained.
-fn truncate_diff(s: &str, max_lines: usize) -> (String, bool) {
-    let nl = s.bytes().filter(|&b| b == b'\n').count();
-    let has_trailing_partial = !s.is_empty() && !s.ends_with('\n');
-    let total_lines = nl + if has_trailing_partial { 1 } else { 0 };
-    if total_lines <= max_lines {
-        return (s.to_string(), false);
-    }
-    let mut end = 0;
-    let mut count = 0;
-    for (i, b) in s.bytes().enumerate() {
-        if b == b'\n' {
-            count += 1;
-            if count == max_lines {
-                end = i + 1;
-                break;
-            }
-        }
-    }
-    let extra = total_lines - max_lines;
-    let mut out = s[..end].to_string();
-    out.push_str(&format!("... ({} more lines)\n", extra));
-    (out, true)
 }
 
 #[cfg(test)]

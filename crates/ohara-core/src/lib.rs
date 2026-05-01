@@ -4,6 +4,7 @@
 //! the contracts (`Storage`, `EmbeddingProvider`) and the orchestrators
 //! (`Indexer`, `Retriever`) that depend on them.
 
+pub mod diff_text;
 pub mod embed;
 pub mod error;
 pub mod explain;
@@ -14,6 +15,7 @@ pub mod retriever;
 pub mod storage;
 pub mod types;
 
+pub use diff_text::{count_lines, truncate_diff, DIFF_EXCERPT_MAX_LINES};
 pub use embed::EmbeddingProvider;
 pub use error::{OhraError, Result};
 pub use explain::{BlameRange, BlameSource, ExplainHit, ExplainMeta, ExplainQuery};

@@ -9,6 +9,7 @@
 //! The v0.2 hand-tuned linear ranker (`0.7·sim + 0.2·recency + 0.1·msg_sim`)
 //! is gone. So is the "embed query, cosine-vs-commit-message" path.
 
+use crate::diff_text::{truncate_diff, DIFF_EXCERPT_MAX_LINES};
 use crate::embed::RerankProvider;
 use crate::query::{reciprocal_rank_fusion, PatternHit, PatternQuery};
 use crate::storage::{HunkHit, HunkId};
@@ -187,7 +188,8 @@ impl Retriever {
                 let date = DateTime::<Utc>::from_timestamp(h.commit.ts, 0)
                     .map(|d| d.to_rfc3339())
                     .unwrap_or_default();
-                let (excerpt, truncated) = truncate_diff(&h.hunk.diff_text, 80);
+                let (excerpt, truncated) =
+                    truncate_diff(&h.hunk.diff_text, DIFF_EXCERPT_MAX_LINES);
                 PatternHit {
                     commit_sha: h.commit.commit_sha,
                     commit_message: h.commit.message,
@@ -213,35 +215,6 @@ impl Retriever {
         out.truncate(query.k.clamp(1, 20) as usize);
         Ok(out)
     }
-}
-
-fn truncate_diff(s: &str, max_lines: usize) -> (String, bool) {
-    // Count total lines, treating a trailing partial line (no \n) as a line.
-    let nl = s.bytes().filter(|&b| b == b'\n').count();
-    let has_trailing_partial = !s.is_empty() && !s.ends_with('\n');
-    let total_lines = nl + if has_trailing_partial { 1 } else { 0 };
-
-    if total_lines <= max_lines {
-        return (s.to_string(), false);
-    }
-
-    // Find byte index of the end of line `max_lines`.
-    let mut end = 0;
-    let mut count = 0;
-    for (i, b) in s.bytes().enumerate() {
-        if b == b'\n' {
-            count += 1;
-            if count == max_lines {
-                end = i + 1;
-                break;
-            }
-        }
-    }
-
-    let extra = total_lines - max_lines;
-    let mut out = s[..end].to_string();
-    out.push_str(&format!("... ({} more lines)\n", extra));
-    (out, true)
 }
 
 #[cfg(test)]
