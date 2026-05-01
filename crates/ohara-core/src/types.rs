@@ -98,6 +98,11 @@ pub struct Symbol {
     pub kind: SymbolKind,
     pub name: String,
     pub qualified_name: Option<String>,
+    /// Names of sibling AST nodes merged into the same chunk by the
+    /// AST-aware sibling-merge chunker. Empty for v0.2-era rows or for
+    /// chunks containing a single top-level symbol.
+    #[serde(default)]
+    pub sibling_names: Vec<String>,
     pub span_start: u32,
     pub span_end: u32,
     pub blob_sha: String,
@@ -110,17 +115,16 @@ mod symbol_tests {
 
     #[test]
     fn symbol_sibling_names_round_trip() {
-        // Red test for Track C / step C-1: documents that `Symbol` must
-        // round-trip a `sibling_names: Vec<String>` field through serde.
-        // This test compiles even before the struct field exists by
-        // round-tripping through JSON via `serde_json::Value`. The
-        // assertion fails until the field is added in the green commit.
+        // Track C / step C-1: `Symbol` round-trips a sibling_names field
+        // through serde. Construct with two siblings, serialize, inspect
+        // the raw JSON, then deserialize back into a typed Symbol.
         let s = Symbol {
             file_path: "src/a.rs".into(),
             language: "rust".into(),
             kind: SymbolKind::Function,
             name: "alpha".into(),
             qualified_name: None,
+            sibling_names: vec!["beta".into(), "gamma".into()],
             span_start: 0,
             span_end: 42,
             blob_sha: "deadbeef".into(),
@@ -132,13 +136,18 @@ mod symbol_tests {
             .get("sibling_names")
             .expect("`Symbol` must serialize a `sibling_names` field");
         let arr = names.as_array().expect("`sibling_names` must be an array");
-        assert!(
-            arr.is_empty(),
-            "default-constructed Symbol should have empty sibling_names"
+        assert_eq!(
+            arr.iter()
+                .map(|x| x.as_str().unwrap().to_string())
+                .collect::<Vec<_>>(),
+            vec!["beta".to_string(), "gamma".to_string()]
         );
 
-        // And round-trip back through the typed struct.
         let back: Symbol = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            back.sibling_names,
+            vec!["beta".to_string(), "gamma".to_string()]
+        );
         assert_eq!(back.name, "alpha");
         assert_eq!(back.span_end, 42);
     }

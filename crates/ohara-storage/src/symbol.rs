@@ -2,10 +2,10 @@
 //!
 //! Plan 3 / Track A. Plan 1 left `put_head_symbols` as a no-op stub on
 //! `SqliteStorage`; Plan 3's BM25-by-symbol-name lane requires real
-//! persistence so the FTS5 index has rows to match against. The actual
-//! `Symbol::sibling_names` field arrives in Track C; until then the SQL
-//! `symbol.sibling_names` column always falls back to its `'[]'` default
-//! and the FTS row stores the same literal.
+//! persistence so the FTS5 index has rows to match against. With Track C
+//! landed, `Symbol::sibling_names` is populated by the AST chunker and
+//! we serialize it here as JSON so the FTS row indexes the actual
+//! merged-sibling names (fueling the BM25-by-symbol-name lane).
 
 use anyhow::Result;
 use ohara_core::storage::HunkHit;
@@ -15,10 +15,9 @@ use rusqlite::{params, Connection};
 /// Persist a single `Symbol` to the `symbol` table and mirror it into
 /// the `fts_symbol_name` virtual table. Caller owns the transaction.
 fn put_one(tx: &rusqlite::Transaction<'_>, fp_id: i64, s: &Symbol) -> Result<()> {
-    // Track C will populate sibling_names via the AST chunker. Until that
-    // lands, we serialize an empty list — same value as the SQL default —
-    // so the schema invariant ("NOT NULL") is preserved.
-    let sibling_json = "[]";
+    // Serialize the sibling names produced by the AST chunker (Track C).
+    // For single-symbol chunks this is "[]", matching the SQL default.
+    let sibling_json = serde_json::to_string(&s.sibling_names)?;
     tx.execute(
         "INSERT INTO symbol (file_path_id, kind, name, qualified_name,
                              span_start, span_end, blob_sha, source_text,

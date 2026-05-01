@@ -58,6 +58,7 @@ pub fn extract(file_path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symb
                 kind: k,
                 name: n,
                 qualified_name: None,
+                sibling_names: Vec::new(),
                 span_start: s as u32,
                 span_end: e as u32,
                 blob_sha: blob_sha.to_string(),
