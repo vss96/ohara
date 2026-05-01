@@ -184,8 +184,7 @@ impl Retriever {
                 let date = DateTime::<Utc>::from_timestamp(h.commit.ts, 0)
                     .map(|d| d.to_rfc3339())
                     .unwrap_or_default();
-                let (excerpt, truncated) =
-                    truncate_diff(&h.hunk.diff_text, DIFF_EXCERPT_MAX_LINES);
+                let (excerpt, truncated) = truncate_diff(&h.hunk.diff_text, DIFF_EXCERPT_MAX_LINES);
                 PatternHit {
                     commit_sha: h.commit.commit_sha,
                     commit_message: h.commit.message,

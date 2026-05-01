@@ -175,8 +175,9 @@ fn row_to_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<HunkHit> {
     let message: String = row.get(10)?;
     let rank_score: f64 = row.get(11)?;
 
-    let change_kind = str_to_change_kind(&change_kind_s)
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, e.into()))?;
+    let change_kind = str_to_change_kind(&change_kind_s).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, e.into())
+    })?;
     let hunk = Hunk {
         commit_sha: commit_sha.clone(),
         file_path,

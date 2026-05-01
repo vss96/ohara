@@ -51,4 +51,3 @@ pub fn get_hunks_for_file_in_commit(
     }
     Ok(out)
 }
-
