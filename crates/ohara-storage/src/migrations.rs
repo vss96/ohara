@@ -16,7 +16,7 @@ mod tests {
     use crate::pool::{apply_pragmas, load_vec_extension};
 
     #[test]
-    fn migrations_apply_to_fresh_db() {
+    fn migrations_create_hunk_and_vec_hunk_tables_on_fresh_db() {
         crate::pool::register_vec_auto_extension().unwrap(); // register vec extension before opening any connection
         let mut c = Connection::open_in_memory().unwrap();
         apply_pragmas(&c).unwrap();

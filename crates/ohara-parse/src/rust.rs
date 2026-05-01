@@ -74,7 +74,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extracts_top_level_functions_and_methods() {
+    fn extract_returns_functions_methods_structs_and_enums_with_method_kind() {
         let src = r#"
             fn alpha() {}
             struct Foo;
