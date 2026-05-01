@@ -7,6 +7,7 @@ pub mod hunk;
 pub mod migrations;
 pub mod pool;
 pub mod repo;
+pub mod row_codec;
 pub mod storage_impl;
 pub mod symbol;
 pub mod vec_codec;

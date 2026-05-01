@@ -1,8 +1,9 @@
 use anyhow::Result;
 use ohara_core::storage::{HunkHit, HunkRecord};
-use ohara_core::types::{ChangeKind, CommitMeta, Hunk};
+use ohara_core::types::{CommitMeta, Hunk};
 use rusqlite::{params, Connection};
 
+use crate::row_codec::{change_kind_to_str, str_to_change_kind, upsert_file_path};
 use crate::vec_codec::vec_to_bytes;
 
 pub fn put_many(c: &mut Connection, records: &[HunkRecord]) -> Result<()> {
@@ -114,11 +115,13 @@ pub fn knn(
         let message: String = row.get(10)?;
         let distance: f32 = row.get(11)?;
 
+        let change_kind = str_to_change_kind(&change_kind_s)
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, e.into()))?;
         let hunk = Hunk {
             commit_sha: commit_sha.clone(),
             file_path,
             language,
-            change_kind: str_to_change_kind(&change_kind_s),
+            change_kind,
             diff_text,
         };
         let commit = CommitMeta {
@@ -205,11 +208,13 @@ pub fn bm25_by_text(
         let message: String = row.get(10)?;
         let rank_score: f64 = row.get(11)?;
 
+        let change_kind = str_to_change_kind(&change_kind_s)
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, e.into()))?;
         let hunk = Hunk {
             commit_sha: commit_sha.clone(),
             file_path,
             language,
-            change_kind: str_to_change_kind(&change_kind_s),
+            change_kind,
             diff_text,
         };
         let commit = CommitMeta {
@@ -239,35 +244,3 @@ pub fn bm25_by_text(
     Ok(out)
 }
 
-fn upsert_file_path(c: &Connection, path: &str, language: Option<&str>) -> Result<i64> {
-    c.execute(
-        "INSERT INTO file_path (path, language, active) VALUES (?1, ?2, 1)
-         ON CONFLICT(path) DO UPDATE SET language = COALESCE(excluded.language, file_path.language)",
-        params![path, language],
-    )?;
-    let id: i64 = c.query_row(
-        "SELECT id FROM file_path WHERE path = ?1",
-        params![path],
-        |r| r.get(0),
-    )?;
-    Ok(id)
-}
-
-fn change_kind_to_str(k: ChangeKind) -> &'static str {
-    match k {
-        ChangeKind::Added => "added",
-        ChangeKind::Modified => "modified",
-        ChangeKind::Deleted => "deleted",
-        ChangeKind::Renamed => "renamed",
-    }
-}
-
-fn str_to_change_kind(s: &str) -> ChangeKind {
-    match s {
-        "added" => ChangeKind::Added,
-        "modified" => ChangeKind::Modified,
-        "deleted" => ChangeKind::Deleted,
-        "renamed" => ChangeKind::Renamed,
-        _ => ChangeKind::Modified,
-    }
-}

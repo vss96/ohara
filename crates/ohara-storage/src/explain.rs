@@ -7,8 +7,10 @@
 //! `crate::commit::get`.
 
 use anyhow::Result;
-use ohara_core::types::{ChangeKind, Hunk};
+use ohara_core::types::Hunk;
 use rusqlite::{params, Connection};
+
+use crate::row_codec::str_to_change_kind;
 
 /// Return the hunks of `sha` whose `file_path` equals `file_path`.
 /// Returns an empty Vec if the commit isn't indexed or didn't touch
@@ -32,11 +34,14 @@ pub fn get_hunks_for_file_in_commit(
         let language: Option<String> = row.get(2)?;
         let change_kind_s: String = row.get(3)?;
         let diff_text: String = row.get(4)?;
+        let change_kind = str_to_change_kind(&change_kind_s).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, e.into())
+        })?;
         Ok(Hunk {
             commit_sha,
             file_path,
             language,
-            change_kind: str_to_change_kind(&change_kind_s),
+            change_kind,
             diff_text,
         })
     })?;
@@ -47,12 +52,3 @@ pub fn get_hunks_for_file_in_commit(
     Ok(out)
 }
 
-fn str_to_change_kind(s: &str) -> ChangeKind {
-    match s {
-        "added" => ChangeKind::Added,
-        "modified" => ChangeKind::Modified,
-        "deleted" => ChangeKind::Deleted,
-        "renamed" => ChangeKind::Renamed,
-        _ => ChangeKind::Modified,
-    }
-}

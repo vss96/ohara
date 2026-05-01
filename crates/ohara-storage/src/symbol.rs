@@ -9,8 +9,10 @@
 
 use anyhow::Result;
 use ohara_core::storage::HunkHit;
-use ohara_core::types::{ChangeKind, CommitMeta, Hunk, Symbol, SymbolKind};
+use ohara_core::types::{CommitMeta, Hunk, Symbol, SymbolKind};
 use rusqlite::{params, Connection};
+
+use crate::row_codec::{str_to_change_kind, upsert_file_path};
 
 /// Persist a single `Symbol` to the `symbol` table and mirror it into
 /// the `fts_symbol_name` virtual table. Caller owns the transaction.
@@ -174,11 +176,13 @@ fn row_to_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<HunkHit> {
     let message: String = row.get(10)?;
     let rank_score: f64 = row.get(11)?;
 
+    let change_kind = str_to_change_kind(&change_kind_s)
+        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, e.into()))?;
     let hunk = Hunk {
         commit_sha: commit_sha.clone(),
         file_path,
         language,
-        change_kind: str_to_change_kind(&change_kind_s),
+        change_kind,
         diff_text,
     };
     let commit = CommitMeta {
@@ -201,35 +205,11 @@ fn row_to_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<HunkHit> {
     })
 }
 
-fn upsert_file_path(c: &Connection, path: &str, language: Option<&str>) -> Result<i64> {
-    c.execute(
-        "INSERT INTO file_path (path, language, active) VALUES (?1, ?2, 1)
-         ON CONFLICT(path) DO UPDATE SET language = COALESCE(excluded.language, file_path.language)",
-        params![path, language],
-    )?;
-    let id: i64 = c.query_row(
-        "SELECT id FROM file_path WHERE path = ?1",
-        params![path],
-        |r| r.get(0),
-    )?;
-    Ok(id)
-}
-
 fn symbol_kind_to_str(k: &SymbolKind) -> &'static str {
     match k {
         SymbolKind::Function => "function",
         SymbolKind::Method => "method",
         SymbolKind::Class => "class",
         SymbolKind::Const => "const",
-    }
-}
-
-fn str_to_change_kind(s: &str) -> ChangeKind {
-    match s {
-        "added" => ChangeKind::Added,
-        "modified" => ChangeKind::Modified,
-        "deleted" => ChangeKind::Deleted,
-        "renamed" => ChangeKind::Renamed,
-        _ => ChangeKind::Modified,
     }
 }
