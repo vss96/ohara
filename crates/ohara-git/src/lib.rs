@@ -1,8 +1,10 @@
 //! git2 wrapper: walk commits, extract per-file diffs.
 
+pub mod blame;
 pub mod diff;
 pub mod walker;
 
+pub use blame::Blamer;
 pub use walker::GitWalker;
 
 use anyhow::Result;
