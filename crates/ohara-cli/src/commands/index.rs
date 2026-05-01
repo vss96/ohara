@@ -13,6 +13,13 @@ pub struct Args {
     /// Used by the post-commit hook so empty re-indexes are nearly free.
     #[arg(long)]
     pub incremental: bool,
+    /// Force a full re-walk of HEAD symbols even when the watermark
+    /// already points at HEAD. Clears existing symbol rows first so the
+    /// new AST sibling-merge chunker (Plan 3 / Track C) populates the
+    /// index without duplicates. Mutually exclusive with `--incremental`
+    /// (force wins if both are set).
+    #[arg(long)]
+    pub force: bool,
 }
 
 pub async fn run(args: Args) -> Result<IndexerReport> {

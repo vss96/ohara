@@ -64,6 +64,7 @@ async fn incremental_on_fresh_repo_indexes_everything() {
     let args = ohara_cli::commands::index::Args {
         path: repo_dir.path().to_path_buf(),
         incremental: true,
+        force: false,
     };
     let report = ohara_cli::commands::index::run(args).await.unwrap();
     assert_eq!(
@@ -94,6 +95,7 @@ async fn incremental_after_partial_index_only_walks_new_commits() {
     let first = ohara_cli::commands::index::run(ohara_cli::commands::index::Args {
         path: repo_dir.path().to_path_buf(),
         incremental: false,
+        force: false,
     })
     .await
     .unwrap();
@@ -118,12 +120,105 @@ async fn incremental_after_partial_index_only_walks_new_commits() {
     let second = ohara_cli::commands::index::run(ohara_cli::commands::index::Args {
         path: repo_dir.path().to_path_buf(),
         incremental: true,
+        force: false,
     })
     .await
     .unwrap();
     assert_eq!(
         second.new_commits, 2,
         "incremental should walk only the two new commits"
+    );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+#[ignore = "downloads embedding model on first run; opt in with --include-ignored"]
+async fn index_force_rebuilds_chunked_symbols_and_reembeds() {
+    // Plan 3 / Track D: --force must (a) clear the existing HEAD symbol
+    // rows so re-runs don't double-count and (b) re-extract via the v0.3
+    // AST sibling-merge chunker, which produces non-empty sibling_names
+    // when the file has multiple top-level atoms.
+    let _g = env_lock();
+    let repo_dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", home.path());
+
+    let repo = Repository::init(repo_dir.path()).unwrap();
+    // Three small Rust functions in one file → chunker merges them into a
+    // single chunk whose sibling_names is non-empty.
+    make_commit(
+        &repo,
+        repo_dir.path(),
+        "trio.rs",
+        "fn alpha() {}\nfn beta() {}\nfn gamma() {}\n",
+        "add trio",
+    );
+
+    // First run populates the index (and writes symbols with merged
+    // sibling_names since Track C is already landed).
+    let first = ohara_cli::commands::index::run(ohara_cli::commands::index::Args {
+        path: repo_dir.path().to_path_buf(),
+        incremental: false,
+        force: false,
+    })
+    .await
+    .unwrap();
+    assert!(first.head_symbols > 0, "first index should write symbols");
+
+    // Second run with --force must re-walk symbols even though the
+    // watermark already points at HEAD; head_symbols > 0 demonstrates the
+    // re-walk happened.
+    let report = ohara_cli::commands::index::run(ohara_cli::commands::index::Args {
+        path: repo_dir.path().to_path_buf(),
+        incremental: false,
+        force: true,
+    })
+    .await
+    .unwrap();
+    assert!(
+        report.head_symbols > 0,
+        "--force should re-extract HEAD symbols"
+    );
+
+    // Inspect the database directly: the rebuilt rows must include at
+    // least one symbol whose `sibling_names` is non-empty (the AST
+    // chunker merged the three trio fns).
+    let (repo_id, _, _) = ohara_cli::commands::resolve_repo_id(repo_dir.path()).unwrap();
+    let db = ohara_cli::commands::index_db_path(&repo_id).unwrap();
+    let storage = ohara_storage::SqliteStorage::open(&db).await.unwrap();
+    let pool = storage.pool().clone();
+    let nonempty: i64 = pool
+        .get()
+        .await
+        .unwrap()
+        .interact(|c| {
+            c.query_row(
+                "SELECT count(*) FROM symbol WHERE sibling_names <> '[]'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        nonempty > 0,
+        "--force should rebuild symbols with non-empty sibling_names from the AST chunker"
+    );
+
+    // After --force, the symbol count must equal one re-walk's worth, not
+    // two — the clear step prevented duplicate rows.
+    let total: i64 = pool
+        .get()
+        .await
+        .unwrap()
+        .interact(|c| c.query_row("SELECT count(*) FROM symbol", [], |r| r.get(0)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        total as usize, report.head_symbols,
+        "symbol table size must match latest --force run (no duplicates)"
     );
 }
 
@@ -148,6 +243,7 @@ async fn incremental_at_head_is_noop_and_skips_embedder_init() {
     let _first = ohara_cli::commands::index::run(ohara_cli::commands::index::Args {
         path: repo_dir.path().to_path_buf(),
         incremental: true,
+        force: false,
     })
     .await
     .unwrap();
@@ -155,6 +251,7 @@ async fn incremental_at_head_is_noop_and_skips_embedder_init() {
     let second = ohara_cli::commands::index::run(ohara_cli::commands::index::Args {
         path: repo_dir.path().to_path_buf(),
         incremental: true,
+        force: false,
     })
     .await
     .unwrap();
