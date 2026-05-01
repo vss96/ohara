@@ -1,17 +1,23 @@
-//! BGE-small-en-v1.5 (384d) embedding provider over fastembed-rs.
+//! BGE-small-en-v1.5 (384d) embedding provider over fastembed-rs,
+//! plus BGE-reranker-base cross-encoder over `fastembed::TextRerank`.
 //!
-//! Concurrency: `embed_batch` offloads the ONNX forward pass to
-//! `tokio::task::spawn_blocking` and serializes access to the model
-//! via `tokio::sync::Mutex` (see field comment for rationale).
+//! Concurrency: both `embed_batch` and `rerank` offload the ONNX
+//! forward pass to `tokio::task::spawn_blocking` and serialize access
+//! to the model via `tokio::sync::Mutex` (see field comments for
+//! rationale).
 
 use anyhow::{Context, Result};
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::{
+    EmbeddingModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding, TextRerank,
+};
+use ohara_core::embed::RerankProvider;
 use ohara_core::{EmbeddingProvider, Result as CoreResult};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 const DEFAULT_MODEL_ID: &str = "bge-small-en-v1.5";
 const DEFAULT_DIM: usize = 384;
+const DEFAULT_RERANKER_ID: &str = "bge-reranker-base";
 
 pub struct FastEmbedProvider {
     // Mutex serializes access: fastembed 4.9 holds mutable tokenizer/batch
@@ -65,9 +71,51 @@ impl EmbeddingProvider for FastEmbedProvider {
     }
 }
 
+/// Cross-encoder reranker backed by `fastembed::TextRerank`
+/// (BGE-reranker-base, ~110MB on first run).
+///
+/// fastembed's `rerank` returns `Vec<RerankResult>` sorted by score
+/// descending, but our `RerankProvider` contract requires the output
+/// `Vec<f32>` to align positionally with the input `candidates` slice.
+/// We restore the input ordering before returning (see `align_by_index`).
+pub struct FastEmbedReranker {
+    // Mutex serializes access for the same reason as FastEmbedProvider:
+    // fastembed's rerank() takes &self but uses session state that is
+    // not audited for concurrent calls.
+    model: Arc<Mutex<TextRerank>>,
+    model_id: String,
+}
+
+impl FastEmbedReranker {
+    pub fn new() -> Result<Self> {
+        let opts = RerankInitOptions::new(RerankerModel::BGERerankerBase)
+            .with_show_download_progress(false);
+        let model = TextRerank::try_new(opts)
+            .context("loading BGE-reranker-base (downloads ~110MB on first run)")?;
+        Ok(Self {
+            model: Arc::new(Mutex::new(model)),
+            model_id: DEFAULT_RERANKER_ID.into(),
+        })
+    }
+
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+}
+
+#[async_trait::async_trait]
+impl RerankProvider for FastEmbedReranker {
+    async fn rerank(&self, query: &str, candidates: &[&str]) -> CoreResult<Vec<f32>> {
+        // B.2.r stub: real impl lands in B.2.g.
+        let _ = (query, candidates, &self.model);
+        unreachable!("FastEmbedReranker::rerank not yet implemented (B.2.r stub)")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ohara_core::embed::RerankProvider;
     use ohara_core::EmbeddingProvider;
 
     #[tokio::test]
@@ -79,5 +127,30 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].len(), p.dimension());
         assert!(out[0].iter().any(|&x| x != 0.0));
+    }
+
+    #[tokio::test]
+    #[ignore = "downloads ~110MB on first run; opt-in via `cargo test -- --include-ignored`"]
+    async fn reranker_orders_relevant_doc_first() {
+        let r = FastEmbedReranker::new().unwrap();
+        let candidates = [
+            "unrelated cooking recipe",
+            "retry helper with exponential backoff",
+            "delete user",
+        ];
+        let scores = r
+            .rerank("how to retry on transient failures", &candidates)
+            .await
+            .unwrap();
+        assert_eq!(scores.len(), candidates.len());
+        // The retry doc (index 1) must beat both neighbours.
+        assert!(
+            scores[1] > scores[0],
+            "retry doc should outscore unrelated cooking: {scores:?}"
+        );
+        assert!(
+            scores[1] > scores[2],
+            "retry doc should outscore delete user: {scores:?}"
+        );
     }
 }
