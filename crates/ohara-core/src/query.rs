@@ -1,4 +1,4 @@
-use crate::storage::Storage;
+use crate::storage::{HunkId, Storage};
 use crate::types::{Provenance, RepoId};
 use crate::Result;
 use async_trait::async_trait;
@@ -40,6 +40,19 @@ pub struct IndexStatus {
 pub struct ResponseMeta {
     pub index_status: IndexStatus,
     pub hint: Option<String>,
+}
+
+/// Reciprocal Rank Fusion. Each ranking is best-first.
+///
+/// Score for hunk `h` = sum over lanes of `1.0 / (k as f64 + rank_in_lane(h))`,
+/// where `rank_in_lane` is 1-based. Hunks absent from a lane contribute 0
+/// from that lane. Returns hunk ids ordered best-first; ties are broken by
+/// first-appearance across the input rankings.
+///
+/// `k` is the RRF smoothing constant (Cormack et al. recommend 60).
+pub fn reciprocal_rank_fusion(_rankings: &[Vec<HunkId>], _k: u32) -> Vec<HunkId> {
+    // Plan 3 / Track D: red commit. Implementation lands in the green commit.
+    Vec::new()
 }
 
 /// Source for "how many commits exist after `since`?" — implemented by the
@@ -193,6 +206,55 @@ mod tests {
             *self.last_seen_since.lock().unwrap() = Some(since.map(str::to_string));
             Ok(self.n)
         }
+    }
+
+    // ----- Reciprocal Rank Fusion tests (Plan 3 / Track D) ----------------
+
+    #[test]
+    fn rrf_combines_three_lanes_with_default_k() {
+        // Each id appears in every lane; lane orders permute the ids so we
+        // verify the function aggregates across lanes rather than returning
+        // a single lane verbatim. Length must be 3, all three ids present.
+        let lane1: Vec<HunkId> = vec![1, 2, 3];
+        let lane2: Vec<HunkId> = vec![2, 3, 1];
+        let lane3: Vec<HunkId> = vec![3, 1, 2];
+        let out = reciprocal_rank_fusion(&[lane1, lane2, lane3], 60);
+        assert_eq!(out.len(), 3, "fused output must contain every unique id");
+        let mut sorted = out.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn rrf_handles_disjoint_lanes() {
+        let lane1: Vec<HunkId> = vec![10, 20];
+        let lane2: Vec<HunkId> = vec![30, 40];
+        let lane3: Vec<HunkId> = vec![];
+        let out = reciprocal_rank_fusion(&[lane1, lane2, lane3], 60);
+        assert_eq!(out.len(), 4, "disjoint lanes must union all ids");
+        let mut sorted = out.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn rrf_empty_input_returns_empty() {
+        let out = reciprocal_rank_fusion(&[], 60);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn rrf_two_lane_hand_computed_example() {
+        // lane1 = [a=1, b=2, c=3], lane2 = [c=3, a=1, b=2], k = 60.
+        // Hand-computed scores (1-based ranks):
+        //   a: 1/61 + 1/62 ≈ 0.032525
+        //   b: 1/62 + 1/63 ≈ 0.031999
+        //   c: 1/63 + 1/61 ≈ 0.032273
+        // Order: a > c > b.
+        let lane1: Vec<HunkId> = vec![1, 2, 3];
+        let lane2: Vec<HunkId> = vec![3, 1, 2];
+        let out = reciprocal_rank_fusion(&[lane1, lane2], 60);
+        assert_eq!(out, vec![1, 3, 2], "RRF order must match hand-computation");
     }
 
     #[tokio::test]
