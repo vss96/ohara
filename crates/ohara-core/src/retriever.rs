@@ -157,10 +157,7 @@ impl Retriever {
         //    truncate to rerank_top_k before the expensive cross-encoder.
         let fused: Vec<HunkId> =
             reciprocal_rank_fusion(&[ranking_vec, ranking_fts, ranking_sym], 60);
-        let trimmed: Vec<HunkId> = fused
-            .into_iter()
-            .take(self.weights.rerank_top_k)
-            .collect();
+        let trimmed: Vec<HunkId> = fused.into_iter().take(self.weights.rerank_top_k).collect();
         let hits: Vec<HunkHit> = trimmed
             .iter()
             .filter_map(|id| by_id.get(id).cloned())
@@ -477,9 +474,12 @@ mod tests {
 
         assert_eq!(out.len(), 3, "all three unique ids should survive");
         assert_eq!(
-            out[0].commit_sha, "c",
+            out[0].commit_sha,
+            "c",
             "reranker score, not RRF rank, dictates final order: {:?}",
-            out.iter().map(|h| h.commit_sha.as_str()).collect::<Vec<_>>()
+            out.iter()
+                .map(|h| h.commit_sha.as_str())
+                .collect::<Vec<_>>()
         );
         assert_eq!(out[1].commit_sha, "a");
         assert_eq!(out[2].commit_sha, "b");
