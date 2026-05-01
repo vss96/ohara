@@ -32,6 +32,9 @@ async fn smoke_index_then_status() {
         path: repo_dir.path().to_path_buf(),
         incremental: false,
         force: false,
+        commit_batch: 512,
+        threads: 0,
+        no_progress: true,
     };
     ohara_cli::commands::index::run(args).await.unwrap();
 

@@ -17,7 +17,7 @@ pub mod types;
 pub use embed::EmbeddingProvider;
 pub use error::{OhraError, Result};
 pub use explain::{BlameRange, BlameSource, ExplainHit, ExplainMeta, ExplainQuery};
-pub use indexer::{CommitSource, Indexer, IndexerReport, SymbolSource};
+pub use indexer::{CommitSource, Indexer, IndexerReport, NullProgress, ProgressSink, SymbolSource};
 pub use query::*;
 pub use retriever::{RankingWeights, Retriever};
 pub use storage::{CommitRecord, HunkHit, HunkId, HunkRecord, Storage, Vector};

@@ -1909,6 +1909,7 @@ dependencies = [
  "chrono",
  "clap",
  "git2",
+ "indicatif",
  "ohara-core",
  "ohara-embed",
  "ohara-git",

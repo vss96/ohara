@@ -35,6 +35,9 @@ async fn find_pattern_returns_retry_commit_first() {
         path: repo.clone(),
         incremental: false,
         force: false,
+        commit_batch: 512,
+        threads: 0,
+        no_progress: true,
     };
     ohara_cli::commands::index::run(args).await.unwrap();
 

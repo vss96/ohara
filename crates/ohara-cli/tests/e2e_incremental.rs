@@ -65,6 +65,9 @@ async fn incremental_on_fresh_repo_indexes_everything() {
         path: repo_dir.path().to_path_buf(),
         incremental: true,
         force: false,
+        commit_batch: 512,
+        threads: 0,
+        no_progress: true,
     };
     let report = ohara_cli::commands::index::run(args).await.unwrap();
     assert_eq!(
@@ -96,6 +99,9 @@ async fn incremental_after_partial_index_only_walks_new_commits() {
         path: repo_dir.path().to_path_buf(),
         incremental: false,
         force: false,
+        commit_batch: 512,
+        threads: 0,
+        no_progress: true,
     })
     .await
     .unwrap();
@@ -121,6 +127,9 @@ async fn incremental_after_partial_index_only_walks_new_commits() {
         path: repo_dir.path().to_path_buf(),
         incremental: true,
         force: false,
+        commit_batch: 512,
+        threads: 0,
+        no_progress: true,
     })
     .await
     .unwrap();
@@ -160,6 +169,9 @@ async fn index_force_rebuilds_chunked_symbols_and_reembeds() {
         path: repo_dir.path().to_path_buf(),
         incremental: false,
         force: false,
+        commit_batch: 512,
+        threads: 0,
+        no_progress: true,
     })
     .await
     .unwrap();
@@ -172,6 +184,9 @@ async fn index_force_rebuilds_chunked_symbols_and_reembeds() {
         path: repo_dir.path().to_path_buf(),
         incremental: false,
         force: true,
+        commit_batch: 512,
+        threads: 0,
+        no_progress: true,
     })
     .await
     .unwrap();
@@ -244,6 +259,9 @@ async fn incremental_at_head_is_noop_and_skips_embedder_init() {
         path: repo_dir.path().to_path_buf(),
         incremental: true,
         force: false,
+        commit_batch: 512,
+        threads: 0,
+        no_progress: true,
     })
     .await
     .unwrap();
@@ -252,6 +270,9 @@ async fn incremental_at_head_is_noop_and_skips_embedder_init() {
         path: repo_dir.path().to_path_buf(),
         incremental: true,
         force: false,
+        commit_batch: 512,
+        threads: 0,
+        no_progress: true,
     })
     .await
     .unwrap();

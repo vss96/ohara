@@ -10,6 +10,28 @@ pub fn put_many(c: &mut Connection, records: &[HunkRecord]) -> Result<()> {
         return Ok(());
     }
     let tx = c.transaction()?;
+    // Resume safety: drop any hunks (and their FTS5 + vec mirrors) that
+    // already exist for the commits we're about to write. The indexer
+    // calls put_many once per commit, but this also handles batched
+    // callers. Without this, an interrupted prior run that completed
+    // put_commit + put_hunks for some commits would, on resume, see
+    // those commits' hunks doubled (no UNIQUE constraint on hunk).
+    let mut shas: Vec<String> = records.iter().map(|r| r.hunk.commit_sha.clone()).collect();
+    shas.sort();
+    shas.dedup();
+    for sha in &shas {
+        tx.execute(
+            "DELETE FROM fts_hunk_text WHERE hunk_id IN \
+             (SELECT id FROM hunk WHERE commit_sha = ?1)",
+            params![sha],
+        )?;
+        tx.execute(
+            "DELETE FROM vec_hunk WHERE hunk_id IN \
+             (SELECT id FROM hunk WHERE commit_sha = ?1)",
+            params![sha],
+        )?;
+        tx.execute("DELETE FROM hunk WHERE commit_sha = ?1", params![sha])?;
+    }
     for r in records {
         let fp_id = upsert_file_path(&tx, &r.hunk.file_path, r.hunk.language.as_deref())?;
         tx.execute(
