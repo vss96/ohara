@@ -36,10 +36,7 @@ mod tests {
     #[async_trait]
     impl RerankProvider for FakeReranker {
         async fn rerank(&self, _query: &str, candidates: &[&str]) -> Result<Vec<f32>> {
-            // Deliberately broken in B.1.r: returns an empty vec rather than
-            // one-score-per-candidate. B.1.g fixes this to match the contract.
-            let _ = candidates;
-            Ok(vec![])
+            Ok(candidates.iter().map(|s| s.len() as f32).collect())
         }
     }
 
