@@ -3,6 +3,7 @@ use crate::types::{Provenance, RepoId};
 use crate::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatternQuery {
@@ -50,9 +51,35 @@ pub struct ResponseMeta {
 /// first-appearance across the input rankings.
 ///
 /// `k` is the RRF smoothing constant (Cormack et al. recommend 60).
-pub fn reciprocal_rank_fusion(_rankings: &[Vec<HunkId>], _k: u32) -> Vec<HunkId> {
-    // Plan 3 / Track D: red commit. Implementation lands in the green commit.
-    Vec::new()
+pub fn reciprocal_rank_fusion(rankings: &[Vec<HunkId>], k: u32) -> Vec<HunkId> {
+    let k_f = k as f64;
+    let mut scores: HashMap<HunkId, f64> = HashMap::new();
+    let mut first_seen: HashMap<HunkId, usize> = HashMap::new();
+    let mut order_counter: usize = 0;
+    for ranking in rankings {
+        for (i, &id) in ranking.iter().enumerate() {
+            // 1-based rank is the standard RRF convention (Cormack 2009).
+            let rank = (i + 1) as f64;
+            *scores.entry(id).or_insert(0.0) += 1.0 / (k_f + rank);
+            first_seen.entry(id).or_insert_with(|| {
+                let n = order_counter;
+                order_counter += 1;
+                n
+            });
+        }
+    }
+    let mut entries: Vec<(HunkId, f64, usize)> = scores
+        .into_iter()
+        .map(|(id, s)| (id, s, *first_seen.get(&id).unwrap_or(&usize::MAX)))
+        .collect();
+    // Sort by score descending; tie-break by first-appearance ascending so
+    // the result is deterministic for callers.
+    entries.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    entries.into_iter().map(|(id, _, _)| id).collect()
 }
 
 /// Source for "how many commits exist after `since`?" — implemented by the
