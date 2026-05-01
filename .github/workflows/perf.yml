@@ -1,0 +1,94 @@
+# Plan 6 Phase 1 Task 1.2 — informational perf regression workflow.
+#
+# Runs the #[ignore]'d quest_db_baseline test against the pinned
+# QuestDB fixture once a week and on demand. Gated behind
+# --include-ignored so it stays out of the default `cargo test` path
+# the release workflow uses.
+#
+# This workflow is *informational* until Phase 2 ships and a real
+# wall-time budget exists in tests/perf/quest_db_baseline.rs. Failures
+# do NOT gate the release pipeline.
+#
+# Note: this workflow does not consume any user-controlled inputs
+# (issue/PR titles, commit messages, etc.) inside `run:` blocks. All
+# expressions are either workspace-derived (runner.os, hashFiles)
+# or come from the repo's own scripts.
+
+name: perf
+
+on:
+  schedule:
+    # Mondays at 07:00 UTC -- early enough that a regression caught
+    # over the weekend lands in the maintainer's inbox before the
+    # week's other PR work.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quest-db-baseline:
+    name: quest_db_baseline
+    runs-on: macos-14
+    timeout-minutes: 360
+    steps:
+      - name: Checkout ohara
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain (stable)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-perf-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-perf-
+
+      - name: Fetch QuestDB fixture
+        run: ./tests/perf/fetch_questdb.sh
+
+      - name: Run quest_db_baseline (release)
+        id: bench
+        run: |
+          set -o pipefail
+          # --release so the numbers reflect the shipped profile.
+          # --include-ignored opts into the gated benchmark.
+          # --nocapture surfaces the JSON-ish "perf::quest_db_baseline ..."
+          # eprintln into the workflow log so the annotation step
+          # below can scrape it.
+          cargo test --workspace --release \
+            -- --include-ignored --nocapture quest_db_baseline \
+            2>&1 | tee perf-output.log
+
+      - name: Annotate breakdown
+        if: always()
+        run: |
+          # Pull the single line emitted by the test and post it as a
+          # workflow notice so it shows up in the run summary without
+          # having to scroll the full log.
+          line=$(grep "perf::quest_db_baseline" perf-output.log || true)
+          if [ -n "$line" ]; then
+            # GitHub workflow-command syntax. ::notice surfaces the
+            # message on the run summary tab.
+            echo "::notice title=quest_db_baseline::$line"
+          else
+            echo "::warning title=quest_db_baseline::no breakdown line found"
+          fi
+
+      - name: Upload perf log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-output
+          path: perf-output.log
+          if-no-files-found: warn
