@@ -18,3 +18,15 @@
 
 (companion_object
   (type_identifier) @class_name) @def_class
+
+; Top-level function: directly under source_file.
+(source_file
+  (function_declaration
+    (simple_identifier) @func_name) @def_function)
+
+; Member function: nested inside a class/object/companion body. The
+; class_body wrapper is shared by class_declaration, object_declaration,
+; and companion_object, so a single pattern covers all three contexts.
+(class_body
+  (function_declaration
+    (simple_identifier) @method_name) @def_method)

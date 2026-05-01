@@ -38,11 +38,19 @@ pub fn extract(file_path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symb
             let cap_name = query.capture_names()[cap.index as usize];
             let n = cap.node;
             match cap_name {
-                "class_name" => {
+                "class_name" | "func_name" | "method_name" => {
                     name = Some(n.utf8_text(source.as_bytes())?.to_string());
                 }
                 "def_class" => {
                     kind = Some(SymbolKind::Class);
+                    node_range = Some((n.start_byte(), n.end_byte()));
+                }
+                "def_function" => {
+                    kind = Some(SymbolKind::Function);
+                    node_range = Some((n.start_byte(), n.end_byte()));
+                }
+                "def_method" => {
+                    kind = Some(SymbolKind::Method);
                     node_range = Some((n.start_byte(), n.end_byte()));
                 }
                 _ => {}
