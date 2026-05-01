@@ -8,10 +8,6 @@ pub struct OharaServer {
     pub repo_id: RepoId,
     pub repo_path: PathBuf,
     pub storage: Arc<dyn Storage>,
-    /// Kept alive so the FastEmbed model held inside `retriever` stays loaded
-    /// for the lifetime of the server. Not read directly.
-    #[allow(dead_code)]
-    pub embedder: Arc<dyn EmbeddingProvider>,
     pub retriever: Retriever,
 }
 
@@ -34,7 +30,7 @@ impl OharaServer {
         );
         let retriever = Retriever::new(storage.clone(), embedder.clone());
 
-        Ok(Self { repo_id, repo_path: canonical, storage, embedder, retriever })
+        Ok(Self { repo_id, repo_path: canonical, storage, retriever })
     }
 
     pub async fn serve_stdio(self) -> Result<()> {
