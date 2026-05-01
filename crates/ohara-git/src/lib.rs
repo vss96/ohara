@@ -53,13 +53,13 @@ impl CommitSource for GitCommitSource {
             // list_commits opens its own GitWalker because Repository's revwalk
             // borrows &self mutably; cleaner to construct a fresh walker per call
             // for now (open() cost is one-time on the GitWalker side).
-            let w =
-                GitWalker::open(&path).map_err(|e| ohara_core::OhraError::Git(e.to_string()))?;
+            let w = GitWalker::open(&path)
+                .map_err(|e| ohara_core::OhraError::Git(format!("list_commits: open: {e}")))?;
             w.list_commits(since.as_deref())
-                .map_err(|e| ohara_core::OhraError::Git(e.to_string()))
+                .map_err(|e| ohara_core::OhraError::Git(format!("list_commits: {e}")))
         })
         .await
-        .map_err(|e| ohara_core::OhraError::Git(e.to_string()))?
+        .map_err(|e| ohara_core::OhraError::Git(format!("list_commits: join: {e}")))?
     }
 
     #[tracing::instrument(skip(self), fields(repo = %self.repo_path.display()))]
@@ -71,10 +71,10 @@ impl CommitSource for GitCommitSource {
                 .lock()
                 .map_err(|e| ohara_core::OhraError::Git(format!("repo lock poisoned: {e}")))?;
             crate::diff::hunks_for_commit(&guard, &sha)
-                .map_err(|e| ohara_core::OhraError::Git(e.to_string()))
+                .map_err(|e| ohara_core::OhraError::Git(format!("hunks_for_commit: {e}")))
         })
         .await
-        .map_err(|e| ohara_core::OhraError::Git(e.to_string()))?
+        .map_err(|e| ohara_core::OhraError::Git(format!("hunks_for_commit: join: {e}")))?
     }
 }
 
@@ -101,14 +101,14 @@ impl CommitsBehind for GitCommitsBehind {
         let since = since.map(str::to_string);
         let path = self.repo_path.clone();
         tokio::task::spawn_blocking(move || -> ohara_core::Result<u64> {
-            let w =
-                GitWalker::open(&path).map_err(|e| ohara_core::OhraError::Git(e.to_string()))?;
+            let w = GitWalker::open(&path)
+                .map_err(|e| ohara_core::OhraError::Git(format!("count_since: open: {e}")))?;
             let cs = w
                 .list_commits(since.as_deref())
-                .map_err(|e| ohara_core::OhraError::Git(e.to_string()))?;
+                .map_err(|e| ohara_core::OhraError::Git(format!("count_since: {e}")))?;
             Ok(cs.len() as u64)
         })
         .await
-        .map_err(|e| ohara_core::OhraError::Git(e.to_string()))?
+        .map_err(|e| ohara_core::OhraError::Git(format!("count_since: join: {e}")))?
     }
 }

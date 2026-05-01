@@ -36,11 +36,11 @@ where
 {
     pool.get()
         .await
-        .map_err(|e| ohara_core::OhraError::Storage(e.to_string()))?
+        .map_err(|e| ohara_core::OhraError::Storage(format!("pool: {e}")))?
         .interact(f)
         .await
-        .map_err(|e| ohara_core::OhraError::Storage(e.to_string()))?
-        .map_err(|e| ohara_core::OhraError::Storage(e.to_string()))
+        .map_err(|e| ohara_core::OhraError::Storage(format!("interact: {e}")))?
+        .map_err(|e| ohara_core::OhraError::Storage(format!("query: {e}")))
 }
 
 #[async_trait::async_trait]
@@ -779,6 +779,29 @@ mod tests {
         assert_eq!(got.author, cm.author);
         assert_eq!(got.ts, cm.ts);
         assert_eq!(got.message, cm.message);
+    }
+
+    #[tokio::test]
+    async fn with_conn_tags_query_errors_with_stage_prefix() {
+        // A failing rusqlite call inside the closure should bubble out as
+        // OhraError::Storage("query: ..."). The "query:" prefix lets
+        // operators tell pool-acquire failures and interact-panic failures
+        // apart from genuine SQL errors at a glance.
+        let dir = tempfile::tempdir().unwrap();
+        let s = SqliteStorage::open(dir.path().join("i.sqlite"))
+            .await
+            .unwrap();
+        let result: ohara_core::Result<()> = with_conn(&s.pool, |c| {
+            c.execute("SELECT * FROM no_such_table", [])?;
+            Ok(())
+        })
+        .await;
+        let err = result.expect_err("invalid SQL must surface as an OhraError");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("storage error: query:"),
+            "expected a `query:`-stage Storage error, got: {msg}"
+        );
     }
 
     #[tokio::test]
