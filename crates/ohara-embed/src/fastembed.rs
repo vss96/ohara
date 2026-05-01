@@ -6,7 +6,7 @@
 //! to the model via `tokio::sync::Mutex` (see field comments for
 //! rationale).
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use fastembed::{
     EmbeddingModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding, TextRerank,
 };
@@ -19,6 +19,23 @@ const DEFAULT_MODEL_ID: &str = "bge-small-en-v1.5";
 const DEFAULT_DIM: usize = 384;
 const DEFAULT_RERANKER_ID: &str = "bge-reranker-base";
 
+/// ONNX execution provider selector for the embedder + reranker.
+///
+/// Plan 6 Task 3.1. Today only [`EmbedProvider::Cpu`] is supported in
+/// the shipped build because enabling CoreML / CUDA requires pulling
+/// `ort` in as a direct dep with its `coreml` / `cuda` feature flags
+/// (which in turn bring in platform-specific system libraries we
+/// haven't audited yet). The other arms are kept on the API so the
+/// CLI flag stays stable across the v0.6 series; flipping them on is
+/// a pure dependency / build-feature follow-up (no surface change).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EmbedProvider {
+    #[default]
+    Cpu,
+    CoreMl,
+    Cuda,
+}
+
 pub struct FastEmbedProvider {
     // Mutex serializes access: fastembed 4.9 holds mutable tokenizer/batch
     // state inside `embed(&self, ...)` and concurrent calls are not audited.
@@ -28,7 +45,19 @@ pub struct FastEmbedProvider {
 }
 
 impl FastEmbedProvider {
+    /// Backward-compatible default constructor: CPU execution provider.
+    /// New call sites should prefer [`FastEmbedProvider::with_provider`].
     pub fn new() -> Result<Self> {
+        Self::with_provider(EmbedProvider::Cpu)
+    }
+
+    /// Load BGE-small with the requested ONNX execution provider.
+    ///
+    /// Currently CoreML / CUDA return an error explaining the build-time
+    /// dependency that needs to land before they can be enabled — see the
+    /// [`EmbedProvider`] doc-comment for context.
+    pub fn with_provider(provider: EmbedProvider) -> Result<Self> {
+        provider_unsupported_check(provider)?;
         // `InitOptions` is `#[non_exhaustive]` in fastembed v4.9, so it cannot be
         // constructed via struct-literal syntax from outside the crate. Use the
         // builder API (`InitOptions::new(...).with_show_download_progress(...)`)
@@ -42,6 +71,28 @@ impl FastEmbedProvider {
             model_id: DEFAULT_MODEL_ID.into(),
             dim: DEFAULT_DIM,
         })
+    }
+}
+
+/// Reject CoreML / CUDA at the boundary with a clear, single-source-of-truth
+/// error so both the embedder and the reranker fail the same way. Called by
+/// every `with_provider` constructor before any model loading begins.
+///
+/// When the `ort` direct-dep work lands this becomes a no-op (or grows a
+/// platform-availability check) and the existing error tests get retired.
+fn provider_unsupported_check(provider: EmbedProvider) -> Result<()> {
+    match provider {
+        EmbedProvider::Cpu => Ok(()),
+        EmbedProvider::CoreMl => Err(anyhow!(
+            "embed-provider=coreml is not yet supported in this build \
+             (needs `ort` as a direct dep with the `coreml` feature; \
+             tracked under Plan 6 Task 3.1 follow-up)"
+        )),
+        EmbedProvider::Cuda => Err(anyhow!(
+            "embed-provider=cuda is not yet supported in this build \
+             (needs `ort` as a direct dep with the `cuda` feature; \
+             tracked under Plan 6 Task 3.1 follow-up)"
+        )),
     }
 }
 
@@ -87,7 +138,17 @@ pub struct FastEmbedReranker {
 }
 
 impl FastEmbedReranker {
+    /// Backward-compatible default constructor: CPU execution provider.
+    /// New call sites should prefer [`FastEmbedReranker::with_provider`].
     pub fn new() -> Result<Self> {
+        Self::with_provider(EmbedProvider::Cpu)
+    }
+
+    /// Load BGE-reranker-base with the requested ONNX execution provider.
+    /// Mirrors [`FastEmbedProvider::with_provider`] — see that doc-comment
+    /// for the current CoreML / CUDA support story.
+    pub fn with_provider(provider: EmbedProvider) -> Result<Self> {
+        provider_unsupported_check(provider)?;
         let opts = RerankInitOptions::new(RerankerModel::BGERerankerBase)
             .with_show_download_progress(false);
         let model = TextRerank::try_new(opts)
@@ -198,6 +259,44 @@ mod tests {
     #[test]
     fn align_by_index_empty_results_returns_zero_vec() {
         assert_eq!(align_by_index(vec![], 3), vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn provider_check_accepts_cpu() {
+        // The default provider must always pass the boundary check, since
+        // it's what `FastEmbedProvider::new()` (and every existing call
+        // site) routes through.
+        provider_unsupported_check(EmbedProvider::Cpu).expect("cpu provider always supported");
+    }
+
+    #[test]
+    fn provider_check_rejects_coreml_with_actionable_message() {
+        // Plan 6 Task 3.1: until we add `ort` as a direct dep with the
+        // `coreml` feature, the CoreML arm must fail loudly with a
+        // message that names the missing dependency so users + bug
+        // reports point at the right follow-up.
+        let err = provider_unsupported_check(EmbedProvider::CoreMl)
+            .expect_err("coreml unsupported in this build");
+        let s = err.to_string();
+        assert!(s.contains("coreml"), "error should name the provider: {s}");
+        assert!(s.contains("ort"), "error should name the missing dep: {s}");
+    }
+
+    #[test]
+    fn provider_check_rejects_cuda_with_actionable_message() {
+        let err = provider_unsupported_check(EmbedProvider::Cuda)
+            .expect_err("cuda unsupported in this build");
+        let s = err.to_string();
+        assert!(s.contains("cuda"), "error should name the provider: {s}");
+        assert!(s.contains("ort"), "error should name the missing dep: {s}");
+    }
+
+    #[test]
+    fn embed_provider_default_is_cpu() {
+        // Documenting the contract: the CLI's `--embed-provider auto`
+        // resolution layer falls back to `EmbedProvider::default()` for
+        // unrecognized hosts, so the default must stay CPU.
+        assert_eq!(EmbedProvider::default(), EmbedProvider::Cpu);
     }
 
     #[tokio::test]
