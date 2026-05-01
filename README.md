@@ -12,24 +12,19 @@ Named after Ohara, the island in One Piece whose Tree of Knowledge held 5,000
 years of accumulated history — and whose archaeologists devoted their lives to
 reading it.
 
-This repo is at **Plan 1**: foundation + the `find_pattern` MCP tool. The
-`explain_change` tool, git-hook installation, and additional language support
-arrive in subsequent plans.
+**Status: v0.2.** Plan 1 (foundation + the `find_pattern` MCP tool) shipped in
+v0.1; Plan 2 (`ohara init` post-commit hook for auto-freshness, `ohara index
+--incremental` fast path, plus carry-over cleanup) is in this release. The
+`explain_change` tool and additional language support arrive in v0.3.
 
 ## Install
 
-Pre-built binaries are published on each release. To install both binaries on
-macOS or Linux:
+Pre-built binaries for macOS and Linux are published on each release:
 
     curl --proto '=https' --tlsv1.2 -LsSf https://github.com/vss96/ohara/releases/latest/download/ohara-cli-installer.sh | sh
     curl --proto '=https' --tlsv1.2 -LsSf https://github.com/vss96/ohara/releases/latest/download/ohara-mcp-installer.sh | sh
 
-On Windows (PowerShell):
-
-    powershell -ExecutionPolicy Bypass -c "irm https://github.com/vss96/ohara/releases/latest/download/ohara-cli-installer.ps1 | iex"
-    powershell -ExecutionPolicy Bypass -c "irm https://github.com/vss96/ohara/releases/latest/download/ohara-mcp-installer.ps1 | iex"
-
-Or grab a tarball directly from the [releases page](https://github.com/vss96/ohara/releases).
+Or grab a tarball directly from the [releases page](https://github.com/vss96/ohara/releases). Windows isn't supported yet (use WSL); see the [release notes](https://github.com/vss96/ohara/releases) for the current matrix.
 
 ## Build from source
 
@@ -64,7 +59,15 @@ In your `~/.claude/claude_desktop_config.json` (or per-repo MCP config), add:
 ```
 
 The server reads the current working directory of the spawning Claude Code
-session as the repo to query. Run `ohara index` first.
+session as the repo to query. Run `ohara index <repo>` once to bootstrap, then
+keep the index fresh with the post-commit hook:
+
+    ohara init <repo>                   # installs .git/hooks/post-commit
+    ohara init <repo> --write-claude-md # also appends an "ohara" stanza to CLAUDE.md
+
+The hook runs `ohara index --incremental` after every commit. It's safe to
+re-run `ohara init` (idempotent) and the hook fails closed if the `ohara`
+binary isn't on `PATH` (won't block your commits).
 
 ## Layout
 
