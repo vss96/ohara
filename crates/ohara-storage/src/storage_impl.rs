@@ -593,4 +593,58 @@ mod tests {
         assert_eq!(py_hits.len(), 1);
         assert!(py_hits[0].hunk.file_path.ends_with("b.rs"));
     }
+
+    #[tokio::test]
+    async fn bm25_hunks_by_text_respects_since_unix() {
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        // Two commits: one old, one recent. Both touch a hunk whose diff
+        // text contains "retry". The since_unix filter must drop the old.
+        seed_hunks_with_texts(
+            &s,
+            &id,
+            "old",
+            1_000_000_000, // ts: ~2001
+            &[("a", "+fn retry_old() {}\n", Some("rust"))],
+        )
+        .await;
+        seed_hunks_with_texts(
+            &s,
+            &id,
+            "new",
+            1_700_000_000, // ts: ~2023
+            &[("b", "+fn retry_new() {}\n", Some("rust"))],
+        )
+        .await;
+
+        let cutoff = 1_500_000_000;
+        let hits = s
+            .bm25_hunks_by_text(&id, "retry", 10, None, Some(cutoff))
+            .await
+            .unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "since_unix filter must drop pre-cutoff commits"
+        );
+        assert_eq!(hits[0].commit.sha, "new");
+    }
+
+    #[tokio::test]
+    async fn bm25_hunks_by_text_returns_empty_for_no_match() {
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        seed_hunks_with_texts(
+            &s,
+            &id,
+            "c1",
+            1_700_000_000,
+            &[("a", "+fn cooking() {}\n", Some("rust"))],
+        )
+        .await;
+
+        let hits = s
+            .bm25_hunks_by_text(&id, "nonexistentTokenXYZ", 5, None, None)
+            .await
+            .unwrap();
+        assert!(hits.is_empty(), "no FTS match should yield empty Vec");
+    }
 }
