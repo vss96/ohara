@@ -6,13 +6,9 @@ pub mod index;
 pub mod query;
 pub mod status;
 
-pub fn ohara_home() -> PathBuf {
-    if let Ok(s) = std::env::var("OHARA_HOME") {
-        return PathBuf::from(s);
-    }
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).expect("HOME or USERPROFILE");
-    PathBuf::from(home).join(".ohara")
-}
+/// Re-export of `ohara_core::paths::ohara_home`. CLI callers expect an
+/// `anyhow::Result`, so we map through `?` at use sites.
+pub use ohara_core::paths::{index_db_path, ohara_home};
 
 pub fn resolve_repo_id<P: AsRef<Path>>(repo_path: P) -> Result<(RepoId, PathBuf, String)> {
     let canonical = std::fs::canonicalize(repo_path.as_ref())
@@ -22,8 +18,4 @@ pub fn resolve_repo_id<P: AsRef<Path>>(repo_path: P) -> Result<(RepoId, PathBuf,
     let canonical_str = canonical.to_string_lossy().to_string();
     let id = RepoId::from_parts(&first, &canonical_str);
     Ok((id, canonical, first))
-}
-
-pub fn index_db_path(id: &RepoId) -> PathBuf {
-    ohara_home().join(id.as_str()).join("index.sqlite")
 }

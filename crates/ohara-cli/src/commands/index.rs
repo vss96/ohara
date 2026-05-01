@@ -13,7 +13,7 @@ pub struct Args {
 
 pub async fn run(args: Args) -> Result<()> {
     let (repo_id, canonical, first_commit) = super::resolve_repo_id(&args.path)?;
-    let db_path = super::index_db_path(&repo_id);
+    let db_path = super::index_db_path(&repo_id)?;
     tracing::info!(repo = %canonical.display(), id = repo_id.as_str(), db = %db_path.display(), "indexing");
 
     let storage = Arc::new(ohara_storage::SqliteStorage::open(&db_path).await?);

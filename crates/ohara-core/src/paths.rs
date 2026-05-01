@@ -5,7 +5,7 @@
 //! consistent.
 
 use crate::types::RepoId;
-use crate::Result;
+use crate::{OhraError, Result};
 use std::path::PathBuf;
 
 /// Resolve the on-disk root for ohara state.
@@ -14,12 +14,18 @@ use std::path::PathBuf;
 /// (or `$USERPROFILE/.ohara` on Windows). Returns `OhraError::Config`
 /// if no suitable home directory is set.
 pub fn ohara_home() -> Result<PathBuf> {
-    unimplemented!("ohara_home — implemented in Step 5")
+    if let Ok(s) = std::env::var("OHARA_HOME") {
+        return Ok(PathBuf::from(s));
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| OhraError::Config("HOME or USERPROFILE not set".into()))?;
+    Ok(PathBuf::from(home).join(".ohara"))
 }
 
 /// Per-repo SQLite index database path: `<ohara_home>/<repo_id>/index.sqlite`.
-pub fn index_db_path(_id: &RepoId) -> Result<PathBuf> {
-    unimplemented!("index_db_path — implemented in Step 5")
+pub fn index_db_path(id: &RepoId) -> Result<PathBuf> {
+    Ok(ohara_home()?.join(id.as_str()).join("index.sqlite"))
 }
 
 #[cfg(test)]

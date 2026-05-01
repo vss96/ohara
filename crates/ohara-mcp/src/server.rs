@@ -18,11 +18,7 @@ impl OharaServer {
         let first_commit = walker.first_commit_sha()?;
         let repo_id = RepoId::from_parts(&first_commit, &canonical.to_string_lossy());
 
-        let home = std::env::var("OHARA_HOME").map(PathBuf::from).unwrap_or_else(|_| {
-            PathBuf::from(std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).expect("HOME"))
-                .join(".ohara")
-        });
-        let db_path = home.join(repo_id.as_str()).join("index.sqlite");
+        let db_path = ohara_core::paths::index_db_path(&repo_id)?;
 
         let storage: Arc<dyn Storage> = Arc::new(ohara_storage::SqliteStorage::open(&db_path).await?);
         let embedder: Arc<dyn EmbeddingProvider> = Arc::new(

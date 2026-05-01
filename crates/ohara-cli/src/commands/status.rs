@@ -12,7 +12,7 @@ pub struct Args {
 
 pub async fn run(args: Args) -> Result<()> {
     let (repo_id, canonical, _) = super::resolve_repo_id(&args.path)?;
-    let db_path = super::index_db_path(&repo_id);
+    let db_path = super::index_db_path(&repo_id)?;
     let storage = Arc::new(ohara_storage::SqliteStorage::open(&db_path).await?);
     let st = storage.get_index_status(&repo_id).await?;
 
