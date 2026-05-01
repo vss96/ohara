@@ -511,7 +511,11 @@ mod tests {
             "c1",
             1_700_000_000,
             &[
-                ("a", "+fn retry_with_backoff() { /* retry */ }\n", Some("rust")),
+                (
+                    "a",
+                    "+fn retry_with_backoff() { /* retry */ }\n",
+                    Some("rust"),
+                ),
                 ("b", "+fn renamed_helper() {}\n", Some("rust")),
                 ("c", "+fn timeout_helper() {}\n", Some("rust")),
             ],

@@ -126,11 +126,9 @@ mod tests {
         )
         .unwrap();
         let fp_id: i64 = c
-            .query_row(
-                "SELECT id FROM file_path WHERE path = 'a.rs'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT id FROM file_path WHERE path = 'a.rs'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         c.execute(
             "INSERT INTO commit_record (sha, parent_sha, is_merge, ts, author, message)
