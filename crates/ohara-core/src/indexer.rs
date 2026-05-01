@@ -1,6 +1,6 @@
 use crate::storage::{CommitRecord, HunkRecord};
 use crate::types::{CommitMeta, Hunk, RepoId, Symbol};
-use crate::{EmbeddingProvider, Result, Storage};
+use crate::{EmbeddingProvider, OhraError, Result, Storage};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -137,7 +137,19 @@ impl Indexer {
                 let embed_start = Instant::now();
                 let embs = self.embedder.embed_batch(&texts).await?;
                 timings.embed_ms += embed_start.elapsed().as_millis() as u64;
-                let (msg_emb, hunk_embs) = embs.split_first().expect("non-empty");
+                // `texts` always contains at least 1 element (the commit
+                // message), so an empty `embs` here is an embedder bug, not
+                // an invariant the caller can violate. Surface it as a
+                // typed error rather than panicking so the indexer still
+                // reports a clean OhraError to its caller.
+                let (msg_emb, hunk_embs) = match embs.split_first() {
+                    Some(pair) => pair,
+                    None => {
+                        return Err(OhraError::Embedding(
+                            "embed_batch returned empty for non-empty input".into(),
+                        ));
+                    }
+                };
 
                 let write_start = Instant::now();
                 self.storage
@@ -510,5 +522,59 @@ mod phase_timing_tests {
         );
         // 2 commits × 2 added lines per hunk × 1 hunk per commit = 4.
         assert_eq!(pt.total_added_lines, 4);
+    }
+
+    struct EmptyEmbedder;
+
+    #[async_trait]
+    impl crate::EmbeddingProvider for EmptyEmbedder {
+        fn dimension(&self) -> usize {
+            4
+        }
+        fn model_id(&self) -> &str {
+            "empty"
+        }
+        async fn embed_batch(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            // Misbehaving embedder: returns empty for non-empty input.
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn run_returns_typed_error_when_embedder_drops_inputs() {
+        // Replaces the previous `.expect("non-empty")` panic with a
+        // typed OhraError::Embedding so a buggy embedder surfaces as a
+        // clean error to the caller instead of crashing the indexer.
+        let storage = std::sync::Arc::new(FakeStorage {
+            write_sleep: std::time::Duration::from_millis(0),
+            last_indexed: Mutex::new(None),
+        });
+        let embedder = std::sync::Arc::new(EmptyEmbedder);
+
+        let commit_source = FakeCommitSource {
+            commits: vec![fake_commit("aaaa")],
+            hunks: vec![fake_hunk("xxx", "+x\n")],
+            sleep_per_call: std::time::Duration::from_millis(0),
+        };
+        let symbol_source = FakeSymbolSource {
+            symbols: vec![],
+            sleep: std::time::Duration::from_millis(0),
+        };
+
+        let indexer = Indexer::new(storage, embedder);
+        let repo_id = RepoId::from_parts("first", "/tmp/empty-emb");
+        let err = indexer
+            .run(&repo_id, &commit_source, &symbol_source)
+            .await
+            .expect_err("buggy embedder must surface an OhraError, not panic");
+        match err {
+            OhraError::Embedding(msg) => {
+                assert!(
+                    msg.contains("embed_batch returned empty"),
+                    "expected embed_batch-empty diagnostic, got: {msg}"
+                );
+            }
+            other => panic!("expected OhraError::Embedding, got {other:?}"),
+        }
     }
 }

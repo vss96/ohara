@@ -74,6 +74,10 @@ pub fn reciprocal_rank_fusion(rankings: &[Vec<HunkId>], k: u32) -> Vec<HunkId> {
             });
         }
     }
+    // `first_seen` is populated above for every id we score, so the
+    // `unwrap_or(usize::MAX)` is a defensive belt-and-suspenders fallback
+    // — the MAX sentinel just sinks any unexpected miss to the bottom of
+    // the tie-break order without panicking.
     let mut entries: Vec<(HunkId, f64, usize)> = scores
         .into_iter()
         .map(|(id, s)| (id, s, *first_seen.get(&id).unwrap_or(&usize::MAX)))

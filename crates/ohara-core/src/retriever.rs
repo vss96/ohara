@@ -185,6 +185,8 @@ impl Retriever {
                 let age_days = ((now_unix - h.commit.ts).max(0) as f32) / 86400.0;
                 let recency = (-age_days / self.weights.recency_half_life_days).exp();
                 let combined = s * (1.0 + self.weights.recency_weight * recency);
+                // Bogus ts (out-of-range i64) falls back to "" — PatternHit.commit_date
+                // is informational, not a contract, so an empty string is acceptable.
                 let date = DateTime::<Utc>::from_timestamp(h.commit.ts, 0)
                     .map(|d| d.to_rfc3339())
                     .unwrap_or_default();

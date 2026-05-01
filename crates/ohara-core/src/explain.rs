@@ -193,6 +193,8 @@ pub async fn explain_change(
         } else {
             (String::new(), false)
         };
+        // Bogus ts (out-of-range i64) falls back to "" — ExplainHit.commit_date
+        // is informational, not a contract, so an empty string is acceptable.
         let date = DateTime::<Utc>::from_timestamp(cm.ts, 0)
             .map(|d| d.to_rfc3339())
             .unwrap_or_default();
