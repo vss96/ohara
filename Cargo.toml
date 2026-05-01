@@ -39,7 +39,7 @@ tree-sitter = "0.22"
 tree-sitter-rust = "0.21"
 tree-sitter-python = "0.21"
 clap = { version = "4", features = ["derive", "env"] }
-rmcp = { version = "0.1", features = ["server", "transport-io"] }
+rmcp = { version = "=0.1.5", features = ["server", "transport-io"] }
 schemars = "0.8"
 
 [profile.release]
