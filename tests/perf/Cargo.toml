@@ -1,0 +1,26 @@
+[package]
+name = "ohara-perf-tests"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+# This crate exists only to host the workspace's #[ignore]'d perf
+# benchmarks (Plan 6 Task 1). It has no library or binary surface —
+# all targets live under `tests/`. The lib stub is empty so cargo
+# still recognises the package.
+[lib]
+path = "src/lib.rs"
+
+[[test]]
+name = "quest_db_baseline"
+path = "quest_db_baseline.rs"
+
+[dev-dependencies]
+ohara-cli = { path = "../../crates/ohara-cli" }
+ohara-core = { path = "../../crates/ohara-core" }
+anyhow.workspace = true
+tempfile = "3"
+tokio = { workspace = true }
+tracing.workspace = true
