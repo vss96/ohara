@@ -1,0 +1,25 @@
+[book]
+title = "ohara — context lineage engine"
+description = "Local-first context lineage engine that exposes find_pattern and explain_change MCP tools to Claude Code (or any MCP client)."
+authors = ["vss96"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/vss96/ohara"
+edit-url-template = "https://github.com/vss96/ohara/edit/main/docs-book/{path}"
+default-theme = "rust"
+preferred-dark-theme = "navy"
+no-section-label = false
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+limit-results = 30
+heading-split-level = 3
+
+[output.html.print]
+enable = true
