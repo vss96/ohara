@@ -19,6 +19,8 @@ enum Cmd {
     Query(commands::query::Args),
     /// Print index status for a repo.
     Status(commands::status::Args),
+    /// Explain why a file/range looks the way it does (Plan 5).
+    Explain(commands::explain::Args),
 }
 
 #[tokio::main]
@@ -36,5 +38,6 @@ async fn main() -> Result<()> {
         Cmd::Index(a) => commands::index::run(a).await.map(|_| ()),
         Cmd::Query(a) => commands::query::run(a).await,
         Cmd::Status(a) => commands::status::run(a).await,
+        Cmd::Explain(a) => commands::explain::run(a).await,
     }
 }
