@@ -154,6 +154,26 @@ mod tests {
         repo
     }
 
+    /// Append more lines to `src.rs` and produce a second commit whose
+    /// parent is the current HEAD. Returns the new HEAD commit's SHA.
+    fn append_commit(dir: &Path, repo: &Repository, additional: &[&str], msg: &str) -> String {
+        let sig = Signature::now("b", "b@b").unwrap();
+        let existing = fs::read_to_string(dir.join("src.rs")).unwrap();
+        let body = existing + &(additional.join("\n") + "\n");
+        fs::write(dir.join("src.rs"), body).unwrap();
+        let mut idx = repo.index().unwrap();
+        idx.add_path(Path::new("src.rs")).unwrap();
+        idx.write().unwrap();
+        let tree_id = idx.write_tree().unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let oid = {
+            let tree = repo.find_tree(tree_id).unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &[&head])
+                .unwrap()
+        };
+        oid.to_string()
+    }
+
     #[tokio::test]
     async fn blame_range_returns_one_commit_for_single_author_lines() {
         // Plan 5 / Task 5.r: a single-commit repo means every blamed line
@@ -171,5 +191,52 @@ mod tests {
         assert_eq!(out.len(), 1, "single-author range collapses to one entry");
         assert_eq!(out[0].lines, vec![1, 2, 3]);
         assert!(!out[0].commit_sha.is_empty());
+    }
+
+    #[tokio::test]
+    async fn blame_range_returns_distinct_commits_for_multi_author_range() {
+        // Plan 5 / Task 6.r: lines 1-3 come from commit A, lines 4-6 from
+        // commit B. blame_range must return two BlameRange entries with
+        // disjoint `lines` Vecs.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_with_one_file(
+            dir.path(),
+            &["fn one() {}", "fn two() {}", "fn three() {}"],
+            "initial",
+        );
+        let head_after_first = repo.head().unwrap().target().unwrap().to_string();
+        let head_after_second = append_commit(
+            dir.path(),
+            &repo,
+            &["fn four() {}", "fn five() {}", "fn six() {}"],
+            "add more",
+        );
+        assert_ne!(head_after_first, head_after_second);
+
+        let blamer = Blamer::open(dir.path()).unwrap();
+        let out = blamer.blame_range("src.rs", 1, 6).await.unwrap();
+        assert_eq!(out.len(), 2, "two distinct origin commits");
+        // The BTreeMap ordering is alphabetical-by-sha; assert against the
+        // membership rather than order so the test isn't flaky.
+        let mut seen: std::collections::HashMap<String, Vec<u32>> = std::collections::HashMap::new();
+        for r in &out {
+            seen.insert(r.commit_sha.clone(), r.lines.clone());
+        }
+        assert_eq!(seen.get(&head_after_first), Some(&vec![1, 2, 3]));
+        assert_eq!(seen.get(&head_after_second), Some(&vec![4, 5, 6]));
+    }
+
+    #[tokio::test]
+    async fn blame_range_clamps_to_file_length() {
+        // Plan 5 / Task 6.r: a caller asking for lines 1..=999 against a
+        // 3-line file should still get the 3 attributed lines (not an
+        // error, not a panic). The orchestrator relies on this clamp to
+        // implement the `lines_queried` _meta field.
+        let dir = tempfile::tempdir().unwrap();
+        init_with_one_file(dir.path(), &["a", "b", "c"], "initial");
+        let blamer = Blamer::open(dir.path()).unwrap();
+        let out = blamer.blame_range("src.rs", 1, 999).await.unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].lines, vec![1, 2, 3]);
     }
 }
