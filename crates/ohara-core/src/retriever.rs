@@ -10,7 +10,11 @@
 //! is gone. So is the "embed query, cosine-vs-commit-message" path.
 
 use crate::embed::RerankProvider;
-use crate::query::{PatternHit, PatternQuery};
+use crate::query::{reciprocal_rank_fusion, PatternHit, PatternQuery};
+use crate::storage::{HunkHit, HunkId};
+use crate::types::Provenance;
+use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Tunable knobs for the v0.3 retrieval pipeline. The v0.2 fields
@@ -46,15 +50,9 @@ impl Default for RankingWeights {
 }
 
 pub struct Retriever {
-    // Red-stage stub: fields are unused until the green impl wires the
-    // gather → RRF → rerank pipeline.
-    #[allow(dead_code)]
     weights: RankingWeights,
-    #[allow(dead_code)]
     storage: Arc<dyn crate::Storage>,
-    #[allow(dead_code)]
     embedder: Arc<dyn crate::EmbeddingProvider>,
-    #[allow(dead_code)]
     reranker: Option<Arc<dyn RerankProvider>>,
 }
 
@@ -94,18 +92,132 @@ impl Retriever {
 
     pub async fn find_pattern(
         &self,
-        _repo_id: &crate::types::RepoId,
-        _query: &PatternQuery,
-        _now_unix: i64,
+        repo_id: &crate::types::RepoId,
+        query: &PatternQuery,
+        now_unix: i64,
     ) -> crate::Result<Vec<PatternHit>> {
-        // Plan 3 / Track D: red commit. The full gather → RRF → rerank →
-        // recency pipeline lands in the green commit; this stub returns
-        // empty so the new tests fail until then.
-        Ok(vec![])
+        // 1. Embed the query once for the vector lane. The BM25 lanes use
+        //    the raw query string directly.
+        let q_text = vec![query.query.clone()];
+        let mut q_embs = self.embedder.embed_batch(&q_text).await?;
+        let q_emb = q_embs
+            .pop()
+            .ok_or_else(|| crate::OhraError::Embedding("empty".into()))?;
+
+        // 2. Gather all three lanes in parallel. Lane order is irrelevant
+        //    to RRF, but we keep (vec, fts_text, fts_sym) for readability.
+        let (vec_res, fts_res, sym_res) = tokio::join!(
+            self.storage.knn_hunks(
+                repo_id,
+                &q_emb,
+                self.weights.lane_top_k,
+                query.language.as_deref(),
+                query.since_unix,
+            ),
+            self.storage.bm25_hunks_by_text(
+                repo_id,
+                &query.query,
+                self.weights.lane_top_k,
+                query.language.as_deref(),
+                query.since_unix,
+            ),
+            self.storage.bm25_hunks_by_symbol_name(
+                repo_id,
+                &query.query,
+                self.weights.lane_top_k,
+                query.language.as_deref(),
+                query.since_unix,
+            ),
+        );
+        let vec_hits = vec_res?;
+        let fts_hits = fts_res?;
+        let sym_hits = sym_res?;
+
+        // 3. Build per-lane HunkId rankings + a hunk_id -> HunkHit lookup.
+        //    Each lane keeps its hunk-hit's lane-specific `similarity` (used
+        //    only for the informational `similarity` field on PatternHit).
+        let mut by_id: HashMap<HunkId, HunkHit> = HashMap::new();
+        let mut ranking_vec: Vec<HunkId> = Vec::with_capacity(vec_hits.len());
+        for h in &vec_hits {
+            ranking_vec.push(h.hunk_id);
+            by_id.entry(h.hunk_id).or_insert_with(|| h.clone());
+        }
+        let mut ranking_fts: Vec<HunkId> = Vec::with_capacity(fts_hits.len());
+        for h in &fts_hits {
+            ranking_fts.push(h.hunk_id);
+            by_id.entry(h.hunk_id).or_insert_with(|| h.clone());
+        }
+        let mut ranking_sym: Vec<HunkId> = Vec::with_capacity(sym_hits.len());
+        for h in &sym_hits {
+            ranking_sym.push(h.hunk_id);
+            by_id.entry(h.hunk_id).or_insert_with(|| h.clone());
+        }
+
+        // 4. Reciprocal Rank Fusion (k = 60, Cormack 2009 default) →
+        //    truncate to rerank_top_k before the expensive cross-encoder.
+        let fused: Vec<HunkId> =
+            reciprocal_rank_fusion(&[ranking_vec, ranking_fts, ranking_sym], 60);
+        let trimmed: Vec<HunkId> = fused
+            .into_iter()
+            .take(self.weights.rerank_top_k)
+            .collect();
+        let hits: Vec<HunkHit> = trimmed
+            .iter()
+            .filter_map(|id| by_id.get(id).cloned())
+            .collect();
+        if hits.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // 5. Optional cross-encoder rerank. In degraded mode (no
+        //    reranker), every candidate gets score 1.0 so the surviving
+        //    sort order is RRF, modulated by the recency multiplier.
+        let candidates: Vec<&str> = hits.iter().map(|h| h.hunk.diff_text.as_str()).collect();
+        let rerank_scores: Vec<f32> = match &self.reranker {
+            Some(r) => r.rerank(&query.query, &candidates).await?,
+            None => vec![1.0_f32; candidates.len()],
+        };
+
+        // 6. Recency multiplier as a tie-breaker on the rerank score, then
+        //    final descending sort and truncate to caller's k.
+        let mut out: Vec<PatternHit> = hits
+            .into_iter()
+            .zip(rerank_scores)
+            .map(|(h, s)| {
+                let age_days = ((now_unix - h.commit.ts).max(0) as f32) / 86400.0;
+                let recency = (-age_days / self.weights.recency_half_life_days).exp();
+                let combined = s * (1.0 + self.weights.recency_weight * recency);
+                let date = DateTime::<Utc>::from_timestamp(h.commit.ts, 0)
+                    .map(|d| d.to_rfc3339())
+                    .unwrap_or_default();
+                let (excerpt, truncated) = truncate_diff(&h.hunk.diff_text, 80);
+                PatternHit {
+                    commit_sha: h.commit.sha,
+                    commit_message: h.commit.message,
+                    commit_author: h.commit.author,
+                    commit_date: date,
+                    file_path: h.hunk.file_path,
+                    change_kind: format!("{:?}", h.hunk.change_kind).to_lowercase(),
+                    diff_excerpt: excerpt,
+                    diff_truncated: truncated,
+                    related_head_symbols: vec![],
+                    similarity: h.similarity,
+                    recency_weight: recency,
+                    combined_score: combined,
+                    provenance: Provenance::Inferred,
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            b.combined_score
+                .partial_cmp(&a.combined_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        out.truncate(query.k.clamp(1, 20) as usize);
+        Ok(out)
     }
 }
 
-#[allow(dead_code)] // wired in by the green impl
 fn truncate_diff(s: &str, max_lines: usize) -> (String, bool) {
     // Count total lines, treating a trailing partial line (no \n) as a line.
     let nl = s.bytes().filter(|&b| b == b'\n').count();

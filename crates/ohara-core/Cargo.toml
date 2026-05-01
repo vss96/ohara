@@ -15,6 +15,11 @@ chrono.workspace = true
 sha2.workspace = true
 hex.workspace = true
 async-trait = "0.1"
+# tokio::join! is the cleanest way to gather the three retrieval lanes
+# concurrently. We only pull the `macros` feature so ohara-core stays
+# runtime-agnostic — the macro expands to plain futures, and the test
+# binary still owns the actual runtime.
+tokio = { version = "1", features = ["macros"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
