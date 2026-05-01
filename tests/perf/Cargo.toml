@@ -17,6 +17,13 @@ path = "src/lib.rs"
 name = "quest_db_baseline"
 path = "quest_db_baseline.rs"
 
+[[test]]
+# Plan 6 Task 2.1 paired-flag skeleton. The file itself is gated
+# behind `#![cfg(any())]` so it compiles to an empty translation
+# unit until a real Phase 2 flag copies it and drops the cfg.
+name = "example_paired"
+path = "example_paired.rs"
+
 [dev-dependencies]
 ohara-cli = { path = "../../crates/ohara-cli" }
 ohara-core = { path = "../../crates/ohara-core" }
