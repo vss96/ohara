@@ -12,10 +12,16 @@ Named after Ohara, the island in One Piece whose Tree of Knowledge held 5,000
 years of accumulated history — and whose archaeologists devoted their lives to
 reading it.
 
-**Status: v0.2.** Plan 1 (foundation + the `find_pattern` MCP tool) shipped in
-v0.1; Plan 2 (`ohara init` post-commit hook for auto-freshness, `ohara index
---incremental` fast path, plus carry-over cleanup) is in this release. The
-`explain_change` tool and additional language support arrive in v0.3.
+**Status: v0.3.** Plan 1 (foundation + the `find_pattern` MCP tool) shipped in
+v0.1; Plan 2 (`ohara init` post-commit hook + `ohara index --incremental`
+fast path) shipped in v0.2; Plan 3 (this release) replaces the linear
+ranking formula with a three-lane retrieval pipeline: vector KNN + FTS5
+BM25 on hunk text + FTS5 BM25 on symbol names → Reciprocal Rank Fusion
+→ cross-encoder rerank (`bge-reranker-base`) → recency multiplier. AST-
+aware sibling-merge chunking (500-token budget) replaces one-symbol-per-
+chunk extraction. Pass `no_rerank: true` to the MCP tool (or
+`--no-rerank` to the CLI) to skip the rerank stage. The `explain_change`
+tool and additional language support are deferred to v0.4.
 
 ## Install
 
