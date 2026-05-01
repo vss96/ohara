@@ -6,6 +6,7 @@
 
 pub mod embed;
 pub mod error;
+pub mod explain;
 pub mod indexer;
 pub mod paths;
 pub mod query;
@@ -15,6 +16,7 @@ pub mod types;
 
 pub use embed::EmbeddingProvider;
 pub use error::{OhraError, Result};
+pub use explain::{BlameRange, BlameSource, ExplainHit, ExplainMeta, ExplainQuery};
 pub use indexer::{CommitSource, Indexer, IndexerReport, SymbolSource};
 pub use query::*;
 pub use retriever::{RankingWeights, Retriever};

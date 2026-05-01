@@ -60,8 +60,17 @@ pub enum ChangeKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Provenance {
+    /// Pulled from a parsed AST or another deterministic source. Used by
+    /// the symbol extractor today.
     Extracted,
+    /// Returned by a similarity-ranked retriever — semantic match, not
+    /// git-truth. Used by `find_pattern`.
     Inferred,
+    /// Sourced directly from `git blame` — every reported line is
+    /// attributable to the named commit. Used by `explain_change`
+    /// (Plan 5). Distinct from `Extracted` so callers can distinguish
+    /// "AST said so" from "git said so".
+    Exact,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
