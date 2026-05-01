@@ -1,33 +1,61 @@
-use crate::query::PatternHit;
-use crate::storage::HunkHit;
-use crate::types::Provenance;
-#[cfg(test)]
-use crate::types::{CommitMeta, Hunk};
-use chrono::{DateTime, Utc};
+//! Retrieval pipeline (Plan 3 / Track D).
+//!
+//! Three lanes — vector KNN, BM25 over hunk text, BM25 over symbol names —
+//! gather candidates in parallel; Reciprocal Rank Fusion (`k = 60`) merges
+//! the lanes; an optional cross-encoder rerank scores the surviving
+//! candidates against the query; a small recency multiplier acts as a
+//! tie-breaker on the rerank score.
+//!
+//! The v0.2 hand-tuned linear ranker (`0.7·sim + 0.2·recency + 0.1·msg_sim`)
+//! is gone. So is the "embed query, cosine-vs-commit-message" path.
+
+use crate::embed::RerankProvider;
+use crate::query::{PatternHit, PatternQuery};
 use std::sync::Arc;
 
+/// Tunable knobs for the v0.3 retrieval pipeline. The v0.2 fields
+/// (`similarity`, `recency`, `message_match`) are gone — any caller still
+/// constructing `RankingWeights { .. }` with the old shape will fail to
+/// compile, by design.
+#[derive(Debug, Clone)]
 pub struct RankingWeights {
-    pub similarity: f32,
-    pub recency: f32,
-    pub message_match: f32,
+    /// Multiplier on the recency factor in the final score:
+    /// `final = rerank * (1.0 + recency_weight * exp(-age_days / half_life_days))`.
+    /// Default 0.05 — small enough to act as a tie-breaker without
+    /// overpowering rerank quality.
+    pub recency_weight: f32,
+    /// Half-life-ish constant (in days) for the exp-decay recency factor.
+    /// Default 90.0 — a 90-day-old commit gets factor ≈ 0.37.
     pub recency_half_life_days: f32,
+    /// Number of post-RRF candidates fed into the cross-encoder. Default 50.
+    pub rerank_top_k: usize,
+    /// Per-lane gather size before RRF. Default 100. Must fit in `u8` because
+    /// the storage trait uses `u8` for `k` arguments.
+    pub lane_top_k: u8,
 }
 
 impl Default for RankingWeights {
     fn default() -> Self {
         Self {
-            similarity: 0.7,
-            recency: 0.2,
-            message_match: 0.1,
-            recency_half_life_days: 365.0,
+            recency_weight: 0.05,
+            recency_half_life_days: 90.0,
+            rerank_top_k: 50,
+            lane_top_k: 100,
         }
     }
 }
 
 pub struct Retriever {
+    // Red-stage stub: fields are unused until the green impl wires the
+    // gather → RRF → rerank pipeline.
+    #[allow(dead_code)]
     weights: RankingWeights,
+    #[allow(dead_code)]
     storage: Arc<dyn crate::Storage>,
+    #[allow(dead_code)]
     embedder: Arc<dyn crate::EmbeddingProvider>,
+    #[allow(dead_code)]
+    reranker: Option<Arc<dyn RerankProvider>>,
 }
 
 impl Retriever {
@@ -39,6 +67,7 @@ impl Retriever {
             weights: RankingWeights::default(),
             storage,
             embedder,
+            reranker: None,
         }
     }
 
@@ -47,105 +76,36 @@ impl Retriever {
         self
     }
 
-    /// Pure ranking step, separated for testability.
-    pub fn rank_hits(
-        &self,
-        hits: Vec<HunkHit>,
-        message_similarities: &[f32],
-        now_unix: i64,
-    ) -> Vec<PatternHit> {
-        assert_eq!(hits.len(), message_similarities.len());
-        let mut out: Vec<PatternHit> = hits
-            .into_iter()
-            .zip(message_similarities.iter())
-            .map(|(h, &msg_sim)| {
-                let age_days = ((now_unix - h.commit.ts).max(0) as f32) / 86400.0;
-                let recency = (-age_days / self.weights.recency_half_life_days).exp();
-                let combined = self.weights.similarity * h.similarity
-                    + self.weights.recency * recency
-                    + self.weights.message_match * msg_sim;
-                let date = DateTime::<Utc>::from_timestamp(h.commit.ts, 0)
-                    .map(|d| d.to_rfc3339())
-                    .unwrap_or_default();
-                let (excerpt, truncated) = truncate_diff(&h.hunk.diff_text, 80);
-                PatternHit {
-                    commit_sha: h.commit.sha,
-                    commit_message: h.commit.message,
-                    commit_author: h.commit.author,
-                    commit_date: date,
-                    file_path: h.hunk.file_path,
-                    change_kind: format!("{:?}", h.hunk.change_kind).to_lowercase(),
-                    diff_excerpt: excerpt,
-                    diff_truncated: truncated,
-                    related_head_symbols: vec![], // populated in a later plan if symbol attribution is added
-                    similarity: h.similarity,
-                    recency_weight: recency,
-                    combined_score: combined,
-                    provenance: Provenance::Inferred,
-                }
-            })
-            .collect();
-        out.sort_by(|a, b| {
-            b.combined_score
-                .partial_cmp(&a.combined_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        out
+    /// Attach a cross-encoder reranker. When present, the pipeline calls
+    /// `rerank` on the post-RRF top-`rerank_top_k` candidates.
+    pub fn with_reranker(mut self, r: Arc<dyn RerankProvider>) -> Self {
+        self.reranker = Some(r);
+        self
     }
-}
 
-impl Retriever {
+    /// Drop the reranker. Equivalent to never having attached one;
+    /// callers can use this to force degraded mode (post-RRF order, with
+    /// recency multiplier still applied) without rebuilding the rest of
+    /// the chain.
+    pub fn with_no_rerank(mut self) -> Self {
+        self.reranker = None;
+        self
+    }
+
     pub async fn find_pattern(
         &self,
-        repo_id: &crate::types::RepoId,
-        query: &crate::query::PatternQuery,
-        now_unix: i64,
-    ) -> crate::Result<Vec<crate::query::PatternHit>> {
-        let q_text = vec![query.query.clone()];
-        let mut q_embs = self.embedder.embed_batch(&q_text).await?;
-        let q_emb = q_embs
-            .pop()
-            .ok_or_else(|| crate::OhraError::Embedding("empty".into()))?;
-
-        let candidates = self
-            .storage
-            .knn_hunks(
-                repo_id,
-                &q_emb,
-                query.k.clamp(1, 20),
-                query.language.as_deref(),
-                query.since_unix,
-            )
-            .await?;
-
-        // Cosine similarity between the query embedding and each candidate's commit message.
-        // We embed the messages in a single batch.
-        let messages: Vec<String> = candidates
-            .iter()
-            .map(|h| h.commit.message.clone())
-            .collect();
-        let msg_embs = if messages.is_empty() {
-            vec![]
-        } else {
-            self.embedder.embed_batch(&messages).await?
-        };
-        let msg_sims: Vec<f32> = msg_embs.iter().map(|e| cosine(&q_emb, e)).collect();
-
-        Ok(self.rank_hits(candidates, &msg_sims, now_unix))
+        _repo_id: &crate::types::RepoId,
+        _query: &PatternQuery,
+        _now_unix: i64,
+    ) -> crate::Result<Vec<PatternHit>> {
+        // Plan 3 / Track D: red commit. The full gather → RRF → rerank →
+        // recency pipeline lands in the green commit; this stub returns
+        // empty so the new tests fail until then.
+        Ok(vec![])
     }
 }
 
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na == 0.0 || nb == 0.0 {
-        0.0
-    } else {
-        dot / (na * nb)
-    }
-}
-
+#[allow(dead_code)] // wired in by the green impl
 fn truncate_diff(s: &str, max_lines: usize) -> (String, bool) {
     // Count total lines, treating a trailing partial line (no \n) as a line.
     let nl = s.bytes().filter(|&b| b == b'\n').count();
@@ -178,14 +138,19 @@ fn truncate_diff(s: &str, max_lines: usize) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ChangeKind;
+    use crate::embed::RerankProvider;
+    use crate::query::IndexStatus;
+    use crate::storage::{CommitRecord, HunkHit, HunkId, HunkRecord};
+    use crate::types::{ChangeKind, CommitMeta, Hunk, RepoId, Symbol};
+    use async_trait::async_trait;
+    use std::sync::Mutex;
 
-    fn fake_hit(sha: &str, ts: i64, sim: f32, diff: &str) -> HunkHit {
+    fn fake_hit(id: HunkId, sha: &str, ts: i64, sim: f32, diff: &str) -> HunkHit {
         HunkHit {
-            hunk_id: 0,
+            hunk_id: id,
             hunk: Hunk {
                 commit_sha: sha.into(),
-                file_path: "src/x.rs".into(),
+                file_path: format!("src/{sha}.rs"),
                 language: Some("rust".into()),
                 change_kind: ChangeKind::Added,
                 diff_text: diff.into(),
@@ -196,124 +161,10 @@ mod tests {
                 is_merge: false,
                 author: Some("a".into()),
                 ts,
-                message: "m".into(),
+                message: format!("msg-{sha}"),
             },
             similarity: sim,
         }
-    }
-
-    struct PanicStorage;
-    #[async_trait::async_trait]
-    impl crate::Storage for PanicStorage {
-        async fn open_repo(&self, _: &crate::types::RepoId, _: &str, _: &str) -> crate::Result<()> {
-            unreachable!()
-        }
-        async fn get_index_status(
-            &self,
-            _: &crate::types::RepoId,
-        ) -> crate::Result<crate::query::IndexStatus> {
-            unreachable!()
-        }
-        async fn set_last_indexed_commit(
-            &self,
-            _: &crate::types::RepoId,
-            _: &str,
-        ) -> crate::Result<()> {
-            unreachable!()
-        }
-        async fn put_commit(
-            &self,
-            _: &crate::types::RepoId,
-            _: &crate::CommitRecord,
-        ) -> crate::Result<()> {
-            unreachable!()
-        }
-        async fn put_hunks(
-            &self,
-            _: &crate::types::RepoId,
-            _: &[crate::HunkRecord],
-        ) -> crate::Result<()> {
-            unreachable!()
-        }
-        async fn put_head_symbols(
-            &self,
-            _: &crate::types::RepoId,
-            _: &[crate::types::Symbol],
-        ) -> crate::Result<()> {
-            unreachable!()
-        }
-        async fn knn_hunks(
-            &self,
-            _: &crate::types::RepoId,
-            _: &[f32],
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> crate::Result<Vec<crate::HunkHit>> {
-            unreachable!()
-        }
-        async fn bm25_hunks_by_text(
-            &self,
-            _: &crate::types::RepoId,
-            _: &str,
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> crate::Result<Vec<crate::HunkHit>> {
-            unreachable!()
-        }
-        async fn bm25_hunks_by_symbol_name(
-            &self,
-            _: &crate::types::RepoId,
-            _: &str,
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> crate::Result<Vec<crate::HunkHit>> {
-            unreachable!()
-        }
-        async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
-            unreachable!()
-        }
-        async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
-            unreachable!()
-        }
-    }
-
-    struct PanicEmbedder;
-    #[async_trait::async_trait]
-    impl crate::EmbeddingProvider for PanicEmbedder {
-        fn dimension(&self) -> usize {
-            unreachable!()
-        }
-        fn model_id(&self) -> &str {
-            unreachable!()
-        }
-        async fn embed_batch(&self, _: &[String]) -> crate::Result<Vec<Vec<f32>>> {
-            unreachable!()
-        }
-    }
-
-    fn retriever_for_test() -> Retriever {
-        Retriever {
-            weights: RankingWeights::default(),
-            storage: Arc::new(PanicStorage),
-            embedder: Arc::new(PanicEmbedder),
-        }
-    }
-
-    #[test]
-    fn rank_orders_higher_similarity_first_when_recency_equal() {
-        let now = 1_700_000_000;
-        let hits = vec![
-            fake_hit("a", now - 86400, 0.5, "+x"),
-            fake_hit("b", now - 86400, 0.9, "+y"),
-        ];
-        let msg_sims = vec![0.0, 0.0];
-        let out = retriever_for_test().rank_hits(hits, &msg_sims, now);
-        assert_eq!(out[0].commit_sha, "b");
-        assert_eq!(out[1].commit_sha, "a");
-        assert!(out[0].combined_score > out[1].combined_score);
     }
 
     #[test]
@@ -336,7 +187,6 @@ mod tests {
 
     #[test]
     fn truncate_does_not_pad_at_exact_boundary() {
-        // When input has exactly max_lines lines and ends with newline, no truncation.
         let exact = "a\nb\nc\n";
         let (out, trunc) = super::truncate_diff(exact, 3);
         assert!(!trunc);
@@ -345,8 +195,6 @@ mod tests {
 
     #[test]
     fn truncate_counts_trailing_partial_line() {
-        // Input has 3 newlines + a trailing partial line ("d"). Total = 4 lines.
-        // With max_lines=3, expect truncation reporting 1 more line elided.
         let with_partial = "a\nb\nc\nd";
         let (out, trunc) = super::truncate_diff(with_partial, 3);
         assert!(trunc);
@@ -354,60 +202,35 @@ mod tests {
         assert!(out.starts_with("a\nb\nc\n"));
     }
 
-    #[test]
-    fn rank_does_not_panic_on_nan_scores() {
-        let now = 1_700_000_000;
-        // Create hits with f32::NAN as the similarity. The combined_score formula
-        // includes 0.7 * similarity, which propagates NaN.
-        let hits = vec![
-            fake_hit("a", now, f32::NAN, "+x"),
-            fake_hit("b", now, 0.5, "+y"),
-        ];
-        let msg_sims = vec![0.0, 0.0];
-        // Should NOT panic. Order of NaN entries is implementation-defined (Equal).
-        let out = retriever_for_test().rank_hits(hits, &msg_sims, now);
-        assert_eq!(out.len(), 2);
-        // The non-NaN entry should still have a finite combined_score.
-        let finite_count = out.iter().filter(|h| h.combined_score.is_finite()).count();
-        assert_eq!(finite_count, 1);
-    }
+    // ---- Pipeline fakes ---------------------------------------------------
 
-    use crate::query::PatternQuery;
-    use crate::storage::{CommitRecord, HunkRecord};
-    use crate::types::{RepoId, Symbol};
-
-    struct FakeEmbedder;
-    #[async_trait::async_trait]
-    impl crate::EmbeddingProvider for FakeEmbedder {
-        fn dimension(&self) -> usize {
-            4
-        }
-        fn model_id(&self) -> &str {
-            "fake"
-        }
-        async fn embed_batch(&self, texts: &[String]) -> crate::Result<Vec<Vec<f32>>> {
-            Ok(texts
-                .iter()
-                .map(|t| match t.as_str() {
-                    "retry" => vec![1.0, 0.0, 0.0, 0.0],
-                    "added retry logic" => vec![1.0, 0.1, 0.0, 0.0],
-                    "renamed file" => vec![0.0, 1.0, 0.0, 0.0],
-                    _ => vec![0.0; 4],
-                })
-                .collect())
-        }
-    }
-
+    /// Records which lanes were called and returns hard-coded `HunkHit`s
+    /// per method.
     struct FakeStorage {
-        hits: Vec<HunkHit>,
+        knn: Vec<HunkHit>,
+        fts_text: Vec<HunkHit>,
+        fts_sym: Vec<HunkHit>,
+        calls: Mutex<Vec<&'static str>>,
     }
-    #[async_trait::async_trait]
+
+    impl FakeStorage {
+        fn new(knn: Vec<HunkHit>, fts_text: Vec<HunkHit>, fts_sym: Vec<HunkHit>) -> Self {
+            Self {
+                knn,
+                fts_text,
+                fts_sym,
+                calls: Mutex::new(vec![]),
+            }
+        }
+    }
+
+    #[async_trait]
     impl crate::Storage for FakeStorage {
         async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> crate::Result<()> {
             Ok(())
         }
-        async fn get_index_status(&self, _: &RepoId) -> crate::Result<crate::query::IndexStatus> {
-            Ok(crate::query::IndexStatus {
+        async fn get_index_status(&self, _: &RepoId) -> crate::Result<IndexStatus> {
+            Ok(IndexStatus {
                 last_indexed_commit: None,
                 commits_behind_head: 0,
                 indexed_at: None,
@@ -433,7 +256,8 @@ mod tests {
             _: Option<&str>,
             _: Option<i64>,
         ) -> crate::Result<Vec<HunkHit>> {
-            Ok(self.hits.clone())
+            self.calls.lock().unwrap().push("knn");
+            Ok(self.knn.clone())
         }
         async fn bm25_hunks_by_text(
             &self,
@@ -443,7 +267,8 @@ mod tests {
             _: Option<&str>,
             _: Option<i64>,
         ) -> crate::Result<Vec<HunkHit>> {
-            unreachable!("v0.2 retriever does not exercise bm25 lanes")
+            self.calls.lock().unwrap().push("fts_text");
+            Ok(self.fts_text.clone())
         }
         async fn bm25_hunks_by_symbol_name(
             &self,
@@ -453,7 +278,8 @@ mod tests {
             _: Option<&str>,
             _: Option<i64>,
         ) -> crate::Result<Vec<HunkHit>> {
-            unreachable!("v0.2 retriever does not exercise bm25 lanes")
+            self.calls.lock().unwrap().push("fts_sym");
+            Ok(self.fts_sym.clone())
         }
         async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
             Ok(false)
@@ -463,50 +289,145 @@ mod tests {
         }
     }
 
-    fn fake_hit_with_msg(sha: &str, ts: i64, sim: f32, msg: &str) -> HunkHit {
-        HunkHit {
-            hunk_id: 0,
-            hunk: Hunk {
-                commit_sha: sha.into(),
-                file_path: "a.rs".into(),
-                language: Some("rust".into()),
-                change_kind: ChangeKind::Added,
-                diff_text: "+x".into(),
-            },
-            commit: CommitMeta {
-                sha: sha.into(),
-                parent_sha: None,
-                is_merge: false,
-                author: None,
-                ts,
-                message: msg.into(),
-            },
-            similarity: sim,
+    struct FakeEmbedder;
+    #[async_trait]
+    impl crate::EmbeddingProvider for FakeEmbedder {
+        fn dimension(&self) -> usize {
+            4
+        }
+        fn model_id(&self) -> &str {
+            "fake"
+        }
+        async fn embed_batch(&self, texts: &[String]) -> crate::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![0.0_f32; 4]).collect())
+        }
+    }
+
+    /// Reranker that maps a fixed `diff_text -> score` table. Returns 0.0
+    /// for any unknown candidate so the pipeline still produces output.
+    struct ScriptedReranker {
+        scores: std::collections::HashMap<String, f32>,
+    }
+
+    #[async_trait]
+    impl RerankProvider for ScriptedReranker {
+        async fn rerank(&self, _query: &str, candidates: &[&str]) -> crate::Result<Vec<f32>> {
+            Ok(candidates
+                .iter()
+                .map(|c| *self.scores.get(*c).unwrap_or(&0.0))
+                .collect())
         }
     }
 
     #[tokio::test]
-    async fn find_pattern_message_match_breaks_ties() {
+    async fn find_pattern_invokes_three_lanes_and_rrf() {
+        // Three lanes return overlapping ids in different orders so RRF
+        // alone would pick id=1 first. The reranker overrides that ordering
+        // by giving "diff-c" the highest score; we assert the reranker's
+        // ordering wins.
         let now = 1_700_000_000;
-        let storage = Arc::new(FakeStorage {
-            hits: vec![
-                fake_hit_with_msg("a", now - 86400, 0.8, "added retry logic"),
-                fake_hit_with_msg("b", now - 86400, 0.8, "renamed file"),
-            ],
-        });
+        let knn = vec![
+            fake_hit(1, "a", now, 0.9, "diff-a"),
+            fake_hit(2, "b", now, 0.5, "diff-b"),
+            fake_hit(3, "c", now, 0.1, "diff-c"),
+        ];
+        let fts_text = vec![
+            fake_hit(2, "b", now, 0.8, "diff-b"),
+            fake_hit(1, "a", now, 0.3, "diff-a"),
+        ];
+        let fts_sym = vec![fake_hit(3, "c", now, 0.4, "diff-c")];
+        let storage = Arc::new(FakeStorage::new(knn, fts_text, fts_sym));
         let embedder = Arc::new(FakeEmbedder);
-        let r = Retriever::new(storage, embedder);
+        let mut scores = std::collections::HashMap::new();
+        scores.insert("diff-c".to_string(), 9.0);
+        scores.insert("diff-a".to_string(), 5.0);
+        scores.insert("diff-b".to_string(), 1.0);
+        let reranker: Arc<dyn RerankProvider> = Arc::new(ScriptedReranker { scores });
+
+        let r = Retriever::new(storage.clone(), embedder).with_reranker(reranker);
         let q = PatternQuery {
-            query: "retry".into(),
+            query: "anything".into(),
             k: 5,
             language: None,
             since_unix: None,
         };
         let id = RepoId::from_parts("x", "/y");
         let out = r.find_pattern(&id, &q, now).await.unwrap();
+
+        let calls = storage.calls.lock().unwrap().clone();
+        assert!(calls.contains(&"knn"), "knn lane must be called");
+        assert!(calls.contains(&"fts_text"), "fts_text lane must be called");
+        assert!(calls.contains(&"fts_sym"), "fts_sym lane must be called");
+
+        assert_eq!(out.len(), 3, "all three unique ids should survive");
+        assert_eq!(
+            out[0].commit_sha, "c",
+            "reranker score, not RRF rank, dictates final order: {:?}",
+            out.iter().map(|h| h.commit_sha.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(out[1].commit_sha, "a");
+        assert_eq!(out[2].commit_sha, "b");
+    }
+
+    #[tokio::test]
+    async fn find_pattern_no_rerank_returns_post_rrf_top_k() {
+        // Without a reranker, every candidate gets score 1.0 and the
+        // recency multiplier (with default 0.05 weight and same-day ts)
+        // is identical for all rows, so the surviving order is the RRF
+        // order. We construct lanes so RRF puts id=1 first.
+        let now = 1_700_000_000;
+        let knn = vec![
+            fake_hit(1, "a", now, 0.9, "diff-a"),
+            fake_hit(2, "b", now, 0.5, "diff-b"),
+        ];
+        let fts_text = vec![fake_hit(1, "a", now, 0.7, "diff-a")];
+        let fts_sym = vec![fake_hit(2, "b", now, 0.4, "diff-b")];
+        let storage = Arc::new(FakeStorage::new(knn, fts_text, fts_sym));
+        let embedder = Arc::new(FakeEmbedder);
+
+        let r = Retriever::new(storage, embedder);
+        let q = PatternQuery {
+            query: "anything".into(),
+            k: 5,
+            language: None,
+            since_unix: None,
+        };
+        let id = RepoId::from_parts("x", "/y");
+        let out = r.find_pattern(&id, &q, now).await.unwrap();
+        assert_eq!(out.len(), 2);
         assert_eq!(
             out[0].commit_sha, "a",
-            "retry-related commit message should win the tie"
+            "no-rerank mode should preserve RRF order"
+        );
+        assert_eq!(out[1].commit_sha, "b");
+    }
+
+    #[tokio::test]
+    async fn find_pattern_recency_multiplier_breaks_ties_when_no_rerank() {
+        // Both candidates have RRF score equal (they appear in disjoint
+        // single-element lanes). With no reranker, every score is 1.0;
+        // recency multiplier then favors the newer commit.
+        let now = 1_700_000_000;
+        let day = 86400_i64;
+        let knn = vec![fake_hit(1, "old", now - 365 * day, 0.5, "diff-old")];
+        let fts_text = vec![fake_hit(2, "new", now - day, 0.5, "diff-new")];
+        let storage = Arc::new(FakeStorage::new(knn, fts_text, vec![]));
+        let embedder = Arc::new(FakeEmbedder);
+        let r = Retriever::new(storage, embedder);
+        let q = PatternQuery {
+            query: "anything".into(),
+            k: 5,
+            language: None,
+            since_unix: None,
+        };
+        let id = RepoId::from_parts("x", "/y");
+        let out = r.find_pattern(&id, &q, now).await.unwrap();
+        assert_eq!(out.len(), 2);
+        // RRF gives id=1 first (knn lane appears first), but recency
+        // multiplier on the newer commit lifts it above.
+        assert_eq!(
+            out[0].commit_sha, "new",
+            "newer commit should outrank older when scores are tied"
         );
     }
 }
