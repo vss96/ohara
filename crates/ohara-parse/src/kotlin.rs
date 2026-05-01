@@ -166,6 +166,37 @@ fun topLevel() {}
     }
 
     #[test]
+    fn extracts_top_level_function_as_function_kind() {
+        // Free-standing Kotlin functions (no enclosing class/object/
+        // interface) collapse to SymbolKind::Function — matches the
+        // Rust/Python convention.
+        let src = "fun greet(name: String): String { return \"hi \" + name }\n";
+        let syms = extract("util.kt", src, "deadbeef").unwrap();
+        let f = syms
+            .iter()
+            .find(|s| s.name == "greet")
+            .expect("greet not extracted");
+        assert_eq!(f.kind, SymbolKind::Function);
+    }
+
+    #[test]
+    fn extracts_member_function_as_method_kind() {
+        // Function inside a class body should be SymbolKind::Method
+        // (not Function), matching Java's method semantics.
+        let src = "\
+class Service {
+    fun handle() {}
+}
+";
+        let syms = extract("Service.kt", src, "deadbeef").unwrap();
+        let m = syms
+            .iter()
+            .find(|s| s.name == "handle")
+            .expect("handle not extracted");
+        assert_eq!(m.kind, SymbolKind::Method);
+    }
+
+    #[test]
     fn extracts_companion_object_as_class() {
         // companion objects are nested inside a class. We expect two
         // Class symbols: the outer Foo and the inner Companion.
