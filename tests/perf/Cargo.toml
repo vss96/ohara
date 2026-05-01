@@ -24,10 +24,20 @@ path = "quest_db_baseline.rs"
 name = "example_paired"
 path = "example_paired.rs"
 
+[[test]]
+# Plan 6 Task 3.3 — paired e2e for `--embed-provider`, the first
+# real consumer of the paired-flag skeleton above. Both tests are
+# `#[ignore]`'d for the same reason the rest of this directory is.
+name = "embed_provider_paired"
+path = "embed_provider_paired.rs"
+
 [dev-dependencies]
 ohara-cli = { path = "../../crates/ohara-cli" }
 ohara-core = { path = "../../crates/ohara-core" }
+ohara-embed = { path = "../../crates/ohara-embed" }
+ohara-storage = { path = "../../crates/ohara-storage" }
 anyhow.workspace = true
+chrono.workspace = true
 tempfile = "3"
 tokio = { workspace = true }
 tracing.workspace = true
