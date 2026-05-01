@@ -91,4 +91,44 @@ mod tests {
         assert_eq!(s.name, "Shape");
         assert_eq!(s.kind, SymbolKind::Class);
     }
+
+    #[test]
+    fn extracts_methods_inside_class() {
+        let src = "\
+public class Calc {
+    public int add(int a, int b) { return a + b; }
+    public int sub(int a, int b) { return a - b; }
+}
+";
+        let syms = extract("Calc.java", src, "deadbeef").unwrap();
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"Calc"), "missing class: {names:?}");
+        assert!(names.contains(&"add"), "missing add: {names:?}");
+        assert!(names.contains(&"sub"), "missing sub: {names:?}");
+        let methods: Vec<&Symbol> =
+            syms.iter().filter(|s| s.kind == SymbolKind::Method).collect();
+        assert_eq!(
+            methods.len(),
+            2,
+            "expected two Method symbols, got {methods:?}"
+        );
+    }
+
+    #[test]
+    fn constructor_kind_is_method() {
+        // Java spec quirk: constructors share SymbolKind::Method but
+        // their `name` is the enclosing class's identifier, not the
+        // string "<init>" or anything synthetic.
+        let src = "\
+public class Box {
+    public Box(int n) { }
+}
+";
+        let syms = extract("Box.java", src, "deadbeef").unwrap();
+        let ctor = syms
+            .iter()
+            .find(|s| s.kind == SymbolKind::Method)
+            .expect("no constructor extracted");
+        assert_eq!(ctor.name, "Box", "constructor name should be class name");
+    }
 }
