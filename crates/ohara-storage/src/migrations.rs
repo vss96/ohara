@@ -111,7 +111,7 @@ mod tests {
         // and before V2 runs. Refinery applies migrations in a single batch,
         // so instead we run V1 manually, seed, then run V2 manually.
         crate::pool::register_vec_auto_extension().unwrap();
-        let mut c = Connection::open_in_memory().unwrap();
+        let c = Connection::open_in_memory().unwrap();
         apply_pragmas(&c).unwrap();
         load_vec_extension(&c).unwrap();
 
