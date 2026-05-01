@@ -30,6 +30,28 @@ pub fn extract_for_path(path: &str, source: &str, blob_sha: &str) -> Result<Vec<
     Ok(chunker::chunk_symbols(atoms, CHUNK_MAX_TOKENS, source))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_for_path_emits_sibling_names_for_merged_chunks() {
+        // Three small Rust functions; well under the 500-token budget,
+        // so the chunker should merge them into a single chunk whose
+        // sibling_names lists the second and third in source order.
+        let src = "fn alpha() {}\nfn beta() {}\nfn gamma() {}\n";
+        let chunks = extract_for_path("a.rs", src, "deadbeef").expect("extract");
+        assert_eq!(chunks.len(), 1, "expected one merged chunk for tiny file");
+        let c = &chunks[0];
+        assert_eq!(c.name, "alpha", "primary should be first source-order atom");
+        assert_eq!(
+            c.sibling_names,
+            vec!["beta".to_string(), "gamma".to_string()],
+            "siblings should appear in source byte order"
+        );
+    }
+}
+
 /// Walks the working tree at HEAD-equivalent state on disk and extracts symbols
 /// from files in supported languages.
 pub struct GitSymbolSource {
