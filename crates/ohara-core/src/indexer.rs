@@ -179,6 +179,7 @@ impl Indexer {
             new_commits: commits.len(),
             new_hunks: total_hunks,
             head_symbols: symbols.len(),
+            phase_timings: PhaseTimings::default(),
         })
     }
 }
@@ -188,4 +189,275 @@ pub struct IndexerReport {
     pub new_commits: usize,
     pub new_hunks: usize,
     pub head_symbols: usize,
+    /// Per-phase wall-time + input-size breakdown for the run, captured
+    /// when the `--profile` flag (or any caller plumbing
+    /// `Indexer::run`) wants the same numbers used for v0.6 throughput
+    /// analysis. Always present so consumers don't branch on
+    /// `Option`; fields default to zero on a no-op pass.
+    pub phase_timings: PhaseTimings,
+}
+
+/// Per-phase wall-time + input-size breakdown for one `Indexer::run`
+/// invocation. Field semantics are cumulative across the commit walk:
+/// `embed_ms` is the sum of every per-commit `embed_batch` call, etc.
+/// `total_diff_bytes / total_added_lines` gives the hunk-text inflation
+/// ratio called out in the v0.6 RFC (high ratio ⇒ trim git2 context).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PhaseTimings {
+    /// Wall-time spent listing commits (`CommitSource::list_commits`).
+    pub commit_walk_ms: u64,
+    /// Wall-time spent extracting per-commit hunks
+    /// (`CommitSource::hunks_for_commit`).
+    pub diff_extract_ms: u64,
+    /// Wall-time attributed to tree-sitter parsing during hunk
+    /// extraction. Reserved: today the parser only runs during HEAD
+    /// symbol extraction (`head_symbols_ms`); this field exists so a
+    /// future per-hunk parse step has somewhere to land without
+    /// changing the report shape.
+    pub tree_sitter_parse_ms: u64,
+    /// Wall-time spent inside `EmbeddingProvider::embed_batch` calls.
+    pub embed_ms: u64,
+    /// Wall-time spent writing commit + hunk rows
+    /// (`Storage::put_commit` + `Storage::put_hunks`). Combined because
+    /// they share a transaction in the SQLite backend.
+    pub storage_write_ms: u64,
+    /// Wall-time spent inside FTS5 inserts. Reserved: today the FTS
+    /// insert is bundled inside `put_hunks` and rolls into
+    /// `storage_write_ms`. Kept here so a future split (e.g. deferred
+    /// FTS index build) has a slot.
+    pub fts_insert_ms: u64,
+    /// Wall-time spent extracting + persisting HEAD symbols
+    /// (`SymbolSource::extract_head_symbols` + `put_head_symbols`).
+    pub head_symbols_ms: u64,
+    /// Sum of every diff-text byte-length fed to the embedder during
+    /// the run. Pairs with `total_added_lines` to compute
+    /// `bytes_per_added_line` — the cheap-win measurement from the
+    /// v0.6 RFC (Task 0.3).
+    pub total_diff_bytes: u64,
+    /// Sum of every "+"-prefixed line count across all hunks during
+    /// the run. Counts only added lines (context / removed lines are
+    /// excluded) so the resulting ratio reflects "bytes the embedder
+    /// sees per signal-bearing line".
+    pub total_added_lines: u64,
+}
+
+#[cfg(test)]
+mod phase_timing_tests {
+    use super::*;
+    use crate::query::IndexStatus;
+    use crate::types::{ChangeKind, CommitMeta, Hunk, RepoId, Symbol};
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    struct FakeCommitSource {
+        commits: Vec<CommitMeta>,
+        hunks: Vec<Hunk>,
+        /// Sleep applied inside `list_commits` / `hunks_for_commit` so
+        /// the wall-time clocks observe a non-zero value even on a
+        /// fast box. Without this, the test races against the tick
+        /// resolution on Linux CI.
+        sleep_per_call: std::time::Duration,
+    }
+
+    #[async_trait]
+    impl CommitSource for FakeCommitSource {
+        async fn list_commits(&self, _since: Option<&str>) -> Result<Vec<CommitMeta>> {
+            std::thread::sleep(self.sleep_per_call);
+            Ok(self.commits.clone())
+        }
+        async fn hunks_for_commit(&self, _sha: &str) -> Result<Vec<Hunk>> {
+            std::thread::sleep(self.sleep_per_call);
+            Ok(self.hunks.clone())
+        }
+    }
+
+    struct FakeSymbolSource {
+        symbols: Vec<Symbol>,
+        sleep: std::time::Duration,
+    }
+
+    #[async_trait]
+    impl SymbolSource for FakeSymbolSource {
+        async fn extract_head_symbols(&self) -> Result<Vec<Symbol>> {
+            std::thread::sleep(self.sleep);
+            Ok(self.symbols.clone())
+        }
+    }
+
+    struct FakeEmbedder {
+        sleep: std::time::Duration,
+    }
+
+    #[async_trait]
+    impl crate::EmbeddingProvider for FakeEmbedder {
+        fn dimension(&self) -> usize {
+            4
+        }
+        fn model_id(&self) -> &str {
+            "fake"
+        }
+        async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            std::thread::sleep(self.sleep);
+            Ok(texts.iter().map(|_| vec![0.0_f32; 4]).collect())
+        }
+    }
+
+    struct FakeStorage {
+        write_sleep: std::time::Duration,
+        last_indexed: Mutex<Option<String>>,
+    }
+
+    #[async_trait]
+    impl crate::Storage for FakeStorage {
+        async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn get_index_status(&self, _: &RepoId) -> Result<IndexStatus> {
+            Ok(IndexStatus {
+                last_indexed_commit: None,
+                commits_behind_head: 0,
+                indexed_at: None,
+            })
+        }
+        async fn set_last_indexed_commit(&self, _: &RepoId, sha: &str) -> Result<()> {
+            *self.last_indexed.lock().unwrap() = Some(sha.to_string());
+            Ok(())
+        }
+        async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> Result<()> {
+            std::thread::sleep(self.write_sleep);
+            Ok(())
+        }
+        async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> Result<()> {
+            std::thread::sleep(self.write_sleep);
+            Ok(())
+        }
+        async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> Result<()> {
+            std::thread::sleep(self.write_sleep);
+            Ok(())
+        }
+        async fn clear_head_symbols(&self, _: &RepoId) -> Result<()> {
+            Ok(())
+        }
+        async fn knn_hunks(
+            &self,
+            _: &RepoId,
+            _: &[f32],
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<Vec<crate::HunkHit>> {
+            Ok(vec![])
+        }
+        async fn bm25_hunks_by_text(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<Vec<crate::HunkHit>> {
+            Ok(vec![])
+        }
+        async fn bm25_hunks_by_symbol_name(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<Vec<crate::HunkHit>> {
+            Ok(vec![])
+        }
+        async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> {
+            Ok(false)
+        }
+        async fn record_blob_seen(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn get_commit(&self, _: &RepoId, _: &str) -> Result<Option<CommitMeta>> {
+            Ok(None)
+        }
+        async fn get_hunks_for_file_in_commit(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<Hunk>> {
+            Ok(vec![])
+        }
+    }
+
+    fn fake_commit(sha: &str) -> CommitMeta {
+        CommitMeta {
+            sha: sha.into(),
+            parent_sha: None,
+            is_merge: false,
+            author: Some("a@a".into()),
+            ts: 1_700_000_000,
+            message: format!("commit {sha}"),
+        }
+    }
+
+    fn fake_hunk(sha: &str, diff_text: &str) -> Hunk {
+        Hunk {
+            commit_sha: sha.into(),
+            file_path: "a.rs".into(),
+            language: Some("rust".into()),
+            change_kind: ChangeKind::Added,
+            diff_text: diff_text.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_populates_phase_timings() {
+        // Sleep ≥1ms inside every observed phase so the per-phase
+        // wall-time clocks tick on every platform. Test asserts each
+        // PhaseTimings field is non-zero — the contract from v0.6
+        // Plan 6 Task 0.1.
+        let sleep = std::time::Duration::from_millis(2);
+        let storage = std::sync::Arc::new(FakeStorage {
+            write_sleep: sleep,
+            last_indexed: Mutex::new(None),
+        });
+        let embedder = std::sync::Arc::new(FakeEmbedder { sleep });
+
+        let commit_source = FakeCommitSource {
+            commits: vec![fake_commit("aaaa"), fake_commit("bbbb")],
+            // Two added lines per commit so total_added_lines > 0.
+            hunks: vec![fake_hunk("xxx", "+added line 1\n+added line 2\n")],
+            sleep_per_call: sleep,
+        };
+        let symbol_source = FakeSymbolSource {
+            symbols: vec![],
+            sleep,
+        };
+
+        let indexer = Indexer::new(storage, embedder);
+        let repo_id = RepoId::from_parts("first", "/tmp/fake-repo");
+        let report = indexer
+            .run(&repo_id, &commit_source, &symbol_source)
+            .await
+            .expect("indexer run");
+
+        let pt = &report.phase_timings;
+        assert!(pt.commit_walk_ms > 0, "commit_walk_ms must be populated");
+        assert!(pt.diff_extract_ms > 0, "diff_extract_ms must be populated");
+        assert!(pt.embed_ms > 0, "embed_ms must be populated");
+        assert!(
+            pt.storage_write_ms > 0,
+            "storage_write_ms must be populated"
+        );
+        assert!(pt.head_symbols_ms > 0, "head_symbols_ms must be populated");
+        // Hunk-text inflation inputs (Task 0.3): both must accumulate.
+        assert!(
+            pt.total_diff_bytes > 0,
+            "total_diff_bytes must accumulate from observed hunks"
+        );
+        assert!(
+            pt.total_added_lines > 0,
+            "total_added_lines must accumulate '+'-prefixed lines"
+        );
+        // 2 commits × 2 added lines per hunk × 1 hunk per commit = 4.
+        assert_eq!(pt.total_added_lines, 4);
+    }
 }
