@@ -9,13 +9,25 @@ use ohara_core::indexer::SymbolSource;
 use ohara_core::types::Symbol;
 use std::path::{Path, PathBuf};
 
+/// 500-token target budget for the AST sibling-merge chunker. Matches
+/// plan 3 §C-2; tuned to stay well under common embedder context
+/// limits (e.g. BGE small/base sit at 512).
+const CHUNK_MAX_TOKENS: usize = 500;
+
 pub fn extract_for_path(path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symbol>> {
     let ext = Path::new(path).extension().and_then(|e| e.to_str());
-    match ext {
-        Some("rs") => rust::extract(path, source, blob_sha),
-        Some("py") => python::extract(path, source, blob_sha),
-        _ => Ok(vec![]),
-    }
+    let mut atoms = match ext {
+        Some("rs") => rust::extract(path, source, blob_sha)?,
+        Some("py") => python::extract(path, source, blob_sha)?,
+        _ => return Ok(vec![]),
+    };
+    // The chunker requires source-byte-order traversal. Tree-sitter
+    // captures in `rust::extract` are emitted in match order which is
+    // already source-aligned; `python::extract` dedups through a
+    // HashMap whose iteration order is undefined, so we sort here
+    // unconditionally — cheap and language-agnostic.
+    atoms.sort_by_key(|s| s.span_start);
+    Ok(chunker::chunk_symbols(atoms, CHUNK_MAX_TOKENS, source))
 }
 
 /// Walks the working tree at HEAD-equivalent state on disk and extracts symbols

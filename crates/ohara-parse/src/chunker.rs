@@ -27,12 +27,95 @@ fn estimate_tokens(text: &str) -> usize {
 
 /// Merge `atoms` (already in source byte order) into AST-aware chunks
 /// up to `max_tokens` per chunk.
+///
+/// Algorithm (depth-first source-byte-order traversal):
+/// 1. Walk atoms left-to-right. Maintain a "current chunk" of
+///    `(primary, siblings, running_tokens)`.
+/// 2. For each next atom A:
+///    - If `running_tokens + A.tokens <= max_tokens`, append A to the
+///      current chunk's siblings and extend the span.
+///    - Otherwise close the current chunk (if non-empty) and start a
+///      new one with A as primary.
+///    - If A alone exceeds `max_tokens`, emit it as its own
+///      single-atom chunk (no subdivision).
+/// 3. Flush any non-empty chunk at end of input.
 pub fn chunk_symbols(atoms: Vec<Symbol>, max_tokens: usize, source: &str) -> Vec<Symbol> {
-    let _ = (max_tokens, source);
-    // Track C / step C-2.r: red skeleton. Returns no chunks so the
-    // four chunker tests below fail until C-2.g lands the algorithm.
-    let _ = atoms;
-    Vec::new()
+    let mut out: Vec<Symbol> = Vec::new();
+    let mut current: Option<ChunkBuilder> = None;
+
+    for atom in atoms {
+        let atom_tokens = estimate_tokens(&atom.source_text);
+
+        match current.take() {
+            None => {
+                current = Some(ChunkBuilder::start(atom, atom_tokens));
+            }
+            Some(mut buf) => {
+                if buf.running_tokens + atom_tokens <= max_tokens {
+                    buf.append(atom, atom_tokens);
+                    current = Some(buf);
+                } else {
+                    out.push(buf.finish(source));
+                    current = Some(ChunkBuilder::start(atom, atom_tokens));
+                }
+            }
+        }
+    }
+
+    if let Some(buf) = current {
+        out.push(buf.finish(source));
+    }
+    out
+}
+
+/// Accumulator for a single in-progress chunk during the merge walk.
+struct ChunkBuilder {
+    primary: Symbol,
+    sibling_names: Vec<String>,
+    span_end: u32,
+    running_tokens: usize,
+}
+
+impl ChunkBuilder {
+    fn start(primary: Symbol, tokens: usize) -> Self {
+        let span_end = primary.span_end;
+        Self {
+            primary,
+            sibling_names: Vec::new(),
+            span_end,
+            running_tokens: tokens,
+        }
+    }
+
+    fn append(&mut self, sibling: Symbol, tokens: usize) {
+        self.sibling_names.push(sibling.name);
+        self.span_end = sibling.span_end;
+        self.running_tokens += tokens;
+    }
+
+    fn finish(self, source: &str) -> Symbol {
+        let start = self.primary.span_start as usize;
+        let end = self.span_end as usize;
+        let source_text = source
+            .get(start..end)
+            .map(str::to_string)
+            // Defensive: if span lies outside `source` (e.g. caller
+            // passed mismatched source) fall back to the primary's
+            // own source_text so we still emit a usable chunk.
+            .unwrap_or(self.primary.source_text);
+        Symbol {
+            file_path: self.primary.file_path,
+            language: self.primary.language,
+            kind: self.primary.kind,
+            name: self.primary.name,
+            qualified_name: self.primary.qualified_name,
+            sibling_names: self.sibling_names,
+            span_start: self.primary.span_start,
+            span_end: self.span_end,
+            blob_sha: self.primary.blob_sha,
+            source_text,
+        }
+    }
 }
 
 #[cfg(test)]
