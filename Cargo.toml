@@ -44,6 +44,7 @@ clap = { version = "4", features = ["derive", "env"] }
 rmcp = { version = "=0.1.5", features = ["server", "transport-io"] }
 schemars = "0.8"
 indicatif = "0.17"
+axoupdater = "0.10"
 
 [profile.release]
 lto = "thin"

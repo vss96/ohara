@@ -21,6 +21,8 @@ enum Cmd {
     Status(commands::status::Args),
     /// Explain why a file/range looks the way it does (Plan 5).
     Explain(commands::explain::Args),
+    /// Self-update the ohara binary by checking GitHub Releases.
+    Update(commands::update::Args),
 }
 
 #[tokio::main]
@@ -39,5 +41,6 @@ async fn main() -> Result<()> {
         Cmd::Query(a) => commands::query::run(a).await,
         Cmd::Status(a) => commands::status::run(a).await,
         Cmd::Explain(a) => commands::explain::run(a).await,
+        Cmd::Update(a) => commands::update::run(a).await,
     }
 }

@@ -16,3 +16,7 @@ installers = ["shell"]
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
 # Where to host releases
 hosting = "github"
+# Ship an `<app>-update` helper script alongside the binaries so users
+# can self-upgrade without re-running the curl|sh installer. The CLI
+# also exposes `ohara update` which calls into axoupdater directly.
+install-updater = true

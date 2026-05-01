@@ -7,6 +7,7 @@ pub mod index;
 pub mod init;
 pub mod query;
 pub mod status;
+pub mod update;
 
 /// Re-export of `ohara_core::paths::ohara_home`. CLI callers expect an
 /// `anyhow::Result`, so we map through `?` at use sites.

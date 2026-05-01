@@ -44,6 +44,16 @@ Pre-built binaries for macOS and Linux are published on each release:
 
 Or grab a tarball directly from the [releases page](https://github.com/vss96/ohara/releases). Windows isn't supported yet (use WSL); see the [release notes](https://github.com/vss96/ohara/releases) for the current matrix.
 
+### Updating
+
+Self-update from the CLI:
+
+    ohara update              # install the latest release in place
+    ohara update --check      # just report whether a newer version exists
+
+The cargo-dist installer also drops a standalone `ohara-cli-update`
+script alongside the binary; either works.
+
 ## Build from source
 
     cargo build --release

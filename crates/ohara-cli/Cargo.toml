@@ -23,6 +23,7 @@ ohara-parse = { path = "../ohara-parse" }
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
+axoupdater.workspace = true
 git2.workspace = true
 indicatif.workspace = true
 serde_json.workspace = true
