@@ -1,7 +1,7 @@
 # ohara
 
 <p align="center">
-  <img src="../../docs/img/ohara-tree.webp" alt="Ohara, with the Tree of Knowledge" width="640" />
+  <img src="./img/ohara-tree.webp" alt="Ohara, with the Tree of Knowledge" width="640" />
 </p>
 
 ohara is a **local-first context lineage engine** that indexes a git repo's
