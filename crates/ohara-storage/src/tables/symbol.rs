@@ -11,7 +11,7 @@ use ohara_core::storage::HunkHit;
 use ohara_core::types::{CommitMeta, Hunk, Symbol, SymbolKind};
 use rusqlite::{params, Connection};
 
-use crate::row_codec::{str_to_change_kind, upsert_file_path};
+use crate::codec::row_codec::{str_to_change_kind, upsert_file_path};
 
 /// Persist a single `Symbol` to the `symbol` table and mirror it into
 /// the `fts_symbol_name` virtual table. Caller owns the transaction.

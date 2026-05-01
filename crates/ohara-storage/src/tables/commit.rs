@@ -3,7 +3,7 @@ use ohara_core::storage::CommitRecord;
 use ohara_core::types::CommitMeta;
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::vec_codec;
+use crate::codec::vec_codec;
 
 pub fn put(c: &mut Connection, record: &CommitRecord) -> Result<()> {
     let tx = c.transaction()?;

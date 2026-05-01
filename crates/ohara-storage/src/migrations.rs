@@ -13,11 +13,11 @@ pub fn run(conn: &mut Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pool::{apply_pragmas, load_vec_extension};
+    use crate::codec::pool::{apply_pragmas, load_vec_extension};
 
     #[test]
     fn migrations_create_hunk_and_vec_hunk_tables_on_fresh_db() {
-        crate::pool::register_vec_auto_extension().unwrap(); // register vec extension before opening any connection
+        crate::codec::pool::register_vec_auto_extension().unwrap(); // register vec extension before opening any connection
         let mut c = Connection::open_in_memory().unwrap();
         apply_pragmas(&c).unwrap();
         load_vec_extension(&c).unwrap();
@@ -44,7 +44,7 @@ mod tests {
 
     #[test]
     fn migrations_v2_creates_fts_tables_and_sibling_names_column() {
-        crate::pool::register_vec_auto_extension().unwrap();
+        crate::codec::pool::register_vec_auto_extension().unwrap();
         let mut c = Connection::open_in_memory().unwrap();
         apply_pragmas(&c).unwrap();
         load_vec_extension(&c).unwrap();
@@ -110,7 +110,7 @@ mod tests {
         // exercise the backfill path is to insert V1-shaped rows after V1
         // and before V2 runs. Refinery applies migrations in a single batch,
         // so instead we run V1 manually, seed, then run V2 manually.
-        crate::pool::register_vec_auto_extension().unwrap();
+        crate::codec::pool::register_vec_auto_extension().unwrap();
         let c = Connection::open_in_memory().unwrap();
         apply_pragmas(&c).unwrap();
         load_vec_extension(&c).unwrap();

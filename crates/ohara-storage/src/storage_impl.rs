@@ -1,5 +1,6 @@
-use crate::pool::SqlitePoolBuilder;
-use crate::{migrations, repo};
+use crate::codec::pool::SqlitePoolBuilder;
+use crate::migrations;
+use crate::tables::repo;
 use anyhow::Result;
 use deadpool_sqlite::Pool;
 use ohara_core::{
@@ -70,11 +71,11 @@ impl Storage for SqliteStorage {
 
     async fn put_commit(&self, _repo_id: &RepoId, record: &CommitRecord) -> CoreResult<()> {
         let rec = record.clone();
-        with_conn(&self.pool, move |c| crate::commit::put(c, &rec)).await
+        with_conn(&self.pool, move |c| crate::tables::commit::put(c, &rec)).await
     }
     async fn put_hunks(&self, _repo_id: &RepoId, records: &[HunkRecord]) -> CoreResult<()> {
         let recs = records.to_vec();
-        with_conn(&self.pool, move |c| crate::hunk::put_many(c, &recs)).await
+        with_conn(&self.pool, move |c| crate::tables::hunk::put_many(c, &recs)).await
     }
 
     async fn put_head_symbols(&self, _repo_id: &RepoId, symbols: &[Symbol]) -> CoreResult<()> {
@@ -82,7 +83,7 @@ impl Storage for SqliteStorage {
         // the BM25-by-symbol-name lane has rows to match against. Track C
         // wires `Symbol::sibling_names` through this path.
         let syms = symbols.to_vec();
-        with_conn(&self.pool, move |c| crate::symbol::put_many(c, &syms)).await
+        with_conn(&self.pool, move |c| crate::tables::symbol::put_many(c, &syms)).await
     }
 
     async fn clear_head_symbols(&self, _repo_id: &RepoId) -> CoreResult<()> {
@@ -91,7 +92,7 @@ impl Storage for SqliteStorage {
         // doesn't double-count. The symbol table is HEAD-scoped — it holds
         // only the latest snapshot, never historical, so a blanket DELETE
         // is the right semantics.
-        with_conn(&self.pool, crate::symbol::clear_all).await
+        with_conn(&self.pool, crate::tables::symbol::clear_all).await
     }
 
     async fn knn_hunks(
@@ -105,7 +106,7 @@ impl Storage for SqliteStorage {
         let qe = query_emb.to_vec();
         let lang = language.map(str::to_string);
         with_conn(&self.pool, move |c| {
-            crate::hunk::knn(c, &qe, k, lang.as_deref(), since_unix)
+            crate::tables::hunk::knn(c, &qe, k, lang.as_deref(), since_unix)
         })
         .await
     }
@@ -121,7 +122,7 @@ impl Storage for SqliteStorage {
         let q = query.to_string();
         let lang = language.map(str::to_string);
         with_conn(&self.pool, move |c| {
-            crate::hunk::bm25_by_text(c, &q, k, lang.as_deref(), since_unix)
+            crate::tables::hunk::bm25_by_text(c, &q, k, lang.as_deref(), since_unix)
         })
         .await
     }
@@ -137,7 +138,7 @@ impl Storage for SqliteStorage {
         let q = query.to_string();
         let lang = language.map(str::to_string);
         with_conn(&self.pool, move |c| {
-            crate::symbol::bm25_by_name(c, &q, k, lang.as_deref(), since_unix)
+            crate::tables::symbol::bm25_by_name(c, &q, k, lang.as_deref(), since_unix)
         })
         .await
     }
@@ -146,7 +147,7 @@ impl Storage for SqliteStorage {
         let blob = blob_sha.to_string();
         let m = model.to_string();
         with_conn(&self.pool, move |c| {
-            crate::blob_cache::was_seen(c, &blob, &m)
+            crate::tables::blob_cache::was_seen(c, &blob, &m)
         })
         .await
     }
@@ -154,7 +155,7 @@ impl Storage for SqliteStorage {
     async fn record_blob_seen(&self, blob_sha: &str, model: &str) -> CoreResult<()> {
         let blob = blob_sha.to_string();
         let m = model.to_string();
-        with_conn(&self.pool, move |c| crate::blob_cache::record(c, &blob, &m)).await
+        with_conn(&self.pool, move |c| crate::tables::blob_cache::record(c, &blob, &m)).await
     }
 
     async fn get_commit(&self, _repo_id: &RepoId, sha: &str) -> CoreResult<Option<CommitMeta>> {
@@ -162,7 +163,7 @@ impl Storage for SqliteStorage {
         // Ok(None) for SHAs that aren't yet indexed so the explain_change
         // orchestrator can skip them gracefully.
         let sha = sha.to_string();
-        with_conn(&self.pool, move |c| crate::commit::get(c, &sha)).await
+        with_conn(&self.pool, move |c| crate::tables::commit::get(c, &sha)).await
     }
 
     async fn get_hunks_for_file_in_commit(
@@ -177,7 +178,7 @@ impl Storage for SqliteStorage {
         let sha = sha.to_string();
         let path = file_path.to_string();
         with_conn(&self.pool, move |c| {
-            crate::explain::get_hunks_for_file_in_commit(c, &sha, &path)
+            crate::tables::explain::get_hunks_for_file_in_commit(c, &sha, &path)
         })
         .await
     }
@@ -292,7 +293,7 @@ mod tests {
                     [],
                     |r| r.get(0),
                 )?;
-                Ok::<_, rusqlite::Error>(crate::vec_codec::bytes_to_vec(&bytes))
+                Ok::<_, rusqlite::Error>(crate::codec::vec_codec::bytes_to_vec(&bytes))
             })
             .await
             .unwrap()

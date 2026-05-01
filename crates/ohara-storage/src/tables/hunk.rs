@@ -3,8 +3,8 @@ use ohara_core::storage::{HunkHit, HunkRecord};
 use ohara_core::types::{CommitMeta, Hunk};
 use rusqlite::{params, Connection};
 
-use crate::row_codec::{change_kind_to_str, str_to_change_kind, upsert_file_path};
-use crate::vec_codec::vec_to_bytes;
+use crate::codec::row_codec::{change_kind_to_str, str_to_change_kind, upsert_file_path};
+use crate::codec::vec_codec::vec_to_bytes;
 
 pub fn put_many(c: &mut Connection, records: &[HunkRecord]) -> Result<()> {
     if records.is_empty() {

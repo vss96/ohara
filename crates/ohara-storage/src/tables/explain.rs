@@ -4,13 +4,13 @@
 //! → unique commit SHAs, then asks storage for the per-commit hunks
 //! that touched the queried file path. This module is the
 //! file-scoped-per-commit hunk lookup; commit metadata comes from
-//! `crate::commit::get`.
+//! `crate::tables::commit::get`.
 
 use anyhow::Result;
 use ohara_core::types::Hunk;
 use rusqlite::{params, Connection};
 
-use crate::row_codec::str_to_change_kind;
+use crate::codec::row_codec::str_to_change_kind;
 
 /// Return the hunks of `sha` whose `file_path` equals `file_path`.
 /// Returns an empty Vec if the commit isn't indexed or didn't touch
