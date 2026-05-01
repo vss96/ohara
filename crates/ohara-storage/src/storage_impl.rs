@@ -172,11 +172,18 @@ impl Storage for SqliteStorage {
     async fn get_hunks_for_file_in_commit(
         &self,
         _repo_id: &RepoId,
-        _sha: &str,
-        _file_path: &str,
+        sha: &str,
+        file_path: &str,
     ) -> CoreResult<Vec<Hunk>> {
-        // Plan 5 / Task 1: trait scaffolding only; real impl lands in Task 3.
-        unimplemented!("Storage::get_hunks_for_file_in_commit is implemented in Plan 5 Task 3")
+        // Plan 5 / Task 3: scoped lookup of (commit_sha, file_path) hunks
+        // — the join key the explain_change orchestrator uses to attach a
+        // diff excerpt per blame hit.
+        let sha = sha.to_string();
+        let path = file_path.to_string();
+        with_conn(&self.pool, move |c| {
+            crate::explain::get_hunks_for_file_in_commit(c, &sha, &path)
+        })
+        .await
     }
 }
 

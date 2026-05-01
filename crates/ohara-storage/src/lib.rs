@@ -2,6 +2,7 @@
 
 pub mod blob_cache;
 pub mod commit;
+pub mod explain;
 pub mod hunk;
 pub mod migrations;
 pub mod pool;
