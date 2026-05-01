@@ -34,23 +34,25 @@ impl OharaServer {
     }
 
     pub async fn index_status_meta(&self) -> Result<ohara_core::query::ResponseMeta> {
-        let st = self.storage.get_index_status(&self.repo_id).await?;
-        let walker = ohara_git::GitWalker::open(&self.repo_path)?;
-        let behind = match &st.last_indexed_commit {
-            Some(sha) => walker.list_commits(Some(sha))?.len() as u64,
-            None => walker.list_commits(None)?.len() as u64,
-        };
+        let behind = ohara_git::GitCommitsBehind::open(&self.repo_path)?;
+        let st = ohara_core::query::compute_index_status(
+            self.storage.as_ref(),
+            &self.repo_id,
+            &behind,
+        )
+        .await?;
         let hint = if st.last_indexed_commit.is_none() {
             Some("Index not built. Run `ohara index` in this repo.".to_string())
-        } else if behind > 50 {
-            Some(format!("Index is {behind} commits behind HEAD. Run `ohara index`."))
-        } else { None };
+        } else if st.commits_behind_head > 50 {
+            Some(format!(
+                "Index is {} commits behind HEAD. Run `ohara index`.",
+                st.commits_behind_head
+            ))
+        } else {
+            None
+        };
         Ok(ohara_core::query::ResponseMeta {
-            index_status: ohara_core::query::IndexStatus {
-                last_indexed_commit: st.last_indexed_commit,
-                commits_behind_head: behind,
-                indexed_at: st.indexed_at,
-            },
+            index_status: st,
             hint,
         })
     }

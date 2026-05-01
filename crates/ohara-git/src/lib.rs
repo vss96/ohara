@@ -7,6 +7,7 @@ pub use walker::GitWalker;
 
 use anyhow::Result;
 use ohara_core::indexer::CommitSource;
+use ohara_core::query::CommitsBehind;
 use ohara_core::types::{CommitMeta, Hunk};
 use std::sync::{Arc, Mutex};
 
@@ -60,6 +61,39 @@ impl CommitSource for GitCommitSource {
             let guard = repo.lock().map_err(|e| ohara_core::OhraError::Git(format!("repo lock poisoned: {e}")))?;
             crate::diff::hunks_for_commit(&guard, &sha)
                 .map_err(|e| ohara_core::OhraError::Git(e.to_string()))
+        })
+        .await
+        .map_err(|e| ohara_core::OhraError::Git(e.to_string()))?
+    }
+}
+
+/// Adapter implementing the git-free `CommitsBehind` trait from
+/// `ohara-core`. Wraps `GitWalker::list_commits(...).len()`.
+pub struct GitCommitsBehind {
+    repo_path: std::path::PathBuf,
+}
+
+impl GitCommitsBehind {
+    pub fn open<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
+        let canonical = path.as_ref().to_path_buf();
+        // Sanity check that we can open the repo.
+        let _ = GitWalker::open(&canonical)?;
+        Ok(Self { repo_path: canonical })
+    }
+}
+
+#[async_trait::async_trait]
+impl CommitsBehind for GitCommitsBehind {
+    async fn count_since(&self, since: Option<&str>) -> ohara_core::Result<u64> {
+        let since = since.map(str::to_string);
+        let path = self.repo_path.clone();
+        tokio::task::spawn_blocking(move || -> ohara_core::Result<u64> {
+            let w = GitWalker::open(&path)
+                .map_err(|e| ohara_core::OhraError::Git(e.to_string()))?;
+            let cs = w
+                .list_commits(since.as_deref())
+                .map_err(|e| ohara_core::OhraError::Git(e.to_string()))?;
+            Ok(cs.len() as u64)
         })
         .await
         .map_err(|e| ohara_core::OhraError::Git(e.to_string()))?

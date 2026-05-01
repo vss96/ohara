@@ -54,11 +54,17 @@ pub trait CommitsBehind: Send + Sync {
 /// and the MCP `index_status_meta` call this; presentation lives at the call
 /// sites.
 pub async fn compute_index_status(
-    _storage: &dyn Storage,
-    _repo_id: &RepoId,
-    _behind: &dyn CommitsBehind,
+    storage: &dyn Storage,
+    repo_id: &RepoId,
+    behind: &dyn CommitsBehind,
 ) -> Result<IndexStatus> {
-    unimplemented!("compute_index_status — implemented in Step 7")
+    let st = storage.get_index_status(repo_id).await?;
+    let n = behind.count_since(st.last_indexed_commit.as_deref()).await?;
+    Ok(IndexStatus {
+        last_indexed_commit: st.last_indexed_commit,
+        commits_behind_head: n,
+        indexed_at: st.indexed_at,
+    })
 }
 
 #[cfg(test)]
