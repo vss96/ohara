@@ -676,6 +676,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_hunks_for_file_in_commit_filters_by_path() {
+        // Plan 5 / Task 3.r: a single commit can touch many files; explain
+        // wants hunks scoped to the queried file path only. Seed a commit
+        // with two hunks (different files); the lookup must return just
+        // the matching file's hunk.
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        let cm = CommitMeta {
+            sha: "filter-sha".into(),
+            parent_sha: None,
+            is_merge: false,
+            author: None,
+            ts: 1_700_000_000,
+            message: "two files in one commit".into(),
+        };
+        s.put_commit(
+            &id,
+            &CommitRecord {
+                meta: cm,
+                message_emb: vec![0.0; 384],
+            },
+        )
+        .await
+        .unwrap();
+        let hunks = vec![
+            HunkRecord {
+                hunk: Hunk {
+                    commit_sha: "filter-sha".into(),
+                    file_path: "src/auth.rs".into(),
+                    language: Some("rust".into()),
+                    change_kind: ChangeKind::Modified,
+                    diff_text: "+    retry();\n".into(),
+                },
+                diff_emb: vec![0.0; 384],
+            },
+            HunkRecord {
+                hunk: Hunk {
+                    commit_sha: "filter-sha".into(),
+                    file_path: "src/other.rs".into(),
+                    language: Some("rust".into()),
+                    change_kind: ChangeKind::Added,
+                    diff_text: "+    other();\n".into(),
+                },
+                diff_emb: vec![0.0; 384],
+            },
+        ];
+        s.put_hunks(&id, &hunks).await.unwrap();
+
+        let got = s
+            .get_hunks_for_file_in_commit(&id, "filter-sha", "src/auth.rs")
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 1, "only the auth.rs hunk should match");
+        assert_eq!(got[0].file_path, "src/auth.rs");
+        assert_eq!(got[0].commit_sha, "filter-sha");
+        assert!(got[0].diff_text.contains("retry"));
+    }
+
+    #[tokio::test]
+    async fn get_hunks_for_file_in_commit_returns_empty_for_unknown_sha() {
+        // Plan 5 / Task 3.r: an unknown sha must yield an empty Vec, not
+        // an error. The explain_change orchestrator already skips unindexed
+        // commits via get_commit, but defense-in-depth says the hunks
+        // lookup should fail open the same way.
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        let got = s
+            .get_hunks_for_file_in_commit(&id, "no-such-sha", "src/foo.rs")
+            .await
+            .unwrap();
+        assert!(got.is_empty(), "unknown sha must return empty Vec");
+    }
+
+    #[tokio::test]
     async fn get_commit_round_trips() {
         // Plan 5 / Task 2.g: persist a commit then fetch it back; every
         // CommitMeta field must round-trip identically.
