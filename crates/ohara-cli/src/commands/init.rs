@@ -1,18 +1,14 @@
 //! `ohara init` — install the post-commit hook (and optionally a CLAUDE.md
 //! stanza) so this repo stays auto-indexed.
 
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use clap::Args as ClapArgs;
-use std::path::PathBuf;
-
-// Marker constants are referenced by the implementation in Step 11; they're
-// declared here so tests can match against them.
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Marker fence opening the ohara-managed block in `.git/hooks/post-commit`.
-#[allow(dead_code)]
 pub(crate) const HOOK_MARKER_BEGIN: &str = "# >>> ohara managed (do not edit) >>>";
 /// Marker fence closing the ohara-managed block.
-#[allow(dead_code)]
 pub(crate) const HOOK_MARKER_END: &str = "# <<< ohara managed <<<";
 
 /// HTML-comment fence opening the ohara stanza in `CLAUDE.md`.
@@ -23,7 +19,6 @@ pub(crate) const CLAUDE_MARKER_BEGIN: &str = "<!-- ohara:start -->";
 pub(crate) const CLAUDE_MARKER_END: &str = "<!-- ohara:end -->";
 
 /// Body of the managed post-commit hook. Wrapped in markers when written.
-#[allow(dead_code)]
 pub(crate) const HOOK_BODY: &str = "# Re-index this repo on every commit. Silently skipped if `ohara` is not on PATH.
 if command -v ohara >/dev/null 2>&1; then
   ( cd \"$(git rev-parse --show-toplevel)\" && ohara index --incremental >/dev/null 2>&1 ) || true
@@ -52,6 +47,95 @@ pub struct Args {
     pub force: bool,
 }
 
-pub async fn run(_args: Args) -> Result<()> {
-    unimplemented!("ohara init — implemented in Step 11")
+pub async fn run(args: Args) -> Result<()> {
+    let repo_root = std::fs::canonicalize(&args.path)
+        .with_context(|| format!("canonicalize {}", args.path.display()))?;
+    // Locate the .git dir so we honor `git init --separate-git-dir`,
+    // worktrees, and submodules. discover() returns the .git directory
+    // (or .git file pointer) for whatever repo `path` is inside.
+    let repo = git2::Repository::discover(&repo_root).context("discover git repo")?;
+    let git_dir = repo.path().to_path_buf();
+
+    let hooks_dir = git_dir.join("hooks");
+    fs::create_dir_all(&hooks_dir)
+        .with_context(|| format!("create {}", hooks_dir.display()))?;
+    let hook_path = hooks_dir.join("post-commit");
+
+    write_hook(&hook_path, args.force)?;
+    tracing::info!(hook = %hook_path.display(), "wrote post-commit hook");
+    println!("installed post-commit hook at {}", hook_path.display());
+    Ok(())
+}
+
+/// Write or update `.git/hooks/post-commit`, preserving non-managed content.
+///
+/// Three cases (per Plan 2 §2):
+///   - File missing → write a fresh hook (shebang + managed block).
+///   - File present, contains markers → replace the block in place.
+///   - File present, no markers → append the managed block (separated by
+///     a blank line). `--force` overrides this and replaces the whole file.
+fn write_hook(path: &Path, force: bool) -> Result<()> {
+    let managed = format!("{HOOK_MARKER_BEGIN}\n{HOOK_BODY}\n{HOOK_MARKER_END}");
+
+    let new_contents = if !path.exists() || force {
+        format!("#!/bin/sh\n{managed}\n")
+    } else {
+        let existing = fs::read_to_string(path)
+            .with_context(|| format!("read {}", path.display()))?;
+        if existing.contains(HOOK_MARKER_BEGIN) && existing.contains(HOOK_MARKER_END) {
+            replace_block(&existing, HOOK_MARKER_BEGIN, HOOK_MARKER_END, &managed)
+                .ok_or_else(|| anyhow!("failed to replace managed block in {}", path.display()))?
+        } else {
+            append_managed_block(&existing, &managed)
+        }
+    };
+
+    fs::write(path, new_contents.as_bytes())
+        .with_context(|| format!("write {}", path.display()))?;
+    set_executable(path)?;
+    Ok(())
+}
+
+/// Replace the (single) marker-fenced block in `existing` with `managed`.
+/// Returns `None` if either marker is missing or end precedes begin.
+fn replace_block(existing: &str, begin: &str, end: &str, managed: &str) -> Option<String> {
+    let b = existing.find(begin)?;
+    let e_inner = existing[b..].find(end)?;
+    let e = b + e_inner + end.len();
+    let mut out = String::with_capacity(existing.len() + managed.len());
+    out.push_str(&existing[..b]);
+    out.push_str(managed);
+    out.push_str(&existing[e..]);
+    Some(out)
+}
+
+/// Append the managed block to existing content, separated by a blank line.
+fn append_managed_block(existing: &str, managed: &str) -> String {
+    let mut out = existing.to_string();
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str(managed);
+    out.push('\n');
+    out
+}
+
+#[cfg(unix)]
+fn set_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(path)
+        .with_context(|| format!("stat {}", path.display()))?
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(path, perms)
+        .with_context(|| format!("chmod {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &Path) -> Result<()> {
+    // Windows has no chmod analog for shell hooks; git for Windows handles
+    // execution. Nothing to do.
+    Ok(())
 }
