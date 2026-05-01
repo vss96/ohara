@@ -51,10 +51,17 @@ impl Indexer {
         let commits = commit_source
             .list_commits(status.last_indexed_commit.as_deref())
             .await?;
-        tracing::info!(new_commits = commits.len(), "begin index pass");
+        let total_commits = commits.len();
+        tracing::info!(new_commits = total_commits, "begin index pass");
 
         let mut latest_sha: Option<String> = status.last_indexed_commit.clone();
         let mut total_hunks = 0usize;
+        let mut commits_done = 0usize;
+        // Liveness signal for long runs: emit an info-level event every
+        // PROGRESS_INTERVAL commits so `RUST_LOG=info` users see steady
+        // output. Without this the indexer is silent for minutes on
+        // first-time runs against real-world repos (~5k+ commits).
+        const PROGRESS_INTERVAL: usize = 100;
 
         for chunk in commits.chunks(self.batch_commits) {
             for cm in chunk {
@@ -87,9 +94,23 @@ impl Indexer {
                     .collect();
                 self.storage.put_hunks(repo_id, &records).await?;
                 latest_sha = Some(cm.sha.clone());
+                commits_done += 1;
+                if commits_done % PROGRESS_INTERVAL == 0 {
+                    tracing::info!(
+                        commits_done,
+                        total_commits,
+                        total_hunks,
+                        "indexing progress"
+                    );
+                }
             }
         }
 
+        tracing::info!(
+            total_commits,
+            total_hunks,
+            "commit walk done; extracting HEAD symbols"
+        );
         let symbols = symbol_source.extract_head_symbols().await?;
         self.storage.put_head_symbols(repo_id, &symbols).await?;
 

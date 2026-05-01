@@ -69,6 +69,15 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
     let report = indexer
         .run(&repo_id, &commit_source, &symbol_source)
         .await?;
+    // Two-sink summary: human-readable on stdout, structured event on
+    // stderr so log aggregators / CI watchdogs / a future `--json` flag
+    // see the same numbers.
+    tracing::info!(
+        new_commits = report.new_commits,
+        new_hunks = report.new_hunks,
+        head_symbols = report.head_symbols,
+        "indexed"
+    );
     println!(
         "indexed: {} new commits, {} hunks, {} HEAD symbols",
         report.new_commits, report.new_hunks, report.head_symbols
