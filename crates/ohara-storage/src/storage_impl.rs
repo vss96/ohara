@@ -83,7 +83,10 @@ impl Storage for SqliteStorage {
         // the BM25-by-symbol-name lane has rows to match against. Track C
         // wires `Symbol::sibling_names` through this path.
         let syms = symbols.to_vec();
-        with_conn(&self.pool, move |c| crate::tables::symbol::put_many(c, &syms)).await
+        with_conn(&self.pool, move |c| {
+            crate::tables::symbol::put_many(c, &syms)
+        })
+        .await
     }
 
     async fn clear_head_symbols(&self, _repo_id: &RepoId) -> CoreResult<()> {
@@ -155,7 +158,10 @@ impl Storage for SqliteStorage {
     async fn record_blob_seen(&self, blob_sha: &str, model: &str) -> CoreResult<()> {
         let blob = blob_sha.to_string();
         let m = model.to_string();
-        with_conn(&self.pool, move |c| crate::tables::blob_cache::record(c, &blob, &m)).await
+        with_conn(&self.pool, move |c| {
+            crate::tables::blob_cache::record(c, &blob, &m)
+        })
+        .await
     }
 
     async fn get_commit(&self, _repo_id: &RepoId, sha: &str) -> CoreResult<Option<CommitMeta>> {
