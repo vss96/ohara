@@ -22,6 +22,7 @@ pub fn extract_for_path(path: &str, source: &str, blob_sha: &str) -> Result<Vec<
         Some("rs") => rust::extract(path, source, blob_sha)?,
         Some("py") => python::extract(path, source, blob_sha)?,
         Some("java") => java::extract(path, source, blob_sha)?,
+        Some("kt") | Some("kts") => kotlin::extract(path, source, blob_sha)?,
         _ => return Ok(vec![]),
     };
     // The chunker requires source-byte-order traversal. Tree-sitter
