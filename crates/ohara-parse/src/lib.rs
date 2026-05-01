@@ -1,6 +1,7 @@
 //! tree-sitter symbol extraction for supported languages.
 
 pub mod chunker;
+pub mod java;
 pub mod python;
 pub mod rust;
 
