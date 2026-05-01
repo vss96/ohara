@@ -3,6 +3,7 @@ use ohara_core::types::RepoId;
 use std::path::{Path, PathBuf};
 
 pub mod index;
+pub mod init;
 pub mod query;
 pub mod status;
 

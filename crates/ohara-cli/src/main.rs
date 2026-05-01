@@ -11,6 +11,8 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    /// Install the ohara post-commit hook in a repo.
+    Init(commands::init::Args),
     /// Build or update the index for a repo.
     Index(commands::index::Args),
     /// Run a debug pattern query against an indexed repo.
@@ -28,6 +30,7 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     match cli.command {
+        Cmd::Init(a) => commands::init::run(a).await,
         Cmd::Index(a) => commands::index::run(a).await.map(|_| ()),
         Cmd::Query(a) => commands::query::run(a).await,
         Cmd::Status(a) => commands::status::run(a).await,
