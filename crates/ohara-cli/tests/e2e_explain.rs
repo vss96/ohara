@@ -42,11 +42,12 @@ async fn explain_e2e_returns_retry_commit_for_retry_lines() {
         path: repo.clone(),
         incremental: false,
         force: false,
-        commit_batch: 512,
-        threads: 0,
+        commit_batch: Some(512),
+        threads: Some(0),
         no_progress: true,
         profile: false,
-        embed_provider: ohara_cli::commands::provider::ProviderArg::Auto,
+        embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
+        resources: ohara_cli::resources::ResourcesArg::Auto,
     };
     ohara_cli::commands::index::run(index_args).await.unwrap();
 

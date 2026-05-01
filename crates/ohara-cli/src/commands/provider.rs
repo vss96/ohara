@@ -79,10 +79,7 @@ mod tests {
         // `--embed-provider cpu` must still hand us back CPU so
         // benchmarks can pin the slow path on demand.
         assert_eq!(resolve_provider(ProviderArg::Cpu), EmbedProvider::Cpu);
-        assert_eq!(
-            resolve_provider(ProviderArg::Coreml),
-            EmbedProvider::CoreMl
-        );
+        assert_eq!(resolve_provider(ProviderArg::Coreml), EmbedProvider::CoreMl);
         assert_eq!(resolve_provider(ProviderArg::Cuda), EmbedProvider::Cuda);
     }
 

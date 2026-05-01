@@ -74,11 +74,12 @@ async fn quest_db_baseline_under_threshold() {
         path: fixture,
         incremental: false,
         force: false,
-        commit_batch: 512,
-        threads: 0,
+        commit_batch: Some(512),
+        threads: Some(0),
         no_progress: true,
         profile: true,
-        embed_provider: ohara_cli::commands::provider::ProviderArg::Auto,
+        embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
+        resources: ohara_cli::resources::ResourcesArg::Auto,
     };
 
     let start = Instant::now();

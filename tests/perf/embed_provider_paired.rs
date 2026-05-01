@@ -73,11 +73,12 @@ async fn run_retry_pattern(arg: ProviderArg) -> RetryResult {
         path: repo.clone(),
         incremental: false,
         force: false,
-        commit_batch: 512,
-        threads: 0,
+        commit_batch: Some(512),
+        threads: Some(0),
         no_progress: true,
         profile: false,
-        embed_provider: arg,
+        embed_provider: Some(arg),
+        resources: ohara_cli::resources::ResourcesArg::Auto,
     };
     ohara_cli::commands::index::run(args)
         .await

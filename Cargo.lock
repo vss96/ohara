@@ -2239,8 +2239,11 @@ name = "ohara-perf-tests"
 version = "0.5.1"
 dependencies = [
  "anyhow",
+ "chrono",
  "ohara-cli",
  "ohara-core",
+ "ohara-embed",
+ "ohara-storage",
  "tempfile",
  "tokio",
  "tracing",

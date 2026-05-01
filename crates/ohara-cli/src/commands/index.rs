@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::provider::{resolve_provider, ProviderArg};
+use crate::resources::{apply_intensity, detect_host, pick_resources, ResourcePlan, ResourcesArg};
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -24,14 +25,15 @@ pub struct Args {
     pub force: bool,
     /// Number of commits to batch per storage transaction. Smaller =
     /// less peak RAM and more frequent fsyncs; larger = faster but
-    /// uses more memory. Default 512.
-    #[arg(long, default_value_t = 512)]
-    pub commit_batch: usize,
+    /// uses more memory. When unset, `--resources` picks a value based
+    /// on host core count.
+    #[arg(long)]
+    pub commit_batch: Option<usize>,
     /// Cap the number of threads used by the embedder's ONNX runtime.
-    /// 0 (default) means "let ort decide" (typically = CPU count).
-    /// Lower this to keep ohara from saturating a shared dev machine.
-    #[arg(long, default_value_t = 0)]
-    pub threads: usize,
+    /// `0` means "let ort decide" (typically = CPU count). When unset,
+    /// `--resources` picks a value based on host core count.
+    #[arg(long)]
+    pub threads: Option<usize>,
     /// Disable the progress bar even when stderr is a TTY. The indexer
     /// still emits `tracing::info!` events every 100 commits.
     #[arg(long)]
@@ -44,12 +46,36 @@ pub struct Args {
     /// before the JSON; structured tracing on stderr is unaffected.
     #[arg(long)]
     pub profile: bool,
-    /// ONNX execution provider for the embedder. `auto` (default)
-    /// picks CoreML on Apple silicon, CUDA when `CUDA_VISIBLE_DEVICES`
-    /// is set, else CPU. CoreML / CUDA arms currently fail with a
+    /// ONNX execution provider for the embedder. When unset, defers to
+    /// the value picked by `--resources` (which itself defaults to
+    /// `auto`: CoreML on Apple silicon, CUDA when `CUDA_VISIBLE_DEVICES`
+    /// is set, else CPU). CoreML / CUDA arms currently fail with a
     /// build-time-dependency error pending Plan 6 Task 3.1 follow-up.
-    #[arg(long, value_enum, default_value_t = ProviderArg::Auto)]
-    pub embed_provider: ProviderArg,
+    #[arg(long, value_enum)]
+    pub embed_provider: Option<ProviderArg>,
+    /// Resource intensity. `auto` (default) picks reasonable
+    /// `--commit-batch` / `--threads` / `--embed-provider` values from
+    /// the host's logical core count. `conservative` halves the picked
+    /// batch + thread count; `aggressive` doubles them. Explicit flags
+    /// always override the picked plan.
+    #[arg(long, value_enum, default_value_t = ResourcesArg::Auto)]
+    pub resources: ResourcesArg,
+}
+
+/// Compose explicit-flag values with a [`ResourcePlan`] under the
+/// override semantics from Plan 6 Task 6.2: explicit > resources >
+/// default. Pulled out of `run` so the merge is unit-testable.
+pub fn merge_with_resource_plan(
+    plan: ResourcePlan,
+    commit_batch: Option<usize>,
+    threads: Option<usize>,
+    embed_provider: Option<ProviderArg>,
+) -> ResourcePlan {
+    ResourcePlan {
+        commit_batch: commit_batch.unwrap_or(plan.commit_batch),
+        threads: threads.unwrap_or(plan.threads),
+        embed_provider: embed_provider.unwrap_or(plan.embed_provider),
+    }
 }
 
 /// Render `PhaseTimings` as the JSON object emitted by `--profile`.
@@ -63,6 +89,24 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
     let (repo_id, canonical, first_commit) = super::resolve_repo_id(&args.path)?;
     let db_path = super::index_db_path(&repo_id)?;
     tracing::info!(repo = %canonical.display(), id = repo_id.as_str(), db = %db_path.display(), "indexing");
+
+    // Resolve the resource plan up front so the chosen values are
+    // logged once and re-used everywhere downstream.
+    let base_plan = pick_resources(&detect_host());
+    let intensified = apply_intensity(base_plan, args.resources);
+    let plan = merge_with_resource_plan(
+        intensified,
+        args.commit_batch,
+        args.threads,
+        args.embed_provider,
+    );
+    tracing::info!(
+        commit_batch = plan.commit_batch,
+        threads = plan.threads,
+        embed_provider = ?plan.embed_provider,
+        intensity = ?args.resources,
+        "resource plan",
+    );
 
     let storage = Arc::new(ohara_storage::SqliteStorage::open(&db_path).await?);
     storage
@@ -102,14 +146,14 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
     // picks up the cap. ort honors `OMP_NUM_THREADS` and
     // `RAYON_NUM_THREADS` for its parallel ops; setting both is the
     // simplest cross-version knob.
-    if args.threads > 0 {
-        let n = args.threads.to_string();
+    if plan.threads > 0 {
+        let n = plan.threads.to_string();
         std::env::set_var("OMP_NUM_THREADS", &n);
         std::env::set_var("RAYON_NUM_THREADS", &n);
-        tracing::info!(threads = args.threads, "capping embedder threads");
+        tracing::info!(threads = plan.threads, "capping embedder threads");
     }
 
-    let chosen_provider = resolve_provider(args.embed_provider);
+    let chosen_provider = resolve_provider(plan.embed_provider);
     tracing::info!(provider = ?chosen_provider, "embedder");
     let embedder = Arc::new(
         tokio::task::spawn_blocking(move || {
@@ -127,7 +171,7 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
     };
 
     let indexer = Indexer::new(storage.clone(), embedder.clone())
-        .with_batch_commits(args.commit_batch)
+        .with_batch_commits(plan.commit_batch)
         .with_progress(progress);
     let report = indexer
         .run(&repo_id, &commit_source, &symbol_source)
@@ -195,5 +239,70 @@ mod profile_json_tests {
         }
         assert_eq!(v.get("commit_walk_ms").and_then(|x| x.as_u64()), Some(1));
         assert_eq!(v.get("total_added_lines").and_then(|x| x.as_u64()), Some(9));
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    fn plan(commit_batch: usize, threads: usize) -> ResourcePlan {
+        ResourcePlan {
+            commit_batch,
+            threads,
+            embed_provider: ProviderArg::Auto,
+        }
+    }
+
+    #[test]
+    fn merge_passes_plan_through_when_no_explicit_flags() {
+        // The whole point of `--resources auto` is that an
+        // unconfigured invocation gets the picked plan unmodified.
+        let p = plan(256, 8);
+        let out = merge_with_resource_plan(p, None, None, None);
+        assert_eq!(out, p);
+    }
+
+    #[test]
+    fn merge_explicit_commit_batch_overrides_plan() {
+        // Override semantics from Plan 6 Task 6.2: explicit > resources.
+        let p = plan(256, 8);
+        let out = merge_with_resource_plan(p, Some(64), None, None);
+        assert_eq!(out.commit_batch, 64);
+        assert_eq!(out.threads, 8, "threads still come from the plan");
+        assert_eq!(out.embed_provider, ProviderArg::Auto);
+    }
+
+    #[test]
+    fn merge_explicit_threads_overrides_plan() {
+        let p = plan(256, 8);
+        let out = merge_with_resource_plan(p, None, Some(2), None);
+        assert_eq!(out.threads, 2);
+        assert_eq!(out.commit_batch, 256);
+    }
+
+    #[test]
+    fn merge_explicit_provider_overrides_plan() {
+        // Specifically: a `--resources aggressive` run that picked
+        // `Auto` for provider must still honor `--embed-provider cpu`
+        // when the user passes it, so benchmarks can pin the slow path.
+        let p = plan(256, 8);
+        let out = merge_with_resource_plan(p, None, None, Some(ProviderArg::Cpu));
+        assert_eq!(out.embed_provider, ProviderArg::Cpu);
+    }
+
+    #[test]
+    fn merge_all_three_explicit_takes_no_plan_values() {
+        // Sanity: when every override is set, the plan is irrelevant.
+        let p = plan(256, 8);
+        let out = merge_with_resource_plan(p, Some(64), Some(2), Some(ProviderArg::Cpu));
+        assert_eq!(
+            out,
+            ResourcePlan {
+                commit_batch: 64,
+                threads: 2,
+                embed_provider: ProviderArg::Cpu,
+            }
+        );
     }
 }
