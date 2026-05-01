@@ -11,10 +11,15 @@
 //! `git2::Repository::blame_file`, with the real implementation living in
 //! `ohara-git::Blamer`.
 
-use crate::types::Provenance;
+use crate::storage::Storage;
+use crate::types::{Provenance, RepoId};
 use crate::Result;
 use async_trait::async_trait;
+#[allow(unused_imports)]
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+#[allow(unused_imports)]
+use std::collections::{BTreeSet, HashMap};
 
 /// One commit's contribution to a blame query, with the lines (within
 /// the queried range) it owns. Returned by `BlameSource::blame_range`.
@@ -78,6 +83,12 @@ pub struct ExplainHit {
     pub provenance: Provenance,
 }
 
+/// Per-line diff truncation cap for `ExplainHit::diff_excerpt`. Matches
+/// the value used by the `find_pattern` retrieval pipeline so MCP
+/// responses look consistent across both tools.
+#[allow(dead_code)]
+const DIFF_EXCERPT_MAX_LINES: usize = 80;
+
 /// Diagnostic envelope returned alongside hits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExplainMeta {
@@ -96,9 +107,36 @@ pub struct ExplainMeta {
     pub limitation: Option<String>,
 }
 
+/// Run an `explain_change` query end-to-end.
+///
+/// 1. Ask the `BlameSource` for line ownership over the queried range.
+/// 2. Resolve each unique commit SHA to a `CommitMeta` via storage.
+///    Skip SHAs that aren't yet indexed (e.g. older than the watermark)
+///    with a debug log; reflect the skip in `ExplainMeta`.
+/// 3. Pull per-(commit, file) hunks, concatenate their `diff_text`
+///    into a single excerpt, and truncate to `DIFF_EXCERPT_MAX_LINES`.
+/// 4. Sort hits newest-first by `commit.ts`, cap to `query.k`.
+/// 5. Compute `blame_coverage` over the *clamped* range.
+pub async fn explain_change(
+    storage: &dyn Storage,
+    blamer: &dyn BlameSource,
+    repo_id: &RepoId,
+    query: &ExplainQuery,
+) -> Result<(Vec<ExplainHit>, ExplainMeta)> {
+    // Plan 5 / Task 7.r: stub. Real impl lands in 7.g.
+    let _ = (storage, blamer, repo_id, query);
+    Err(crate::OhraError::Other(anyhow::anyhow!(
+        "explain_change is implemented in Plan 5 Task 7.g"
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::IndexStatus;
+    use crate::storage::{CommitRecord, HunkHit, HunkRecord};
+    use crate::types::{ChangeKind, CommitMeta, Hunk, Symbol};
+    use std::sync::Mutex;
 
     /// Doc-test-style sanity check that the trait surface compiles
     /// against a hand-rolled fake. The orchestrator's behavioural tests
@@ -127,5 +165,336 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].commit_sha, "abc");
         assert_eq!(out[0].lines, vec![1, 2, 3]);
+    }
+
+    // ----- Orchestrator fakes (Task 7) -------------------------------------
+
+    /// Storage that knows about a small in-memory set of commits +
+    /// per-(commit, file) hunks. Unknown SHAs return `Ok(None)` so the
+    /// orchestrator's "skip unindexed commit" path can be exercised.
+    struct FakeStorageOrch {
+        commits: HashMap<String, CommitMeta>,
+        hunks: HashMap<(String, String), Vec<Hunk>>,
+        get_commit_calls: Mutex<Vec<String>>,
+    }
+
+    impl FakeStorageOrch {
+        fn new() -> Self {
+            Self {
+                commits: HashMap::new(),
+                hunks: HashMap::new(),
+                get_commit_calls: Mutex::new(Vec::new()),
+            }
+        }
+        fn seed_commit(&mut self, cm: CommitMeta) {
+            self.commits.insert(cm.sha.clone(), cm);
+        }
+        fn seed_hunk(&mut self, sha: &str, file: &str, diff_text: &str) {
+            self.hunks
+                .entry((sha.to_string(), file.to_string()))
+                .or_default()
+                .push(Hunk {
+                    commit_sha: sha.into(),
+                    file_path: file.into(),
+                    language: Some("rust".into()),
+                    change_kind: ChangeKind::Modified,
+                    diff_text: diff_text.into(),
+                });
+        }
+    }
+
+    #[async_trait]
+    impl Storage for FakeStorageOrch {
+        async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn get_index_status(&self, _: &RepoId) -> Result<IndexStatus> {
+            unreachable!()
+        }
+        async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> Result<()> {
+            Ok(())
+        }
+        async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> Result<()> {
+            Ok(())
+        }
+        async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> Result<()> {
+            Ok(())
+        }
+        async fn clear_head_symbols(&self, _: &RepoId) -> Result<()> {
+            unreachable!()
+        }
+        async fn knn_hunks(
+            &self,
+            _: &RepoId,
+            _: &[f32],
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<Vec<HunkHit>> {
+            unreachable!()
+        }
+        async fn bm25_hunks_by_text(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<Vec<HunkHit>> {
+            unreachable!()
+        }
+        async fn bm25_hunks_by_symbol_name(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<Vec<HunkHit>> {
+            unreachable!()
+        }
+        async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> {
+            Ok(false)
+        }
+        async fn record_blob_seen(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn get_commit(&self, _: &RepoId, sha: &str) -> Result<Option<CommitMeta>> {
+            self.get_commit_calls.lock().unwrap().push(sha.to_string());
+            Ok(self.commits.get(sha).cloned())
+        }
+        async fn get_hunks_for_file_in_commit(
+            &self,
+            _: &RepoId,
+            sha: &str,
+            file: &str,
+        ) -> Result<Vec<Hunk>> {
+            Ok(self
+                .hunks
+                .get(&(sha.to_string(), file.to_string()))
+                .cloned()
+                .unwrap_or_default())
+        }
+    }
+
+    /// Scripted blame source. Returns the supplied `Vec<BlameRange>`
+    /// regardless of the queried lines, but echoes the queried bounds
+    /// back to the caller via `last_args` so tests can assert the
+    /// orchestrator clamped its inputs first.
+    struct ScriptedBlamer {
+        out: Vec<BlameRange>,
+        last_args: Mutex<Option<(String, u32, u32)>>,
+    }
+
+    #[async_trait]
+    impl BlameSource for ScriptedBlamer {
+        async fn blame_range(
+            &self,
+            file: &str,
+            line_start: u32,
+            line_end: u32,
+        ) -> Result<Vec<BlameRange>> {
+            *self.last_args.lock().unwrap() = Some((file.to_string(), line_start, line_end));
+            Ok(self.out.clone())
+        }
+    }
+
+    fn cm(sha: &str, ts: i64, message: &str) -> CommitMeta {
+        CommitMeta {
+            sha: sha.into(),
+            parent_sha: None,
+            is_merge: false,
+            author: Some("alice".into()),
+            ts,
+            message: message.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn explain_returns_unique_commits_in_recency_order() {
+        // Plan 5 / Task 7.r: blame attributes lines 1-2 to "old" (older
+        // commit), lines 3-4 to "new" (newer). The orchestrator must
+        // collapse to two unique commits, ordered newest-first.
+        let mut storage = FakeStorageOrch::new();
+        storage.seed_commit(cm("old", 1_000, "older change"));
+        storage.seed_commit(cm("new", 2_000, "newer change"));
+        storage.seed_hunk("old", "src/a.rs", "+    a();\n");
+        storage.seed_hunk("new", "src/a.rs", "+    b();\n");
+        let blamer = ScriptedBlamer {
+            out: vec![
+                BlameRange {
+                    commit_sha: "old".into(),
+                    lines: vec![1, 2],
+                },
+                BlameRange {
+                    commit_sha: "new".into(),
+                    lines: vec![3, 4],
+                },
+            ],
+            last_args: Mutex::new(None),
+        };
+        let q = ExplainQuery {
+            file: "src/a.rs".into(),
+            line_start: 1,
+            line_end: 4,
+            k: 5,
+            include_diff: true,
+        };
+        let id = RepoId::from_parts("first", "/r");
+        let (hits, meta) = explain_change(&storage, &blamer, &id, &q).await.unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].commit_sha, "new", "newest-first order");
+        assert_eq!(hits[1].commit_sha, "old");
+        assert_eq!(meta.commits_unique, 2);
+        assert!((meta.blame_coverage - 1.0).abs() < 1e-6);
+        assert!(meta.limitation.is_none());
+    }
+
+    #[tokio::test]
+    async fn explain_clamps_line_range_to_file_bounds() {
+        // Plan 5 / Task 7.r: caller asks for 1..=999 against a file that
+        // only has, say, 10 lines. The orchestrator must pass the
+        // *clamped* upper bound to the BlameSource — not the raw 999 —
+        // and reflect the clamped pair in `_meta.lines_queried`. A real
+        // Blamer also clamps internally, but the contract of the
+        // orchestrator is to be the source of truth for `lines_queried`.
+        let mut storage = FakeStorageOrch::new();
+        storage.seed_commit(cm("only", 1, "only commit"));
+        storage.seed_hunk("only", "src/a.rs", "+    only();\n");
+        let blamer = ScriptedBlamer {
+            // Pretend the file actually has 10 lines.
+            out: vec![BlameRange {
+                commit_sha: "only".into(),
+                lines: (1..=10).collect(),
+            }],
+            last_args: Mutex::new(None),
+        };
+        let q = ExplainQuery {
+            file: "src/a.rs".into(),
+            line_start: 1,
+            line_end: 999,
+            k: 5,
+            include_diff: true,
+        };
+        let id = RepoId::from_parts("first", "/r");
+        let (hits, meta) = explain_change(&storage, &blamer, &id, &q).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        // The blamer is the authoritative file-length oracle (it can
+        // read the file). The orchestrator should set `lines_queried`
+        // to the actual range covered by the blame, not the raw input.
+        assert_eq!(meta.lines_queried.0, 1);
+        assert_eq!(meta.lines_queried.1, 10);
+    }
+
+    #[tokio::test]
+    async fn explain_skips_unindexed_commits_and_notes_in_meta() {
+        // Plan 5 / Task 7.r: blame returns "indexed" + "missing"; only
+        // "indexed" is in storage. The orchestrator must drop "missing"
+        // silently, return one hit, and set `commits_unique = 1`.
+        let mut storage = FakeStorageOrch::new();
+        storage.seed_commit(cm("indexed", 1_000, "indexed change"));
+        storage.seed_hunk("indexed", "src/a.rs", "+    a();\n");
+        let blamer = ScriptedBlamer {
+            out: vec![
+                BlameRange {
+                    commit_sha: "indexed".into(),
+                    lines: vec![1, 2],
+                },
+                BlameRange {
+                    commit_sha: "missing".into(),
+                    lines: vec![3, 4],
+                },
+            ],
+            last_args: Mutex::new(None),
+        };
+        let q = ExplainQuery {
+            file: "src/a.rs".into(),
+            line_start: 1,
+            line_end: 4,
+            k: 5,
+            include_diff: true,
+        };
+        let id = RepoId::from_parts("first", "/r");
+        let (hits, meta) = explain_change(&storage, &blamer, &id, &q).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].commit_sha, "indexed");
+        assert_eq!(meta.commits_unique, 1);
+    }
+
+    #[tokio::test]
+    async fn explain_blame_coverage_lt_one_when_some_lines_unattributed() {
+        // Plan 5 / Task 7.r: blame attributes only 2 of 4 queried lines
+        // (the others fall on a SHA that storage doesn't know). Coverage
+        // must be 0.5; the limitation note must mention the gap.
+        let mut storage = FakeStorageOrch::new();
+        storage.seed_commit(cm("kept", 1_000, "kept change"));
+        storage.seed_hunk("kept", "src/a.rs", "+    a();\n");
+        let blamer = ScriptedBlamer {
+            out: vec![
+                BlameRange {
+                    commit_sha: "kept".into(),
+                    lines: vec![1, 2],
+                },
+                BlameRange {
+                    commit_sha: "dropped".into(),
+                    lines: vec![3, 4],
+                },
+            ],
+            last_args: Mutex::new(None),
+        };
+        let q = ExplainQuery {
+            file: "src/a.rs".into(),
+            line_start: 1,
+            line_end: 4,
+            k: 5,
+            include_diff: true,
+        };
+        let id = RepoId::from_parts("first", "/r");
+        let (_hits, meta) = explain_change(&storage, &blamer, &id, &q).await.unwrap();
+        assert!(
+            (meta.blame_coverage - 0.5).abs() < 1e-6,
+            "coverage should be 0.5, got {}",
+            meta.blame_coverage
+        );
+        assert!(
+            meta.limitation.is_some(),
+            "limitation should describe the unattributed lines"
+        );
+    }
+
+    #[tokio::test]
+    async fn explain_returns_provenance_exact() {
+        // Plan 5 / Task 7.r: every hit's provenance must be Exact.
+        // git blame is git-truth, never inferred.
+        let mut storage = FakeStorageOrch::new();
+        storage.seed_commit(cm("only", 1_000, "only"));
+        storage.seed_hunk("only", "src/a.rs", "+    only();\n");
+        let blamer = ScriptedBlamer {
+            out: vec![BlameRange {
+                commit_sha: "only".into(),
+                lines: vec![1],
+            }],
+            last_args: Mutex::new(None),
+        };
+        let q = ExplainQuery {
+            file: "src/a.rs".into(),
+            line_start: 1,
+            line_end: 1,
+            k: 5,
+            include_diff: true,
+        };
+        let id = RepoId::from_parts("first", "/r");
+        let (hits, _meta) = explain_change(&storage, &blamer, &id, &q).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(matches!(hits[0].provenance, Provenance::Exact));
+        // Serializes to "EXACT" (not "EXTRACTED" / "INFERRED").
+        let s = serde_json::to_string(&hits[0]).unwrap();
+        assert!(
+            s.contains("\"provenance\":\"EXACT\""),
+            "expected EXACT, got: {s}"
+        );
     }
 }
