@@ -15,11 +15,8 @@ use crate::storage::Storage;
 use crate::types::{Provenance, RepoId};
 use crate::Result;
 use async_trait::async_trait;
-#[allow(unused_imports)]
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-#[allow(unused_imports)]
-use std::collections::{BTreeSet, HashMap};
 
 /// One commit's contribution to a blame query, with the lines (within
 /// the queried range) it owns. Returned by `BlameSource::blame_range`.
@@ -86,8 +83,10 @@ pub struct ExplainHit {
 /// Per-line diff truncation cap for `ExplainHit::diff_excerpt`. Matches
 /// the value used by the `find_pattern` retrieval pipeline so MCP
 /// responses look consistent across both tools.
-#[allow(dead_code)]
 const DIFF_EXCERPT_MAX_LINES: usize = 80;
+
+/// `k` clamp matches the spec: 1..=20, default 5 enforced at the caller.
+const K_MAX: u8 = 20;
 
 /// Diagnostic envelope returned alongside hits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,12 +122,184 @@ pub async fn explain_change(
     repo_id: &RepoId,
     query: &ExplainQuery,
 ) -> Result<(Vec<ExplainHit>, ExplainMeta)> {
-    // Plan 5 / Task 7.r: stub. Real impl lands in 7.g.
-    let _ = (storage, blamer, repo_id, query);
-    Err(crate::OhraError::Other(anyhow::anyhow!(
-        "explain_change is implemented in Plan 5 Task 7.g"
-    )))
+    // 1. Blame the queried range. The Blamer is the file-length oracle:
+    //    it can read the workdir checkout, so its returned `lines` are
+    //    the authoritative clamped set.
+    let raw_blame = blamer
+        .blame_range(&query.file, query.line_start, query.line_end)
+        .await?;
+
+    // Derive the clamped (line_start, line_end) from the actual blame
+    // output. Empty blame (file missing, range invalid) → echo back
+    // the requested range so the meta still tells the caller what they
+    // asked for, with a limitation note.
+    let (clamped_start, clamped_end, lines_attributed_total) = if raw_blame.is_empty() {
+        (query.line_start, query.line_end, 0u32)
+    } else {
+        let mut min_line = u32::MAX;
+        let mut max_line = 0u32;
+        let mut total = 0u32;
+        for r in &raw_blame {
+            for &l in &r.lines {
+                if l < min_line {
+                    min_line = l;
+                }
+                if l > max_line {
+                    max_line = l;
+                }
+                total += 1;
+            }
+        }
+        if min_line == u32::MAX {
+            (query.line_start, query.line_end, 0)
+        } else {
+            (min_line, max_line, total)
+        }
+    };
+
+    // 2. Resolve each unique commit SHA to its metadata. Skip unindexed
+    //    SHAs (Ok(None)) and remember how many lines they "owned" so we
+    //    can report them in `blame_coverage`.
+    let mut indexed: Vec<(crate::types::CommitMeta, Vec<u32>)> = Vec::new();
+    let mut skipped_shas: Vec<String> = Vec::new();
+    let mut lines_attributed_indexed: u32 = 0;
+    for r in raw_blame {
+        match storage.get_commit(repo_id, &r.commit_sha).await? {
+            Some(cm) => {
+                lines_attributed_indexed += r.lines.len() as u32;
+                indexed.push((cm, r.lines));
+            }
+            None => {
+                tracing::debug!(
+                    sha = %r.commit_sha,
+                    "explain_change: skipping unindexed commit"
+                );
+                skipped_shas.push(r.commit_sha);
+            }
+        }
+    }
+
+    // 3. Per-commit hunk excerpts. Each hit's diff_excerpt is the
+    //    concatenation of every hunk this commit produced for this
+    //    file, truncated.
+    let mut hits: Vec<ExplainHit> = Vec::with_capacity(indexed.len());
+    for (cm, lines) in indexed {
+        let (excerpt, truncated) = if query.include_diff {
+            let hunks = storage
+                .get_hunks_for_file_in_commit(repo_id, &cm.sha, &query.file)
+                .await?;
+            let joined: String = hunks
+                .iter()
+                .map(|h| h.diff_text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            truncate_diff(&joined, DIFF_EXCERPT_MAX_LINES)
+        } else {
+            (String::new(), false)
+        };
+        let date = DateTime::<Utc>::from_timestamp(cm.ts, 0)
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_default();
+        hits.push(ExplainHit {
+            commit_sha: cm.sha,
+            commit_message: cm.message,
+            commit_author: cm.author,
+            commit_date: date,
+            blame_lines: lines,
+            file_path: query.file.clone(),
+            diff_excerpt: excerpt,
+            diff_truncated: truncated,
+            provenance: Provenance::Exact,
+        });
+    }
+
+    // 4. Sort newest-first; cap to k.
+    hits.sort_by(|a, b| {
+        // Sort by commit_date desc; tie-break by sha asc for determinism.
+        match b.commit_date.cmp(&a.commit_date) {
+            std::cmp::Ordering::Equal => a.commit_sha.cmp(&b.commit_sha),
+            other => other,
+        }
+    });
+    let k = query.k.clamp(1, K_MAX) as usize;
+    hits.truncate(k);
+
+    // 5. Coverage + limitation note.
+    let blame_coverage = if lines_attributed_total == 0 {
+        0.0
+    } else {
+        lines_attributed_indexed as f32 / lines_attributed_total as f32
+    };
+    let limitation = build_limitation(
+        lines_attributed_total,
+        &skipped_shas,
+        clamped_start,
+        clamped_end,
+    );
+
+    let meta = ExplainMeta {
+        lines_queried: (clamped_start, clamped_end),
+        commits_unique: hits.len(),
+        blame_coverage,
+        limitation,
+    };
+    Ok((hits, meta))
 }
+
+fn build_limitation(
+    total: u32,
+    skipped: &[String],
+    clamped_start: u32,
+    clamped_end: u32,
+) -> Option<String> {
+    if total == 0 {
+        return Some("blame returned no attributable lines (file missing in HEAD or empty range)".into());
+    }
+    if !skipped.is_empty() {
+        // Don't dump every SHA — keep the message terse but informative.
+        let n = skipped.len();
+        let preview: Vec<&str> = skipped.iter().take(3).map(String::as_str).collect();
+        let suffix = if n > preview.len() {
+            format!(" (+{} more)", n - preview.len())
+        } else {
+            String::new()
+        };
+        return Some(format!(
+            "{n} commit(s) older than the local index watermark were skipped: [{}]{}; \
+             range covered: {clamped_start}..={clamped_end}",
+            preview.join(", "),
+            suffix
+        ));
+    }
+    None
+}
+
+/// Same shape as `ohara-core::retriever::truncate_diff`. Inlined here
+/// rather than re-exported so the orchestrator stays self-contained.
+fn truncate_diff(s: &str, max_lines: usize) -> (String, bool) {
+    let nl = s.bytes().filter(|&b| b == b'\n').count();
+    let has_trailing_partial = !s.is_empty() && !s.ends_with('\n');
+    let total_lines = nl + if has_trailing_partial { 1 } else { 0 };
+    if total_lines <= max_lines {
+        return (s.to_string(), false);
+    }
+    let mut end = 0;
+    let mut count = 0;
+    for (i, b) in s.bytes().enumerate() {
+        if b == b'\n' {
+            count += 1;
+            if count == max_lines {
+                end = i + 1;
+                break;
+            }
+        }
+    }
+    let extra = total_lines - max_lines;
+    let mut out = s[..end].to_string();
+    out.push_str(&format!("... ({} more lines)\n", extra));
+    (out, true)
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -136,6 +307,7 @@ mod tests {
     use crate::query::IndexStatus;
     use crate::storage::{CommitRecord, HunkHit, HunkRecord};
     use crate::types::{ChangeKind, CommitMeta, Hunk, Symbol};
+    use std::collections::HashMap;
     use std::sync::Mutex;
 
     /// Doc-test-style sanity check that the trait surface compiles
