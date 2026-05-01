@@ -133,6 +133,48 @@ mod tests {
     }
 
     #[test]
+    fn spring_fixture_preserves_annotations_through_extract_for_path() {
+        // Plan 4 / Task 13: an end-to-end check that a Spring-flavored
+        // controller round-trips through the public extract_for_path
+        // entry (not just the per-language module) with class- and
+        // method-level annotations intact in source_text. This is the
+        // signal that downstream embedding + BM25 picks up Spring
+        // tokens.
+        let src = "\
+package com.example.web;
+
+@RestController
+@RequestMapping(\"/users\")
+public class UserController {
+    @GetMapping(\"/{id}\")
+    public User get(@PathVariable Long id) { return null; }
+
+    @PostMapping
+    public User create(@RequestBody UserRequest req) { return null; }
+}
+";
+        let chunks = extract_for_path("UserController.java", src, "deadbeef").expect("extract");
+        // The chunker may merge the class with its small methods into
+        // a single chunk. Either way, the merged chunk's source_text
+        // must contain every annotation we care about — that's the
+        // contract this test guards.
+        let combined: String = chunks.iter().map(|c| c.source_text.as_str()).collect();
+        for needle in &[
+            "@RestController",
+            "@RequestMapping(\"/users\")",
+            "@GetMapping(\"/{id}\")",
+            "@PathVariable",
+            "@PostMapping",
+            "@RequestBody",
+        ] {
+            assert!(
+                combined.contains(needle),
+                "extract_for_path output should contain {needle}, got chunks: {chunks:?}"
+            );
+        }
+    }
+
+    #[test]
     fn chunker_merges_small_java_methods_up_to_500_tokens() {
         // Plan 4 / Task 12: the AST-aware chunker is language-agnostic
         // — it consumes the per-file flat list of source-order atoms
