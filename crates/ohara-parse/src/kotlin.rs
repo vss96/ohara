@@ -94,23 +94,15 @@ mod tests {
     #[ignore]
     fn debug_dump_ast() {
         let src = "\
-data class User(val id: Int, val name: String)
-
-sealed class Shape
-class Circle : Shape()
-
-object Singleton {
-    fun ping() {}
+@Component
+@Singleton
+class FooService {
+    @Inject
+    fun load() {}
 }
 
-class Foo {
-    companion object Helper {
-        fun create() {}
-    }
-    fun member() {}
-}
-
-fun topLevel() {}
+@JvmStatic
+fun topAnno() {}
 ";
         let mut parser = tree_sitter::Parser::new();
         parser
@@ -171,6 +163,54 @@ fun topLevel() {}
             .find(|s| s.kind == SymbolKind::Class)
             .expect("no class extracted");
         assert_eq!(class.name, "Singleton");
+    }
+
+    #[test]
+    fn preserves_annotations_in_source_text_kt() {
+        // Spring/DI-friendly span behavior: source_text must include
+        // preceding @Component / @Singleton annotations on classes and
+        // @Inject on functions so embedding + BM25 indexing pick them
+        // up.
+        //
+        // tree-sitter-kotlin already absorbs preceding annotations
+        // into the `modifiers` child of class_declaration /
+        // function_declaration / etc., so the declaration node's byte
+        // range naturally starts at the first annotation. No span
+        // extension code is needed; this test is a regression guard
+        // against grammar changes.
+        let src = "\
+@Component
+@Singleton
+class FooService {
+    @Inject
+    fun load() {}
+}
+";
+        let syms = extract("FooService.kt", src, "deadbeef").unwrap();
+
+        let class = syms
+            .iter()
+            .find(|s| s.kind == SymbolKind::Class && s.name == "FooService")
+            .expect("FooService class missing");
+        assert!(
+            class.source_text.starts_with("@Component"),
+            "class source_text should start with @Component, got: {:?}",
+            &class.source_text[..class.source_text.len().min(80)]
+        );
+        assert!(
+            class.source_text.contains("@Singleton"),
+            "class source_text should include @Singleton"
+        );
+
+        let method = syms
+            .iter()
+            .find(|s| s.kind == SymbolKind::Method && s.name == "load")
+            .expect("load method missing");
+        assert!(
+            method.source_text.starts_with("@Inject"),
+            "method source_text should start with @Inject, got: {:?}",
+            &method.source_text[..method.source_text.len().min(80)]
+        );
     }
 
     #[test]
