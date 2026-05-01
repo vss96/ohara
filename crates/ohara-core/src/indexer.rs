@@ -2,6 +2,7 @@ use crate::storage::{CommitRecord, HunkRecord};
 use crate::types::{CommitMeta, Hunk, RepoId, Symbol};
 use crate::{EmbeddingProvider, Result, Storage};
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Source of commits + hunks. Implemented by `ohara-git` in a later task; defined
 /// here so `ohara-core` stays git-free.
@@ -90,10 +91,14 @@ impl Indexer {
         commit_source: &dyn CommitSource,
         symbol_source: &dyn SymbolSource,
     ) -> Result<IndexerReport> {
+        let mut timings = PhaseTimings::default();
+
         let status = self.storage.get_index_status(repo_id).await?;
+        let walk_start = Instant::now();
         let commits = commit_source
             .list_commits(status.last_indexed_commit.as_deref())
             .await?;
+        timings.commit_walk_ms = walk_start.elapsed().as_millis() as u64;
         let total_commits = commits.len();
         tracing::info!(new_commits = total_commits, "begin index pass");
         self.progress.start(total_commits);
@@ -109,15 +114,32 @@ impl Indexer {
 
         for chunk in commits.chunks(self.batch_commits) {
             for cm in chunk {
+                let extract_start = Instant::now();
                 let hunks = commit_source.hunks_for_commit(&cm.sha).await?;
+                timings.diff_extract_ms += extract_start.elapsed().as_millis() as u64;
                 total_hunks += hunks.len();
+
+                // Hunk-text inflation accounting (Task 0.3): the
+                // embedder sees `diff_text` byte-for-byte, so summing
+                // its byte-length gives the numerator. Added-line
+                // count is the signal-bearing denominator — context
+                // lines, deletions, and the `@@`/`---`/`+++` headers
+                // are excluded so the resulting ratio reflects "bytes
+                // per line that actually changed".
+                for h in &hunks {
+                    timings.total_diff_bytes += h.diff_text.len() as u64;
+                    timings.total_added_lines += count_added_lines(&h.diff_text);
+                }
 
                 let texts: Vec<String> = std::iter::once(cm.message.clone())
                     .chain(hunks.iter().map(|h| h.diff_text.clone()))
                     .collect();
+                let embed_start = Instant::now();
                 let embs = self.embedder.embed_batch(&texts).await?;
+                timings.embed_ms += embed_start.elapsed().as_millis() as u64;
                 let (msg_emb, hunk_embs) = embs.split_first().expect("non-empty");
 
+                let write_start = Instant::now();
                 self.storage
                     .put_commit(
                         repo_id,
@@ -137,6 +159,7 @@ impl Indexer {
                     })
                     .collect();
                 self.storage.put_hunks(repo_id, &records).await?;
+                timings.storage_write_ms += write_start.elapsed().as_millis() as u64;
                 latest_sha = Some(cm.sha.clone());
                 commits_done += 1;
                 self.progress.commit_done(commits_done, total_hunks);
@@ -166,8 +189,10 @@ impl Indexer {
             "commit walk done; extracting HEAD symbols"
         );
         self.progress.phase_symbols();
+        let symbols_start = Instant::now();
         let symbols = symbol_source.extract_head_symbols().await?;
         self.storage.put_head_symbols(repo_id, &symbols).await?;
+        timings.head_symbols_ms = symbols_start.elapsed().as_millis() as u64;
 
         if let Some(sha) = latest_sha.as_deref() {
             self.storage.set_last_indexed_commit(repo_id, sha).await?;
@@ -179,8 +204,34 @@ impl Indexer {
             new_commits: commits.len(),
             new_hunks: total_hunks,
             head_symbols: symbols.len(),
-            phase_timings: PhaseTimings::default(),
+            phase_timings: timings,
         })
+    }
+}
+
+/// Count "+"-prefixed lines in a unified-diff snippet. Excludes the
+/// `+++ b/path` file header (a `+++` line is not a content add) so the
+/// ratio reported as `total_diff_bytes / total_added_lines` reflects
+/// real changed lines, not the metadata that git2 always emits.
+fn count_added_lines(diff_text: &str) -> u64 {
+    diff_text
+        .lines()
+        .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
+        .count() as u64
+}
+
+#[cfg(test)]
+mod count_added_lines_tests {
+    #[test]
+    fn counts_plus_prefixed_lines_only() {
+        let diff =
+            "--- a/x.rs\n+++ b/x.rs\n@@ -0,0 +1,2 @@\n+added one\n+added two\n context\n-removed\n";
+        assert_eq!(super::count_added_lines(diff), 2);
+    }
+
+    #[test]
+    fn empty_diff_is_zero() {
+        assert_eq!(super::count_added_lines(""), 0);
     }
 }
 

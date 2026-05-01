@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
-use ohara_core::{Indexer, IndexerReport, Storage};
+use ohara_core::{Indexer, IndexerReport, PhaseTimings, Storage};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -70,6 +70,7 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
                 new_commits: 0,
                 new_hunks: 0,
                 head_symbols: 0,
+                phase_timings: PhaseTimings::default(),
             });
         }
     }
