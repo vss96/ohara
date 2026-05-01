@@ -119,6 +119,43 @@ public class Calc {
     }
 
     #[test]
+    fn extracts_record_as_class() {
+        // Java 14+ record. tree-sitter-java models this as a distinct
+        // record_declaration AST node, but per spec it collapses to
+        // SymbolKind::Class — there's no Record kind in v0.4.
+        let src = "public record Point(int x, int y) { }\n";
+        let syms = extract("Point.java", src, "deadbeef").unwrap();
+        let class = syms
+            .iter()
+            .find(|s| s.kind == SymbolKind::Class)
+            .expect("no class extracted");
+        assert_eq!(class.name, "Point");
+    }
+
+    #[test]
+    fn extracts_enum() {
+        let src = "public enum Color { RED, GREEN, BLUE }\n";
+        let syms = extract("Color.java", src, "deadbeef").unwrap();
+        let class = syms
+            .iter()
+            .find(|s| s.kind == SymbolKind::Class)
+            .expect("no class extracted");
+        assert_eq!(class.name, "Color");
+    }
+
+    #[test]
+    fn extracts_annotation_type() {
+        // `@interface Auditable` is an annotation type. Maps to Class.
+        let src = "public @interface Auditable { String value() default \"\"; }\n";
+        let syms = extract("Auditable.java", src, "deadbeef").unwrap();
+        let class = syms
+            .iter()
+            .find(|s| s.kind == SymbolKind::Class && s.name == "Auditable")
+            .expect("no annotation-type class extracted");
+        assert_eq!(class.name, "Auditable");
+    }
+
+    #[test]
     fn constructor_kind_is_method() {
         // Java spec quirk: constructors share SymbolKind::Method but
         // their `name` is the enclosing class's identifier, not the
