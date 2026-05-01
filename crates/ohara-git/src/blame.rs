@@ -47,11 +47,21 @@ impl BlameSource for Blamer {
         line_start: u32,
         line_end: u32,
     ) -> ohara_core::Result<Vec<BlameRange>> {
-        // Plan 5 / Task 5.r: stub. Real impl lands in 5.g.
-        let _ = (file, line_start, line_end);
-        Err(ohara_core::OhraError::Git(
-            "Blamer::blame_range is implemented in Plan 5 Task 5.g".into(),
-        ))
+        // git2::Repository is !Sync and `blame_file` is synchronous +
+        // potentially expensive on long histories. Mirror the GitWalker
+        // pattern: hop through Arc<Mutex<Repository>> + spawn_blocking
+        // so we don't block the async runtime.
+        let repo = self.repo.clone();
+        let file = file.to_string();
+        tokio::task::spawn_blocking(move || -> ohara_core::Result<Vec<BlameRange>> {
+            let guard = repo
+                .lock()
+                .map_err(|e| ohara_core::OhraError::Git(format!("repo lock poisoned: {e}")))?;
+            blame_range_sync(&guard, &file, line_start, line_end)
+                .map_err(|e| ohara_core::OhraError::Git(e.to_string()))
+        })
+        .await
+        .map_err(|e| ohara_core::OhraError::Git(e.to_string()))?
     }
 }
 
@@ -60,7 +70,6 @@ impl BlameSource for Blamer {
 /// `tokio::task::spawn_blocking`. Marked `pub(crate)` to keep it out
 /// of the crate's public surface but still visible to the unit tests
 /// in this module.
-#[allow(dead_code)]
 pub(crate) fn blame_range_sync(
     repo: &Repository,
     file: &str,
