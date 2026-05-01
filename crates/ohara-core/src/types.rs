@@ -103,3 +103,43 @@ pub struct Symbol {
     pub blob_sha: String,
     pub source_text: String,
 }
+
+#[cfg(test)]
+mod symbol_tests {
+    use super::*;
+
+    #[test]
+    fn symbol_sibling_names_round_trip() {
+        // Red test for Track C / step C-1: documents that `Symbol` must
+        // round-trip a `sibling_names: Vec<String>` field through serde.
+        // This test compiles even before the struct field exists by
+        // round-tripping through JSON via `serde_json::Value`. The
+        // assertion fails until the field is added in the green commit.
+        let s = Symbol {
+            file_path: "src/a.rs".into(),
+            language: "rust".into(),
+            kind: SymbolKind::Function,
+            name: "alpha".into(),
+            qualified_name: None,
+            span_start: 0,
+            span_end: 42,
+            blob_sha: "deadbeef".into(),
+            source_text: "fn alpha() {}".into(),
+        };
+        let json = serde_json::to_string(&s).expect("serialize");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        let names = v
+            .get("sibling_names")
+            .expect("`Symbol` must serialize a `sibling_names` field");
+        let arr = names.as_array().expect("`sibling_names` must be an array");
+        assert!(
+            arr.is_empty(),
+            "default-constructed Symbol should have empty sibling_names"
+        );
+
+        // And round-trip back through the typed struct.
+        let back: Symbol = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.name, "alpha");
+        assert_eq!(back.span_end, 42);
+    }
+}
