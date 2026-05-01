@@ -15,3 +15,8 @@
 .claude-flow/data/
 .claude-flow/logs/
 .claude-flow/sessions/
+
+# Per-developer Claude Code state (settings, sessions, and ruflo MCP scaffolding)
+.claude/
+.mcp.json
+CLAUDE.md

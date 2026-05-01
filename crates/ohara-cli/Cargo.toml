@@ -4,6 +4,8 @@ edition.workspace = true
 rust-version.workspace = true
 version.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "ohara CLI — index and query a context lineage engine"
 
 [[bin]]
 name = "ohara"

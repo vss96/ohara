@@ -15,6 +15,7 @@ edition = "2021"
 rust-version = "1.85"
 version = "0.1.0"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/vss96/ohara"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -44,3 +45,8 @@ schemars = "0.8"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
