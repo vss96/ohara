@@ -1,10 +1,7 @@
 //! tree-sitter symbol extraction for supported languages.
 
 pub mod chunker;
-pub mod java;
-pub mod kotlin;
-pub mod python;
-pub mod rust;
+pub mod languages;
 
 use anyhow::Result;
 use ohara_core::indexer::SymbolSource;
@@ -19,17 +16,17 @@ const CHUNK_MAX_TOKENS: usize = 500;
 pub fn extract_for_path(path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symbol>> {
     let ext = Path::new(path).extension().and_then(|e| e.to_str());
     let mut atoms = match ext {
-        Some("rs") => rust::extract(path, source, blob_sha)?,
-        Some("py") => python::extract(path, source, blob_sha)?,
-        Some("java") => java::extract(path, source, blob_sha)?,
-        Some("kt") | Some("kts") => kotlin::extract(path, source, blob_sha)?,
+        Some("rs") => languages::rust::extract(path, source, blob_sha)?,
+        Some("py") => languages::python::extract(path, source, blob_sha)?,
+        Some("java") => languages::java::extract(path, source, blob_sha)?,
+        Some("kt") | Some("kts") => languages::kotlin::extract(path, source, blob_sha)?,
         _ => return Ok(vec![]),
     };
     // The chunker requires source-byte-order traversal. Tree-sitter
-    // captures in `rust::extract` are emitted in match order which is
-    // already source-aligned; `python::extract` dedups through a
-    // HashMap whose iteration order is undefined, so we sort here
-    // unconditionally — cheap and language-agnostic.
+    // captures in `languages::rust::extract` are emitted in match order
+    // which is already source-aligned; `languages::python::extract` dedups
+    // through a HashMap whose iteration order is undefined, so we sort
+    // here unconditionally — cheap and language-agnostic.
     atoms.sort_by_key(|s| s.span_start);
     Ok(chunker::chunk_symbols(atoms, CHUNK_MAX_TOKENS, source))
 }

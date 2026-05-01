@@ -15,7 +15,7 @@ use ohara_core::types::{Symbol, SymbolKind};
 use std::collections::HashMap;
 use tree_sitter::{Parser, Query, QueryCursor};
 
-const QUERY_SRC: &str = include_str!("../queries/kotlin.scm");
+const QUERY_SRC: &str = include_str!("../../queries/kotlin.scm");
 
 pub fn extract(file_path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symbol>> {
     let mut parser = Parser::new();

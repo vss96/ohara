@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use ohara_core::types::{Symbol, SymbolKind};
 use tree_sitter::{Parser, Query, QueryCursor};
 
-const QUERY_SRC: &str = include_str!("../queries/rust.scm");
+const QUERY_SRC: &str = include_str!("../../queries/rust.scm");
 
 pub fn extract(file_path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symbol>> {
     let mut parser = Parser::new();

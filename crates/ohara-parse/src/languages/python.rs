@@ -3,7 +3,7 @@ use ohara_core::types::{Symbol, SymbolKind};
 use std::collections::HashMap;
 use tree_sitter::{Parser, Query, QueryCursor};
 
-const QUERY_SRC: &str = include_str!("../queries/python.scm");
+const QUERY_SRC: &str = include_str!("../../queries/python.scm");
 
 pub fn extract(file_path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symbol>> {
     let mut parser = Parser::new();
