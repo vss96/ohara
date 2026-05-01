@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
-use ohara_core::{Indexer, Storage};
+use ohara_core::{Indexer, IndexerReport, Storage};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -9,9 +9,13 @@ pub struct Args {
     /// Path to the repo (defaults to current directory)
     #[arg(default_value = ".")]
     pub path: PathBuf,
+    /// Skip indexing (and embedder init) when HEAD is already indexed.
+    /// Used by the post-commit hook so empty re-indexes are nearly free.
+    #[arg(long)]
+    pub incremental: bool,
 }
 
-pub async fn run(args: Args) -> Result<()> {
+pub async fn run(args: Args) -> Result<IndexerReport> {
     let (repo_id, canonical, first_commit) = super::resolve_repo_id(&args.path)?;
     let db_path = super::index_db_path(&repo_id)?;
     tracing::info!(repo = %canonical.display(), id = repo_id.as_str(), db = %db_path.display(), "indexing");
@@ -31,5 +35,5 @@ pub async fn run(args: Args) -> Result<()> {
         "indexed: {} new commits, {} hunks, {} HEAD symbols",
         report.new_commits, report.new_hunks, report.head_symbols
     );
-    Ok(())
+    Ok(report)
 }

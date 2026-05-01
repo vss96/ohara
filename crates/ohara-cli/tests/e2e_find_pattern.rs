@@ -23,7 +23,7 @@ async fn find_pattern_returns_retry_commit_first() {
     std::env::set_var("OHARA_HOME", home.path());
 
     // index
-    let args = ohara_cli::commands::index::Args { path: repo.clone() };
+    let args = ohara_cli::commands::index::Args { path: repo.clone(), incremental: false };
     ohara_cli::commands::index::run(args).await.unwrap();
 
     // build a Retriever directly to avoid parsing CLI stdout
