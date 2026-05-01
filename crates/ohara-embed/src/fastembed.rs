@@ -106,10 +106,41 @@ impl FastEmbedReranker {
 #[async_trait::async_trait]
 impl RerankProvider for FastEmbedReranker {
     async fn rerank(&self, query: &str, candidates: &[&str]) -> CoreResult<Vec<f32>> {
-        // B.2.r stub: real impl lands in B.2.g.
-        let _ = (query, candidates, &self.model);
-        unreachable!("FastEmbedReranker::rerank not yet implemented (B.2.r stub)")
+        if candidates.is_empty() {
+            return Ok(vec![]);
+        }
+        let model = self.model.clone();
+        let query_owned = query.to_string();
+        let docs: Vec<String> = candidates.iter().map(|s| s.to_string()).collect();
+        let n = docs.len();
+        let join = tokio::task::spawn_blocking(move || {
+            let guard = model.blocking_lock();
+            // return_documents=false (we only need scores+indices),
+            // batch_size=None (use fastembed's default).
+            guard.rerank(query_owned.as_str(), docs.iter().map(|s| s.as_str()).collect(), false, None)
+        })
+        .await
+        .map_err(|e| ohara_core::OhraError::Embedding(format!("join: {e}")))?;
+        let results = join.map_err(|e| ohara_core::OhraError::Embedding(e.to_string()))?;
+        Ok(align_by_index(results, n))
     }
+}
+
+/// Reorder fastembed's score-descending `Vec<RerankResult>` so the output
+/// `Vec<f32>` aligns positionally with the caller's `candidates` slice
+/// (i.e. `out[i]` is the score for the original `candidates[i]`).
+///
+/// Out-of-range indices and missing positions are dropped / left as 0.0
+/// respectively; under normal fastembed behavior the result set is a
+/// permutation of `0..n` so neither path triggers in production.
+fn align_by_index(results: Vec<fastembed::RerankResult>, n: usize) -> Vec<f32> {
+    let mut out = vec![0.0_f32; n];
+    for r in results {
+        if r.index < n {
+            out[r.index] = r.score;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
