@@ -35,24 +35,52 @@ pub struct HunkHit {
 
 #[async_trait]
 pub trait Storage: Send + Sync {
+    // --- Repo lifecycle ---
+
+    /// Register a repository in the index. Idempotent on `repo_id`:
+    /// re-calling with the same id updates `path` / `first_commit_sha`
+    /// without dropping previously indexed rows.
     async fn open_repo(&self, repo_id: &RepoId, path: &str, first_commit_sha: &str) -> Result<()>;
 
+    /// Return the current index watermark for `repo_id`. A fresh repo
+    /// returns `IndexStatus { last_indexed_commit: None, .. }`.
     async fn get_index_status(&self, repo_id: &RepoId) -> Result<IndexStatus>;
 
+    /// Advance the watermark to `sha`. The indexer calls this after
+    /// every commit it successfully indexes; it must be monotonic in
+    /// caller-visible terms (callers always pass the newest commit
+    /// they've persisted).
     async fn set_last_indexed_commit(&self, repo_id: &RepoId, sha: &str) -> Result<()>;
 
+    // --- Write path ---
+
+    /// Persist a commit's metadata + message embedding. Idempotent on
+    /// `record.meta.commit_sha` (INSERT OR REPLACE).
     async fn put_commit(&self, repo_id: &RepoId, record: &CommitRecord) -> Result<()>;
 
+    /// Persist a batch of hunks with their diff embeddings. Idempotent
+    /// at the (commit_sha, file_path) grain — re-calling with the same
+    /// hunk replaces the row rather than appending a duplicate.
     async fn put_hunks(&self, repo_id: &RepoId, records: &[HunkRecord]) -> Result<()>;
 
+    /// Persist HEAD-snapshot symbols extracted by the AST chunker.
+    /// Caller is responsible for deciding whether to clear the previous
+    /// snapshot first (see `clear_head_symbols`).
     async fn put_head_symbols(&self, repo_id: &RepoId, symbols: &[Symbol]) -> Result<()>;
 
     /// Drop all HEAD symbol rows for `repo_id` (and the matching
-    /// `vec_symbol` / `fts_symbol_name` rows). Used by `ohara index --force`
-    /// before re-extracting symbols so the v0.3 AST sibling-merge chunker
-    /// can repopulate without duplicates.
+    /// `vec_symbol` / `fts_symbol_name` rows). Used by `ohara index
+    /// --force` before re-extracting symbols so the AST sibling-merge
+    /// chunker can repopulate without duplicates.
     async fn clear_head_symbols(&self, repo_id: &RepoId) -> Result<()>;
 
+    // --- Read lanes (retrieval) ---
+
+    /// Vector KNN over hunk diff embeddings. Ordered best-first.
+    /// `similarity = 1.0 / (1.0 + distance)` where `distance` is the
+    /// L2 distance reported by sqlite-vec, giving callers a "higher
+    /// is better" score in `(0, 1]`. Optional `language` and
+    /// `since_unix` filters narrow the candidate set before ranking.
     async fn knn_hunks(
         &self,
         repo_id: &RepoId,
@@ -87,19 +115,28 @@ pub trait Storage: Send + Sync {
         since_unix: Option<i64>,
     ) -> Result<Vec<HunkHit>>;
 
+    // --- Blob cache ---
+
+    /// Has a blob with this `(blob_sha, embedding_model)` been embedded
+    /// before? Used to skip re-embedding identical content across
+    /// commits.
     async fn blob_was_seen(&self, blob_sha: &str, embedding_model: &str) -> Result<bool>;
 
+    /// Record that `(blob_sha, embedding_model)` has been embedded.
+    /// Idempotent on the pair.
     async fn record_blob_seen(&self, blob_sha: &str, embedding_model: &str) -> Result<()>;
+
+    // --- Explain support ---
 
     /// Fetch a single commit's metadata. Returns `Ok(None)` if the SHA
     /// isn't indexed (e.g., commit is older than the watermark). Used by
-    /// the `explain_change` orchestrator (Plan 5) to enrich blame results
-    /// with commit message + author + date for display.
+    /// the `explain_change` orchestrator to enrich blame results with
+    /// commit message + author + date for display.
     async fn get_commit(&self, repo_id: &RepoId, sha: &str) -> Result<Option<CommitMeta>>;
 
     /// Fetch the hunks of a commit that touch a specific file path. Used
-    /// by `explain_change` (Plan 5) to attach a diff excerpt per blame
-    /// hit. JOINs `hunk` against `file_path` filtered by sha + path.
+    /// by `explain_change` to attach a diff excerpt per blame hit.
+    /// JOINs `hunk` against `file_path` filtered by sha + path.
     async fn get_hunks_for_file_in_commit(
         &self,
         repo_id: &RepoId,
