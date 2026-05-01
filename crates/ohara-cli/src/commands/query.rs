@@ -5,6 +5,8 @@ use ohara_core::Retriever;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use super::provider::{resolve_provider, ProviderArg};
+
 #[derive(ClapArgs, Debug)]
 pub struct Args {
     /// Path to the repo (defaults to current directory)
@@ -20,22 +22,38 @@ pub struct Args {
     /// Skip the cross-encoder rerank stage (faster, slightly less precise).
     #[arg(long)]
     pub no_rerank: bool,
+    /// ONNX execution provider for the embedder + reranker. `auto`
+    /// (default) follows the same heuristic as `ohara index`. See
+    /// `commands::index::Args::embed_provider` for the current
+    /// CoreML / CUDA support story.
+    #[arg(long, value_enum, default_value_t = ProviderArg::Auto)]
+    pub embed_provider: ProviderArg,
 }
 
 pub async fn run(args: Args) -> Result<()> {
     let (repo_id, _, _) = super::resolve_repo_id(&args.path)?;
     let db_path = super::index_db_path(&repo_id)?;
     let storage = Arc::new(ohara_storage::SqliteStorage::open(&db_path).await?);
-    let embedder =
-        Arc::new(tokio::task::spawn_blocking(ohara_embed::FastEmbedProvider::new).await??);
+    let chosen_provider = resolve_provider(args.embed_provider);
+    tracing::info!(provider = ?chosen_provider, "embedder");
+    let embedder = Arc::new(
+        tokio::task::spawn_blocking(move || {
+            ohara_embed::FastEmbedProvider::with_provider(chosen_provider)
+        })
+        .await??,
+    );
     // Plan 3: cross-encoder rerank by default. Skip the model download
     // (and runtime cost) only when the caller explicitly passes
     // --no-rerank.
     let retriever = if args.no_rerank {
         Retriever::new(storage, embedder)
     } else {
-        let reranker =
-            Arc::new(tokio::task::spawn_blocking(ohara_embed::FastEmbedReranker::new).await??);
+        let reranker = Arc::new(
+            tokio::task::spawn_blocking(move || {
+                ohara_embed::FastEmbedReranker::with_provider(chosen_provider)
+            })
+            .await??,
+        );
         Retriever::new(storage, embedder).with_reranker(reranker)
     };
     let q = PatternQuery {

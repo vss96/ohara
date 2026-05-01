@@ -4,6 +4,8 @@ use ohara_core::{Indexer, IndexerReport, PhaseTimings, Storage};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use super::provider::{resolve_provider, ProviderArg};
+
 #[derive(ClapArgs, Debug)]
 pub struct Args {
     /// Path to the repo (defaults to current directory)
@@ -42,6 +44,12 @@ pub struct Args {
     /// before the JSON; structured tracing on stderr is unaffected.
     #[arg(long)]
     pub profile: bool,
+    /// ONNX execution provider for the embedder. `auto` (default)
+    /// picks CoreML on Apple silicon, CUDA when `CUDA_VISIBLE_DEVICES`
+    /// is set, else CPU. CoreML / CUDA arms currently fail with a
+    /// build-time-dependency error pending Plan 6 Task 3.1 follow-up.
+    #[arg(long, value_enum, default_value_t = ProviderArg::Auto)]
+    pub embed_provider: ProviderArg,
 }
 
 /// Render `PhaseTimings` as the JSON object emitted by `--profile`.
@@ -101,8 +109,14 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         tracing::info!(threads = args.threads, "capping embedder threads");
     }
 
-    let embedder =
-        Arc::new(tokio::task::spawn_blocking(ohara_embed::FastEmbedProvider::new).await??);
+    let chosen_provider = resolve_provider(args.embed_provider);
+    tracing::info!(provider = ?chosen_provider, "embedder");
+    let embedder = Arc::new(
+        tokio::task::spawn_blocking(move || {
+            ohara_embed::FastEmbedProvider::with_provider(chosen_provider)
+        })
+        .await??,
+    );
     let commit_source = ohara_git::GitCommitSource::open(&canonical)?;
     let symbol_source = ohara_parse::GitSymbolSource::open(&canonical)?;
 

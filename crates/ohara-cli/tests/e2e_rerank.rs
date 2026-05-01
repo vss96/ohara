@@ -77,6 +77,7 @@ async fn cross_encoder_picks_better_message_among_near_duplicates() {
         threads: 0,
         no_progress: true,
         profile: false,
+        embed_provider: ohara_cli::commands::provider::ProviderArg::Auto,
     })
     .await
     .unwrap();

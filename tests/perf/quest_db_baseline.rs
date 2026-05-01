@@ -78,6 +78,7 @@ async fn quest_db_baseline_under_threshold() {
         threads: 0,
         no_progress: true,
         profile: true,
+        embed_provider: ohara_cli::commands::provider::ProviderArg::Auto,
     };
 
     let start = Instant::now();

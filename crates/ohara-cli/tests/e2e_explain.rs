@@ -46,6 +46,7 @@ async fn explain_e2e_returns_retry_commit_for_retry_lines() {
         threads: 0,
         no_progress: true,
         profile: false,
+        embed_provider: ohara_cli::commands::provider::ProviderArg::Auto,
     };
     ohara_cli::commands::index::run(index_args).await.unwrap();
 

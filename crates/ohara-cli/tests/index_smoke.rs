@@ -36,6 +36,7 @@ async fn smoke_index_then_status() {
         threads: 0,
         no_progress: true,
         profile: false,
+        embed_provider: ohara_cli::commands::provider::ProviderArg::Auto,
     };
     ohara_cli::commands::index::run(args).await.unwrap();
 
