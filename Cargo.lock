@@ -2235,6 +2235,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ohara-perf-tests"
+version = "0.5.1"
+dependencies = [
+ "anyhow",
+ "ohara-cli",
+ "ohara-core",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ohara-storage"
 version = "0.5.1"
 dependencies = [

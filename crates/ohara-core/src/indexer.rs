@@ -220,21 +220,6 @@ fn count_added_lines(diff_text: &str) -> u64 {
         .count() as u64
 }
 
-#[cfg(test)]
-mod count_added_lines_tests {
-    #[test]
-    fn counts_plus_prefixed_lines_only() {
-        let diff =
-            "--- a/x.rs\n+++ b/x.rs\n@@ -0,0 +1,2 @@\n+added one\n+added two\n context\n-removed\n";
-        assert_eq!(super::count_added_lines(diff), 2);
-    }
-
-    #[test]
-    fn empty_diff_is_zero() {
-        assert_eq!(super::count_added_lines(""), 0);
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct IndexerReport {
     pub new_commits: usize,
@@ -290,6 +275,21 @@ pub struct PhaseTimings {
     /// excluded) so the resulting ratio reflects "bytes the embedder
     /// sees per signal-bearing line".
     pub total_added_lines: u64,
+}
+
+#[cfg(test)]
+mod count_added_lines_tests {
+    #[test]
+    fn counts_plus_prefixed_lines_only() {
+        let diff =
+            "--- a/x.rs\n+++ b/x.rs\n@@ -0,0 +1,2 @@\n+added one\n+added two\n context\n-removed\n";
+        assert_eq!(super::count_added_lines(diff), 2);
+    }
+
+    #[test]
+    fn empty_diff_is_zero() {
+        assert_eq!(super::count_added_lines(""), 0);
+    }
 }
 
 #[cfg(test)]

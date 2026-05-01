@@ -51,50 +51,6 @@ pub fn phase_timings_json(pt: &PhaseTimings) -> String {
     serde_json::to_string(pt).expect("PhaseTimings serializes via derive(Serialize)")
 }
 
-#[cfg(test)]
-mod profile_json_tests {
-    use super::*;
-
-    #[test]
-    fn phase_timings_json_contains_every_field() {
-        // Contract: every PhaseTimings field is present in the JSON
-        // emitted by --profile. The lead's manual baseline run pastes
-        // this output into docs/perf/v0.6-baseline.md, so a missing
-        // key here breaks the template downstream.
-        let pt = PhaseTimings {
-            commit_walk_ms: 1,
-            diff_extract_ms: 2,
-            tree_sitter_parse_ms: 3,
-            embed_ms: 4,
-            storage_write_ms: 5,
-            fts_insert_ms: 6,
-            head_symbols_ms: 7,
-            total_diff_bytes: 8,
-            total_added_lines: 9,
-        };
-        let s = phase_timings_json(&pt);
-        let v: serde_json::Value = serde_json::from_str(&s).expect("parse JSON");
-        for key in [
-            "commit_walk_ms",
-            "diff_extract_ms",
-            "tree_sitter_parse_ms",
-            "embed_ms",
-            "storage_write_ms",
-            "fts_insert_ms",
-            "head_symbols_ms",
-            "total_diff_bytes",
-            "total_added_lines",
-        ] {
-            assert!(
-                v.get(key).is_some(),
-                "PhaseTimings JSON must expose `{key}`"
-            );
-        }
-        assert_eq!(v.get("commit_walk_ms").and_then(|x| x.as_u64()), Some(1));
-        assert_eq!(v.get("total_added_lines").and_then(|x| x.as_u64()), Some(9));
-    }
-}
-
 pub async fn run(args: Args) -> Result<IndexerReport> {
     let (repo_id, canonical, first_commit) = super::resolve_repo_id(&args.path)?;
     let db_path = super::index_db_path(&repo_id)?;
@@ -182,4 +138,48 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         println!("{}", phase_timings_json(&report.phase_timings));
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod profile_json_tests {
+    use super::*;
+
+    #[test]
+    fn phase_timings_json_contains_every_field() {
+        // Contract: every PhaseTimings field is present in the JSON
+        // emitted by --profile. The lead's manual baseline run pastes
+        // this output into docs/perf/v0.6-baseline.md, so a missing
+        // key here breaks the template downstream.
+        let pt = PhaseTimings {
+            commit_walk_ms: 1,
+            diff_extract_ms: 2,
+            tree_sitter_parse_ms: 3,
+            embed_ms: 4,
+            storage_write_ms: 5,
+            fts_insert_ms: 6,
+            head_symbols_ms: 7,
+            total_diff_bytes: 8,
+            total_added_lines: 9,
+        };
+        let s = phase_timings_json(&pt);
+        let v: serde_json::Value = serde_json::from_str(&s).expect("parse JSON");
+        for key in [
+            "commit_walk_ms",
+            "diff_extract_ms",
+            "tree_sitter_parse_ms",
+            "embed_ms",
+            "storage_write_ms",
+            "fts_insert_ms",
+            "head_symbols_ms",
+            "total_diff_bytes",
+            "total_added_lines",
+        ] {
+            assert!(
+                v.get(key).is_some(),
+                "PhaseTimings JSON must expose `{key}`"
+            );
+        }
+        assert_eq!(v.get("commit_walk_ms").and_then(|x| x.as_u64()), Some(1));
+        assert_eq!(v.get("total_added_lines").and_then(|x| x.as_u64()), Some(9));
+    }
 }
