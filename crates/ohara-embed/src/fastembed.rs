@@ -134,12 +134,13 @@ impl RerankProvider for FastEmbedReranker {
 /// respectively; under normal fastembed behavior the result set is a
 /// permutation of `0..n` so neither path triggers in production.
 fn align_by_index(results: Vec<fastembed::RerankResult>, n: usize) -> Vec<f32> {
-    // B.3.r intentional bug: this preserves fastembed's score-descending
-    // ordering instead of restoring the input slice's positional order,
-    // violating the RerankProvider contract. B.3.g replaces this with
-    // an index-keyed write into a length-n vec.
-    let _ = n;
-    results.into_iter().map(|r| r.score).collect()
+    let mut out = vec![0.0_f32; n];
+    for r in results {
+        if r.index < n {
+            out[r.index] = r.score;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
