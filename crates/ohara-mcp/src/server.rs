@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use ohara_core::embed::RerankProvider;
 use ohara_core::types::RepoId;
 use ohara_core::{EmbeddingProvider, Retriever, Storage};
 use std::path::{Path, PathBuf};
@@ -24,7 +25,12 @@ impl OharaServer {
             Arc::new(ohara_storage::SqliteStorage::open(&db_path).await?);
         let embedder: Arc<dyn EmbeddingProvider> =
             Arc::new(tokio::task::spawn_blocking(ohara_embed::FastEmbedProvider::new).await??);
-        let retriever = Retriever::new(storage.clone(), embedder.clone());
+        // Plan 3: attach the cross-encoder reranker by default. Per-call
+        // opt-out is the MCP `no_rerank: true` flag, plumbed through
+        // `PatternQuery`. First boot downloads ~110 MB for bge-reranker-base.
+        let reranker: Arc<dyn RerankProvider> =
+            Arc::new(tokio::task::spawn_blocking(ohara_embed::FastEmbedReranker::new).await??);
+        let retriever = Retriever::new(storage.clone(), embedder.clone()).with_reranker(reranker);
 
         Ok(Self {
             repo_id,

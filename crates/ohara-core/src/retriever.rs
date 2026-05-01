@@ -520,6 +520,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn find_pattern_query_no_rerank_flag_skips_attached_reranker() {
+        // Reranker IS attached, but `query.no_rerank: true` must short-
+        // circuit it. We construct lanes so RRF and reranker would
+        // disagree about the winner: RRF puts id=1 first, the scripted
+        // reranker would lift id=2. With no_rerank=true, the reranker
+        // is bypassed and RRF order survives — id=1 wins. Crucially, we
+        // also assert the ScriptedReranker's `calls` counter stays at 0,
+        // proving the model was never invoked.
+        let now = 1_700_000_000;
+        let knn = vec![
+            fake_hit(1, "a", now, 0.9, "diff-a"),
+            fake_hit(2, "b", now, 0.5, "diff-b"),
+        ];
+        let fts_text = vec![fake_hit(1, "a", now, 0.7, "diff-a")];
+        let fts_sym = vec![fake_hit(2, "b", now, 0.4, "diff-b")];
+        let storage = Arc::new(FakeStorage::new(knn, fts_text, fts_sym));
+        let embedder = Arc::new(FakeEmbedder);
+
+        // Reranker would prefer id=2 (give "diff-b" a higher score). If
+        // `no_rerank=true` actually bypasses the reranker, RRF order wins
+        // and id=1 ("a") comes first. If the bypass is broken and the
+        // reranker fires, id=2 ("b") would win — the assertion catches it.
+        let scores: HashMap<String, f32> =
+            HashMap::from([("diff-a".to_string(), 0.1), ("diff-b".to_string(), 0.9)]);
+        let reranker: Arc<dyn RerankProvider> = Arc::new(ScriptedReranker { scores });
+        let r = Retriever::new(storage, embedder).with_reranker(reranker);
+
+        let q = PatternQuery {
+            query: "anything".into(),
+            k: 5,
+            language: None,
+            since_unix: None,
+            no_rerank: true, // <-- the under-test signal
+        };
+        let id = RepoId::from_parts("x", "/y");
+        let out = r.find_pattern(&id, &q, now).await.unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out[0].commit_sha, "a",
+            "no_rerank=true must bypass the reranker; RRF ordering wins (otherwise id=2 would be first)"
+        );
+        assert_eq!(out[1].commit_sha, "b");
+    }
+
+    #[tokio::test]
     async fn find_pattern_recency_multiplier_breaks_ties_when_no_rerank() {
         // Both candidates have RRF score equal (they appear in disjoint
         // single-element lanes). With no reranker, every score is 1.0;

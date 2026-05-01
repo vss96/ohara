@@ -67,15 +67,22 @@ pub fn clear_all(c: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-/// Replace HEAD-frame symbols for a repo. v0.3 keeps the no-op semantics
-/// for repos that already have a populated `symbol` table — D's
-/// `clear_head_symbols` (Plan 3) is the explicit reset path. Here we
-/// only insert.
+/// Replace HEAD-frame symbols for a repo. The `symbol` table holds only
+/// the latest HEAD snapshot — historical symbols are never kept — so
+/// every call atomically clears existing rows (and their FTS5 + vec
+/// mirrors) before inserting the new set. Without this, every regular
+/// `ohara index` (and every post-commit hook fire) would append a
+/// fresh duplicate set, causing the table to grow linearly with index
+/// runs.
 pub fn put_many(c: &mut Connection, symbols: &[Symbol]) -> Result<()> {
-    if symbols.is_empty() {
-        return Ok(());
-    }
     let tx = c.transaction()?;
+    // Clear stale HEAD symbols + their mirrors first. Order matters:
+    // FTS5 + vec virtual tables hold rowid references into `symbol`,
+    // so they're cleared before the parent rows.
+    tx.execute("DELETE FROM fts_symbol", [])?;
+    tx.execute("DELETE FROM fts_symbol_name", [])?;
+    tx.execute("DELETE FROM vec_symbol", [])?;
+    tx.execute("DELETE FROM symbol", [])?;
     for s in symbols {
         let fp_id = upsert_file_path(&tx, &s.file_path, Some(&s.language))?;
         put_one(&tx, fp_id, s)?;
