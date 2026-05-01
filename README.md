@@ -12,20 +12,22 @@ Named after Ohara, the island in One Piece whose Tree of Knowledge held 5,000
 years of accumulated history — and whose archaeologists devoted their lives to
 reading it.
 
-**Status: v0.3.** Plan 1 (foundation + the `find_pattern` MCP tool) shipped in
-v0.1; Plan 2 (`ohara init` post-commit hook + `ohara index --incremental`
-fast path) shipped in v0.2; Plan 3 (this release) replaces the linear
-ranking formula with a three-lane retrieval pipeline: vector KNN + FTS5
-BM25 on hunk text + FTS5 BM25 on symbol names → Reciprocal Rank Fusion
-→ cross-encoder rerank (`bge-reranker-base`) → recency multiplier. AST-
-aware sibling-merge chunking (500-token budget) replaces one-symbol-per-
-chunk extraction. Pass `no_rerank: true` to the MCP tool (or
-`--no-rerank` to the CLI) to skip the rerank stage. The `explain_change`
-tool and additional language support are deferred to v0.4.
+**Status: v0.4.** v0.1 shipped Plan 1 (foundation + the `find_pattern`
+MCP tool); v0.2 shipped Plan 2 (`ohara init` post-commit hook + `ohara
+index --incremental` fast path); v0.3 shipped Plan 3 (three-lane
+retrieval pipeline: vector KNN + FTS5 BM25 on hunk text + FTS5 BM25 on
+symbol names → Reciprocal Rank Fusion → cross-encoder rerank
+(`bge-reranker-base`) → recency multiplier; AST sibling-merge chunking).
+v0.4 (this release) adds Java 17/21+ and Kotlin 1.9/2.0+ language
+support: sealed types, records, data classes, objects, companions, and
+annotations on declarations are all indexed. The `explain_change` tool
+arrives in v0.5.
 
-Languages: Rust, Python, Java, Kotlin (Java + Kotlin land in v0.4 as a
-parse-layer addition; class-/method-level annotations stay inside
-`source_text` so embeddings + BM25 pick up Spring-style markers).
+Languages: **Rust, Python, Java, Kotlin.** Class- and method-level
+annotations (`@RestController`, `@Service`, `@Component`,
+`@SpringBootApplication`, etc.) stay inside `source_text`, so
+embeddings and BM25 pick up Spring-style markers without any new query
+syntax.
 
 ## Install
 
