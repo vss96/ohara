@@ -20,6 +20,9 @@ pub enum OhraError {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
+    #[error("config error: {0}")]
+    Config(String),
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
