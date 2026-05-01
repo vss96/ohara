@@ -117,7 +117,12 @@ impl RerankProvider for FastEmbedReranker {
             let guard = model.blocking_lock();
             // return_documents=false (we only need scores+indices),
             // batch_size=None (use fastembed's default).
-            guard.rerank(query_owned.as_str(), docs.iter().map(|s| s.as_str()).collect(), false, None)
+            guard.rerank(
+                query_owned.as_str(),
+                docs.iter().map(|s| s.as_str()).collect(),
+                false,
+                None,
+            )
         })
         .await
         .map_err(|e| ohara_core::OhraError::Embedding(format!("join: {e}")))?;
