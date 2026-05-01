@@ -119,6 +119,55 @@ public class Calc {
     }
 
     #[test]
+    fn preserves_annotations_in_source_text() {
+        // Spring-friendly span behavior: source_text must include the
+        // preceding @RestController / @RequestMapping annotations so
+        // embedding + BM25 indexing pick them up. The same convention
+        // applies to annotated methods.
+        //
+        // tree-sitter-java already absorbs preceding annotations and
+        // modifiers into the `modifiers` child of class_declaration /
+        // method_declaration / record_declaration / etc., so the
+        // declaration node's byte range naturally starts at the first
+        // annotation. No span-extension code is needed; this test is
+        // a regression guard against grammar changes that might split
+        // annotations into a sibling node.
+        let src = "\
+@RestController
+@RequestMapping(\"/users\")
+public class UserController {
+    @GetMapping(\"/{id}\")
+    public User get(@PathVariable Long id) { return null; }
+}
+";
+        let syms = extract("UserController.java", src, "deadbeef").unwrap();
+
+        let class = syms
+            .iter()
+            .find(|s| s.kind == SymbolKind::Class && s.name == "UserController")
+            .expect("controller class missing");
+        assert!(
+            class.source_text.starts_with("@RestController"),
+            "class source_text should start with @RestController, got: {:?}",
+            &class.source_text[..class.source_text.len().min(80)]
+        );
+        assert!(
+            class.source_text.contains("@RequestMapping(\"/users\")"),
+            "class source_text should contain @RequestMapping line"
+        );
+
+        let method = syms
+            .iter()
+            .find(|s| s.kind == SymbolKind::Method && s.name == "get")
+            .expect("get method missing");
+        assert!(
+            method.source_text.starts_with("@GetMapping"),
+            "method source_text should start with @GetMapping, got: {:?}",
+            &method.source_text[..method.source_text.len().min(80)]
+        );
+    }
+
+    #[test]
     fn extracts_record_as_class() {
         // Java 14+ record. tree-sitter-java models this as a distinct
         // record_declaration AST node, but per spec it collapses to
