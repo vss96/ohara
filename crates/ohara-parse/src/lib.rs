@@ -133,6 +133,74 @@ mod tests {
     }
 
     #[test]
+    fn chunker_merges_small_java_methods_up_to_500_tokens() {
+        // Plan 4 / Task 12: the AST-aware chunker is language-agnostic
+        // — it consumes the per-file flat list of source-order atoms
+        // emitted by java::extract. A small Java class with a couple
+        // of trivial methods sits well under 500 tokens, so the
+        // chunker should merge the class + its methods into a single
+        // chunk whose primary name is the class and whose
+        // sibling_names lists the merged methods (and constructor) in
+        // source order.
+        let src = "\
+public class Calc {
+    public Calc() {}
+    public int add(int a, int b) { return a + b; }
+    public int sub(int a, int b) { return a - b; }
+}
+";
+        let chunks = extract_for_path("Calc.java", src, "deadbeef").expect("extract");
+        assert_eq!(chunks.len(), 1, "expected one merged chunk, got {chunks:?}");
+        let c = &chunks[0];
+        assert_eq!(c.name, "Calc", "primary should be the source-first atom");
+        // Constructor + two methods get merged in as siblings (source
+        // byte order). The exact order is constructor, add, sub.
+        assert_eq!(
+            c.sibling_names,
+            vec!["Calc".to_string(), "add".to_string(), "sub".to_string()],
+            "siblings should appear in source byte order"
+        );
+    }
+
+    #[test]
+    fn chunker_emits_kotlin_data_classes_as_chunks() {
+        // Plan 4 / Task 12: same chunker contract for Kotlin. Two
+        // tiny `data class` declarations should round-trip cleanly:
+        // the chunker merges them when the combined token estimate
+        // stays under budget.
+        let src = "\
+data class A(val x: Int)
+data class B(val y: Int)
+";
+        let chunks = extract_for_path("AB.kt", src, "deadbeef").expect("extract");
+        assert!(
+            !chunks.is_empty(),
+            "expected at least one chunk, got {chunks:?}"
+        );
+        // Whether the two data classes merge into one chunk or stay
+        // separate depends on the 500-token threshold; either is
+        // acceptable. We only assert the language tag and that one of
+        // the chunks names class A as primary or sibling.
+        for c in &chunks {
+            assert_eq!(c.language, "kotlin");
+        }
+        let mentioned: Vec<String> = chunks
+            .iter()
+            .flat_map(|c| {
+                std::iter::once(c.name.clone()).chain(c.sibling_names.iter().cloned())
+            })
+            .collect();
+        assert!(
+            mentioned.contains(&"A".to_string()),
+            "expected class A in some chunk, got {mentioned:?}"
+        );
+        assert!(
+            mentioned.contains(&"B".to_string()),
+            "expected class B in some chunk, got {mentioned:?}"
+        );
+    }
+
+    #[test]
     fn extract_for_path_emits_sibling_names_for_merged_chunks() {
         // Three small Rust functions; well under the 500-token budget,
         // so the chunker should merge them into a single chunk whose
