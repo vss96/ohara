@@ -109,8 +109,10 @@ public class Calc {
         assert!(names.contains(&"Calc"), "missing class: {names:?}");
         assert!(names.contains(&"add"), "missing add: {names:?}");
         assert!(names.contains(&"sub"), "missing sub: {names:?}");
-        let methods: Vec<&Symbol> =
-            syms.iter().filter(|s| s.kind == SymbolKind::Method).collect();
+        let methods: Vec<&Symbol> = syms
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Method)
+            .collect();
         assert_eq!(
             methods.len(),
             2,

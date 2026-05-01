@@ -128,7 +128,10 @@ mod tests {
         assert!(
             chunks.iter().all(|s| s.language == "java"),
             "all chunks should carry language=java, got {:?}",
-            chunks.iter().map(|s| s.language.as_str()).collect::<Vec<_>>()
+            chunks
+                .iter()
+                .map(|s| s.language.as_str())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -228,9 +231,7 @@ data class B(val y: Int)
         }
         let mentioned: Vec<String> = chunks
             .iter()
-            .flat_map(|c| {
-                std::iter::once(c.name.clone()).chain(c.sibling_names.iter().cloned())
-            })
+            .flat_map(|c| std::iter::once(c.name.clone()).chain(c.sibling_names.iter().cloned()))
             .collect();
         assert!(
             mentioned.contains(&"A".to_string()),

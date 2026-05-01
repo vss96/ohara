@@ -23,6 +23,10 @@ chunk extraction. Pass `no_rerank: true` to the MCP tool (or
 `--no-rerank` to the CLI) to skip the rerank stage. The `explain_change`
 tool and additional language support are deferred to v0.4.
 
+Languages: Rust, Python, Java, Kotlin (Java + Kotlin land in v0.4 as a
+parse-layer addition; class-/method-level annotations stay inside
+`source_text` so embeddings + BM25 pick up Spring-style markers).
+
 ## Install
 
 Pre-built binaries for macOS and Linux are published on each release:
