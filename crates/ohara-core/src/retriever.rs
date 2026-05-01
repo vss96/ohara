@@ -182,6 +182,7 @@ mod tests {
 
     fn fake_hit(sha: &str, ts: i64, sim: f32, diff: &str) -> HunkHit {
         HunkHit {
+            hunk_id: 0,
             hunk: Hunk {
                 commit_sha: sha.into(),
                 file_path: "src/x.rs".into(),
@@ -245,6 +246,26 @@ mod tests {
             &self,
             _: &crate::types::RepoId,
             _: &[f32],
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> crate::Result<Vec<crate::HunkHit>> {
+            unreachable!()
+        }
+        async fn bm25_hunks_by_text(
+            &self,
+            _: &crate::types::RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> crate::Result<Vec<crate::HunkHit>> {
+            unreachable!()
+        }
+        async fn bm25_hunks_by_symbol_name(
+            &self,
+            _: &crate::types::RepoId,
+            _: &str,
             _: u8,
             _: Option<&str>,
             _: Option<i64>,
@@ -414,6 +435,26 @@ mod tests {
         ) -> crate::Result<Vec<HunkHit>> {
             Ok(self.hits.clone())
         }
+        async fn bm25_hunks_by_text(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> crate::Result<Vec<HunkHit>> {
+            unreachable!("v0.2 retriever does not exercise bm25 lanes")
+        }
+        async fn bm25_hunks_by_symbol_name(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> crate::Result<Vec<HunkHit>> {
+            unreachable!("v0.2 retriever does not exercise bm25 lanes")
+        }
         async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
             Ok(false)
         }
@@ -424,6 +465,7 @@ mod tests {
 
     fn fake_hit_with_msg(sha: &str, ts: i64, sim: f32, msg: &str) -> HunkHit {
         HunkHit {
+            hunk_id: 0,
             hunk: Hunk {
                 commit_sha: sha.into(),
                 file_path: "a.rs".into(),

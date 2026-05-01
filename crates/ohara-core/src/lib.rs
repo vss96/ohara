@@ -18,5 +18,5 @@ pub use error::{OhraError, Result};
 pub use indexer::{CommitSource, Indexer, IndexerReport, SymbolSource};
 pub use query::*;
 pub use retriever::{RankingWeights, Retriever};
-pub use storage::{CommitRecord, HunkHit, HunkRecord, Storage, Vector};
+pub use storage::{CommitRecord, HunkHit, HunkId, HunkRecord, Storage, Vector};
 pub use types::*;

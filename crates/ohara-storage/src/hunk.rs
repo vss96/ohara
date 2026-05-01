@@ -28,6 +28,12 @@ pub fn put_many(c: &mut Connection, records: &[HunkRecord]) -> Result<()> {
             "INSERT INTO vec_hunk (hunk_id, diff_emb) VALUES (?1, ?2)",
             params![hunk_id, bytes],
         )?;
+        // Keep the FTS5 hunk-text index in lockstep with the hunk table so
+        // BM25 lane queries see new rows immediately.
+        tx.execute(
+            "INSERT INTO fts_hunk_text (hunk_id, content) VALUES (?1, ?2)",
+            params![hunk_id, &r.hunk.diff_text],
+        )?;
     }
     tx.commit()?;
     Ok(())
@@ -44,7 +50,7 @@ pub fn knn(
     let lang_filter = language.map(|_| "AND fp.language = :lang").unwrap_or("");
     let ts_filter = since_unix.map(|_| "AND cr.ts >= :ts").unwrap_or("");
     let sql = format!(
-        "SELECT h.commit_sha, fp.path, fp.language, h.change_kind, h.diff_text,
+        "SELECT h.id, h.commit_sha, fp.path, fp.language, h.change_kind, h.diff_text,
                 cr.parent_sha, cr.is_merge, cr.author, cr.ts, cr.message,
                 v.distance
          FROM vec_hunk v
@@ -73,17 +79,18 @@ pub fn knn(
         .collect();
 
     let rows = stmt.query_map(bind_refs.as_slice(), |row| {
-        let commit_sha: String = row.get(0)?;
-        let file_path: String = row.get(1)?;
-        let language: Option<String> = row.get(2)?;
-        let change_kind_s: String = row.get(3)?;
-        let diff_text: String = row.get(4)?;
-        let parent_sha: Option<String> = row.get(5)?;
-        let is_merge: i64 = row.get(6)?;
-        let author: Option<String> = row.get(7)?;
-        let ts: i64 = row.get(8)?;
-        let message: String = row.get(9)?;
-        let distance: f32 = row.get(10)?;
+        let hunk_id: i64 = row.get(0)?;
+        let commit_sha: String = row.get(1)?;
+        let file_path: String = row.get(2)?;
+        let language: Option<String> = row.get(3)?;
+        let change_kind_s: String = row.get(4)?;
+        let diff_text: String = row.get(5)?;
+        let parent_sha: Option<String> = row.get(6)?;
+        let is_merge: i64 = row.get(7)?;
+        let author: Option<String> = row.get(8)?;
+        let ts: i64 = row.get(9)?;
+        let message: String = row.get(10)?;
+        let distance: f32 = row.get(11)?;
 
         let hunk = Hunk {
             commit_sha: commit_sha.clone(),
@@ -104,6 +111,7 @@ pub fn knn(
         // similarity-like score where larger is better.
         let similarity = 1.0 / (1.0 + distance);
         Ok(HunkHit {
+            hunk_id,
             hunk,
             commit,
             similarity,

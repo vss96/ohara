@@ -99,6 +99,30 @@ impl Storage for SqliteStorage {
         .await
     }
 
+    async fn bm25_hunks_by_text(
+        &self,
+        _repo_id: &RepoId,
+        _query: &str,
+        _k: u8,
+        _language: Option<&str>,
+        _since_unix: Option<i64>,
+    ) -> CoreResult<Vec<HunkHit>> {
+        // Implemented in A-2.g.
+        unreachable!("bm25_hunks_by_text not yet implemented")
+    }
+
+    async fn bm25_hunks_by_symbol_name(
+        &self,
+        _repo_id: &RepoId,
+        _query: &str,
+        _k: u8,
+        _language: Option<&str>,
+        _since_unix: Option<i64>,
+    ) -> CoreResult<Vec<HunkHit>> {
+        // Implemented in A-2.g.
+        unreachable!("bm25_hunks_by_symbol_name not yet implemented")
+    }
+
     async fn blob_was_seen(&self, blob_sha: &str, model: &str) -> CoreResult<bool> {
         let blob = blob_sha.to_string();
         let m = model.to_string();
