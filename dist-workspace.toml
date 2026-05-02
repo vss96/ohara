@@ -30,10 +30,3 @@ install-updater = true
 # stay CPU-only by default — the feature only flips on for the
 # released binary path. See plan-8 / multi-dist RFC.
 features = ["coreml"]
-# v0.6.2 multi-dist: validate the per-target build matrix on PRs by
-# uploading workflow artifacts (no GitHub Release). Default is
-# `plan` (no build); we want full builds on the release/v0.6.2 PR
-# to confirm Linux still compiles with workspace-wide
-# `features = ["coreml"]`. Drop back to `plan` (or remove) before
-# merging if PR-time CI cost is a concern.
-pr-run-mode = "upload"
