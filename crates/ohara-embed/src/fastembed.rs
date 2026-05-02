@@ -77,12 +77,18 @@ fn execution_providers_for(
     match provider {
         EmbedProvider::Cpu => Ok(vec![]),
         EmbedProvider::CoreMl => {
-            #[cfg(feature = "coreml")]
+            // CoreML EP requires both the `coreml` cargo feature AND a macOS
+            // target — the `ort/coreml` feature only compiles on macOS, and
+            // cargo-dist's workspace-wide `features = ["coreml"]` is enabled
+            // for non-macOS targets too (where `ohara-embed`'s target-conditional
+            // ort dep strips the inner `coreml` feature, so the EP type isn't
+            // in scope). Both legs of the gate are needed.
+            #[cfg(all(feature = "coreml", target_os = "macos"))]
             {
                 use ort::execution_providers::CoreMLExecutionProvider;
                 Ok(vec![CoreMLExecutionProvider::default().build()])
             }
-            #[cfg(not(feature = "coreml"))]
+            #[cfg(not(all(feature = "coreml", target_os = "macos")))]
             Err(anyhow!(
                 "embed-provider=coreml is not enabled in this build. \
                  Rebuild with `cargo build --release --features ohara-embed/coreml` \
@@ -297,7 +303,7 @@ mod tests {
         assert!(eps.is_empty(), "CPU should not attach explicit providers");
     }
 
-    #[cfg(not(feature = "coreml"))]
+    #[cfg(not(all(feature = "coreml", target_os = "macos")))]
     #[test]
     fn provider_coreml_without_feature_returns_actionable_message() {
         let err = execution_providers_for(EmbedProvider::CoreMl)
@@ -323,7 +329,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "coreml")]
+    #[cfg(all(feature = "coreml", target_os = "macos"))]
     #[test]
     fn provider_coreml_with_feature_attaches_provider() {
         // With the `coreml` feature on, the provider list is non-empty.
@@ -340,10 +346,93 @@ mod tests {
         assert_eq!(EmbedProvider::default(), EmbedProvider::Cpu);
     }
 
+    // ── CoreML cfg-gate regression tests (PR: both legs of the gate required) ──
+
+    /// On any non-macOS host the CoreML provider must always return an error,
+    /// regardless of whether the `coreml` cargo feature is enabled.
+    ///
+    /// This is the primary regression guard for the PR change from
+    ///   `#[cfg(feature = "coreml")]`
+    /// to
+    ///   `#[cfg(all(feature = "coreml", target_os = "macos"))]`
+    ///
+    /// Before the PR, passing `--features coreml` on Linux would attempt to
+    /// instantiate a CoreML EP that the non-macOS ort dep never provides, leading
+    /// to a link-time or runtime failure. After the PR both legs of the gate are
+    /// required, so Linux always hits the error arm regardless of the feature.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn provider_coreml_on_non_macos_always_errors_regardless_of_feature() {
+        let err = execution_providers_for(EmbedProvider::CoreMl)
+            .expect_err("CoreML must error on non-macOS regardless of the coreml feature flag");
+        let s = err.to_string();
+        assert!(
+            s.contains("coreml"),
+            "error should name the provider: {s}"
+        );
+        assert!(
+            s.contains("--features"),
+            "error should mention the build flag: {s}"
+        );
+    }
+
+    /// The CoreML error message must guide users to "Apple Silicon only" so they
+    /// know the feature is hardware-bound and not just a missing flag.
+    #[cfg(not(all(feature = "coreml", target_os = "macos")))]
+    #[test]
+    fn provider_coreml_error_mentions_apple_silicon() {
+        let err = execution_providers_for(EmbedProvider::CoreMl)
+            .expect_err("coreml should error without macOS + coreml feature");
+        let s = err.to_string();
+        assert!(
+            s.contains("Apple Silicon"),
+            "error should mention Apple Silicon so users know this is hardware-bound: {s}"
+        );
+    }
+
+    /// The CoreML error message must mention "CoreML.framework" so users
+    /// understand the link-time dependency they need on macOS.
+    #[cfg(not(all(feature = "coreml", target_os = "macos")))]
+    #[test]
+    fn provider_coreml_error_mentions_framework_dependency() {
+        let err = execution_providers_for(EmbedProvider::CoreMl)
+            .expect_err("coreml should error without macOS + coreml feature");
+        let s = err.to_string();
+        assert!(
+            s.contains("CoreML.framework"),
+            "error should mention CoreML.framework as the link-time dep: {s}"
+        );
+    }
+
+    /// `EmbedProvider` must satisfy Copy + Clone + PartialEq + Eq + Debug.
+    /// These are all derived in the PR-touched code; verifying them here
+    /// catches accidental removal of the derives.
+    #[test]
+    fn embed_provider_satisfies_copy_clone_partialeq_eq_debug() {
+        let original = EmbedProvider::CoreMl;
+        let cloned = original.clone();
+        let copied: EmbedProvider = original;
+        assert_eq!(cloned, copied);
+        assert_eq!(original, EmbedProvider::CoreMl);
+        assert_ne!(original, EmbedProvider::Cpu);
+        assert_ne!(original, EmbedProvider::Cuda);
+        // Debug should not panic
+        let _ = format!("{original:?}");
+    }
+
+    /// All three `EmbedProvider` variants must be distinct so that the match
+    /// arms in `execution_providers_for` are exhaustive and non-overlapping.
+    #[test]
+    fn embed_provider_variants_are_distinct() {
+        assert_ne!(EmbedProvider::Cpu, EmbedProvider::CoreMl);
+        assert_ne!(EmbedProvider::Cpu, EmbedProvider::Cuda);
+        assert_ne!(EmbedProvider::CoreMl, EmbedProvider::Cuda);
+    }
+
     #[tokio::test]
     #[ignore = "downloads ~110MB on first run; opt-in via `cargo test -- --include-ignored`"]
     async fn reranker_orders_relevant_doc_first() {
-        let r = FastEmbedReranker::new().unwrap();
+
         let candidates = [
             "unrelated cooking recipe",
             "retry helper with exponential backoff",
