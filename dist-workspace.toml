@@ -20,3 +20,13 @@ hosting = "github"
 # can self-upgrade without re-running the curl|sh installer. The CLI
 # also exposes `ohara update` which calls into axoupdater directly.
 install-updater = true
+# v0.6.2 multi-dist: the released-binary build wires the CoreML
+# execution provider on Apple Silicon. cargo-dist 0.31 does not have
+# per-target `features` overrides, so we pass `coreml` to *every*
+# target's `cargo build`. `ohara-embed`'s target-conditional `ort`
+# dep makes `coreml` a no-op everywhere except `target_os = "macos"`
+# (no extra ort weight on Linux artifacts; identical bytes vs v0.6.1
+# for non-macOS triples). Source builds (`cargo build --release`)
+# stay CPU-only by default — the feature only flips on for the
+# released binary path. See plan-8 / multi-dist RFC.
+features = ["coreml"]

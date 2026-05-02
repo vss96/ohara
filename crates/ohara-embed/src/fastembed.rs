@@ -77,12 +77,18 @@ fn execution_providers_for(
     match provider {
         EmbedProvider::Cpu => Ok(vec![]),
         EmbedProvider::CoreMl => {
-            #[cfg(feature = "coreml")]
+            // CoreML EP requires both the `coreml` cargo feature AND a macOS
+            // target — the `ort/coreml` feature only compiles on macOS, and
+            // cargo-dist's workspace-wide `features = ["coreml"]` is enabled
+            // for non-macOS targets too (where `ohara-embed`'s target-conditional
+            // ort dep strips the inner `coreml` feature, so the EP type isn't
+            // in scope). Both legs of the gate are needed.
+            #[cfg(all(feature = "coreml", target_os = "macos"))]
             {
                 use ort::execution_providers::CoreMLExecutionProvider;
                 Ok(vec![CoreMLExecutionProvider::default().build()])
             }
-            #[cfg(not(feature = "coreml"))]
+            #[cfg(not(all(feature = "coreml", target_os = "macos")))]
             Err(anyhow!(
                 "embed-provider=coreml is not enabled in this build. \
                  Rebuild with `cargo build --release --features ohara-embed/coreml` \
@@ -297,7 +303,7 @@ mod tests {
         assert!(eps.is_empty(), "CPU should not attach explicit providers");
     }
 
-    #[cfg(not(feature = "coreml"))]
+    #[cfg(not(all(feature = "coreml", target_os = "macos")))]
     #[test]
     fn provider_coreml_without_feature_returns_actionable_message() {
         let err = execution_providers_for(EmbedProvider::CoreMl)
@@ -323,7 +329,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "coreml")]
+    #[cfg(all(feature = "coreml", target_os = "macos"))]
     #[test]
     fn provider_coreml_with_feature_attaches_provider() {
         // With the `coreml` feature on, the provider list is non-empty.
