@@ -16,6 +16,9 @@ ohara-core = { path = "../ohara-core" }
 ohara-storage = { path = "../ohara-storage" }
 ohara-embed = { path = "../ohara-embed" }
 ohara-git = { path = "../ohara-git" }
+# Plan 13: read parser_versions() and CHUNKER_VERSION when building
+# the MCP server's runtime compatibility expectation.
+ohara-parse = { path = "../ohara-parse" }
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true

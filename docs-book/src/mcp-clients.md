@@ -111,6 +111,31 @@ The MCP server's `instructions` field tells the model when to reach
 for ohara vs. generic search. Most clients propagate it through tool
 selection automatically.
 
+### `_meta.compatibility` (v0.7+)
+
+Both tools' responses now include a `_meta.compatibility` object
+reporting whether the opened index was built with the same
+embedder / chunker / parser / semantic-text versions as the running
+binary (plan 13). The shape is one of:
+
+```json
+{ "status": "compatible" }
+{ "status": "query_compatible_needs_refresh", "reason": "<component> mismatch …" }
+{ "status": "needs_rebuild",                "reason": "<component> mismatch …" }
+{ "status": "unknown",                      "missing_components": ["…"] }
+```
+
+`_meta.hint` carries the same information as a human-readable
+sentence so clients that don't consume the structured field still
+surface it to the user.
+
+`find_pattern` **refuses to run** when the verdict is
+`needs_rebuild` (a vector-affecting component differs and KNN would
+return wrong results); the tool returns an `invalid_params` error
+naming the rebuild command. `explain_change` continues to run under
+every verdict because git blame doesn't depend on the embedder /
+chunker / parser state.
+
 ## Bootstrapping
 
 Two prerequisites for the MCP server to return useful results:

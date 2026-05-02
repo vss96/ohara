@@ -47,6 +47,13 @@ pub struct IndexStatus {
 pub struct ResponseMeta {
     pub index_status: IndexStatus,
     pub hint: Option<String>,
+    /// Plan 13: index compatibility verdict. `None` for callers that
+    /// haven't wired the assessment yet (back-compat with v0.6 MCP
+    /// clients that don't know about the field). When present, MCP
+    /// clients can surface the reason / next-step command without
+    /// re-deriving it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<crate::index_metadata::CompatibilityStatus>,
 }
 
 /// Reciprocal Rank Fusion. Each ranking is best-first.
@@ -155,6 +162,7 @@ mod tests {
                 indexed_at: None,
             },
             hint: None,
+            compatibility: None,
         };
         let s = serde_json::to_string(&meta).unwrap();
         let back: ResponseMeta = serde_json::from_str(&s).unwrap();

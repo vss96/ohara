@@ -89,6 +89,29 @@ impl OharaService {
     ) -> Result<CallToolResult, rmcp::Error> {
         let since_unix = parse_since(input.since.as_deref())
             .map_err(|e| rmcp::Error::invalid_params(e.to_string(), None))?;
+
+        // Plan 13 Task 3.2 Step 2: fail early when the index is on an
+        // incompatible embedder / dimension / schema. KNN against a
+        // stale-vector index would silently return wrong results;
+        // returning a structured error with the rebuild command lets
+        // the MCP client surface it instead of acting on bad data.
+        let compatibility = self
+            .server
+            .compatibility_status()
+            .await
+            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+        if let ohara_core::index_metadata::CompatibilityStatus::NeedsRebuild { reason } =
+            &compatibility
+        {
+            return Err(rmcp::Error::invalid_params(
+                format!(
+                    "find_pattern refuses to run: index needs rebuild ({reason}). \
+                     Run `ohara index --rebuild` in this repo first."
+                ),
+                None,
+            ));
+        }
+
         let q = ohara_core::query::PatternQuery {
             query: input.query,
             k: input.k.clamp(1, 20),

@@ -2210,6 +2210,7 @@ dependencies = [
  "ohara-core",
  "ohara-embed",
  "ohara-git",
+ "ohara-parse",
  "ohara-storage",
  "rmcp",
  "schemars",
