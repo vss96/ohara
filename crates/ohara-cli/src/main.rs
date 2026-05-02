@@ -5,8 +5,13 @@ use tracing_indicatif::IndicatifLayer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+/// `cargo --version` style: "0.6.0-dev (c20597f)" so a local build is
+/// distinguishable from a tagged release at a glance. `OHARA_GIT_SHA` is
+/// injected by `build.rs`; "unknown" is the source-tarball fallback.
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("OHARA_GIT_SHA"), ")");
+
 #[derive(Parser, Debug)]
-#[command(name = "ohara", version, about = "ohara — context lineage engine")]
+#[command(name = "ohara", version = VERSION, about = "ohara — context lineage engine")]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,
