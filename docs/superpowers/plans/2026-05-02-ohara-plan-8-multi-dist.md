@@ -40,15 +40,20 @@ runner images is the most likely failure point.
   irrelevant — this is a smoke test. Trigger: `workflow_dispatch`
   only.
 - [ ] **Step 2: Run it from `gh workflow run`.** Confirm the build
+- [x] **Step 2: Run it from `gh workflow run`.** Confirm the build
   finishes green and the resulting binary's `--version` runs.
-- [ ] **Step 3: If it fails:** read the linker error. Most likely
-  fix is exporting `DEVELOPER_DIR` or running `sudo xcode-select -s`
-  before the build step. Patch `crates/ohara-embed/build.rs` if the
-  `xcrun --find clang` resolution is the broken link. **Stop here
-  and revisit the RFC if no link works.**
-- [ ] **Step 4: Delete the workflow** once it has produced a green
+  Result: green in 3m58s on `macos-14`. Run
+  https://github.com/vss96/ohara/actions/runs/25248753183 — `ohara
+  --version` from the produced `target/release/ohara` ran
+  successfully (exit 0). CoreML.framework + clang_rt.osx linkage
+  via `xcrun` works on hosted runners with no extra config.
+- [x] **Step 3: If it fails:** N/A — Step 2 was green on first run.
+  build.rs's `xcrun --find clang` resolution worked unmodified;
+  no `DEVELOPER_DIR` export, no `xcode-select -s` needed.
+- [x] **Step 4: Delete the workflow** once it has produced a green
   run we can refer to. The probe is one-shot; the real wiring lives
-  in cargo-dist's release workflow.
+  in cargo-dist's release workflow. Deleted in commit `ae59bbb`
+  on `main` and on `release/v0.6.2`.
 
 ## Phase 2 — Per-target features in cargo-dist
 
@@ -57,39 +62,50 @@ runner images is the most likely failure point.
 **Files:**
 - Modify: `dist-workspace.toml`
 
-- [ ] **Step 1: Read the current `dist-workspace.toml`** so the diff
+- [x] **Step 1: Read the current `dist-workspace.toml`** so the diff
   is minimal. Capture the existing `[dist]` block.
-- [ ] **Step 2: Add a `[dist.target."aarch64-apple-darwin"]` table**
+- [x] **Step 2: Add a `[dist.target."aarch64-apple-darwin"]` table**
   (or whatever cargo-dist 0.31's per-target syntax is — verify against
   `cargo dist --help` and the cargo-dist book; the syntax has churned
   between minor versions). Set `features = ["coreml"]`. Leave
   `default-features` at the workspace default.
-- [ ] **Step 3: Confirm `cargo dist plan`** locally surfaces the
+  **RESOLUTION:** cargo-dist 0.31 has *no* per-target `features`
+  override (the `features` key is package-local but applies to every
+  configured target uniformly — confirmed via
+  https://opensource.axo.dev/cargo-dist/book/reference/config.html#features
+  and via a probe with `[dist.aarch64-apple-darwin]` which cargo-dist
+  silently ignored). Workaround: `features = ["coreml"]` set at the
+  workspace `[dist]` level, paired with `ohara-embed`'s
+  target-conditional `ort` dep so the feature compiles cleanly on
+  Linux + Intel-Mac (the inner `ort/coreml` flag is only on for
+  `cfg(target_os = "macos")`). Source-side gating in
+  `crates/ohara-embed/src/fastembed.rs` tightened from
+  `cfg(feature = "coreml")` to
+  `cfg(all(feature = "coreml", target_os = "macos"))`.
+- [x] **Step 3: Confirm `cargo dist plan`** locally surfaces the
   CoreML feature on the macOS-arm64 build and *not* on the other
   three targets. If the plan output is wrong, fix the config before
   committing.
-- [ ] **Step 4: Commit** `feat(release): build coreml feature for
-  aarch64-apple-darwin`.
+  **OUTCOME:** `dist plan` output is byte-identical to v0.6.1's
+  per-target asset list (asset names stable for axoupdater). The
+  feature flag isn't surfaced in `dist plan` text; validation moved
+  to a real CI build (Task 3.1).
+- [x] **Step 4: Commit** `feat(release): build coreml feature for
+  aarch64-apple-darwin`. Done as `feat(release): wire coreml into
+  the released aarch64-apple-darwin binary` (679714a).
 
 ### Task 2.2 — Add the parallel CPU-only Apple Silicon artifact
 
 **Files:**
 - Modify: `dist-workspace.toml`
 
-- [ ] **Step 1: Add a second build entry** for `aarch64-apple-darwin`
-  with `features = []` and a custom artifact name suffix `-cpu`.
-  cargo-dist supports multi-build-per-target via `[[dist.builds]]` —
-  verify the exact key name against the version we're pinned to.
-- [ ] **Step 2: Confirm `cargo dist plan`** produces both
-  `ohara-cli-aarch64-apple-darwin.tar.xz` (CoreML) and
-  `ohara-cli-aarch64-apple-darwin-cpu.tar.xz` (no features).
-- [ ] **Step 3: Update the installer template** if cargo-dist needs
-  a hint about which asset is "default" for the curl-pipe-sh path —
-  must remain the CoreML one. This is the riskiest step; if cargo-
-  dist refuses to publish two assets for the same target without a
-  schema change, drop Task 2.2 and ship Phase 1 only.
-- [ ] **Step 4: Commit** `feat(release): publish cpu-only aarch64
-  apple-darwin opt-out artifact`.
+- [!] **Dropped per Risks #2.** cargo-dist 0.31 does not support
+  multi-build-per-target via `[[dist.builds]]` or any equivalent
+  schema. The plan's own Risks section pre-authorised this drop:
+  *"cargo-dist refuses two artifacts per target. Drop the -cpu
+  opt-out (Task 2.2); ship the default-CoreML change only. Users
+  who want CPU still have `--embed-provider cpu` at runtime, just
+  not a smaller binary."* No commit.
 
 ## Phase 3 — Verify axoupdater + installer behaviour
 
@@ -98,35 +114,63 @@ runner images is the most likely failure point.
 **Files:**
 - (none — read-only check)
 
-- [ ] **Step 1: Trigger a release dry-run** via `cargo dist build
+- [x] **Step 1: Trigger a release dry-run** via `cargo dist build
   --print` (or whatever the dry-run incantation is in 0.31). Capture
   the resulting `dist-manifest.json`.
-- [ ] **Step 2: Diff against the v0.6.1 manifest.** The
+  **DONE via PR validation.** Set `pr-run-mode = "upload"` on the
+  release branch and opened draft PR
+  https://github.com/vss96/ohara/pull/1. Run
+  https://github.com/vss96/ohara/actions/runs/25249017349 built all
+  4 targets:
+  - `aarch64-apple-darwin` 6m6s (CoreML link present;
+    `--print=linkage` shows `/System/Library/Frameworks/CoreML.framework`)
+  - `aarch64-unknown-linux-gnu` 4m32s (no regression)
+  - `x86_64-unknown-linux-gnu` 5m12s (no regression)
+  - `x86_64-apple-darwin` 7m44s (no regression)
+- [x] **Step 2: Diff against the v0.6.1 manifest.** The
   `aarch64-apple-darwin` entry should still point at
   `ohara-cli-aarch64-apple-darwin.tar.xz` — only the *contents* of
   that artifact change. If the asset name changed, axoupdater 0.10
   will fail the upgrade — escalate before tagging.
-- [ ] **Step 3: Confirm the `-update` shim asset** (used by
+  **OK:** asset list from the PR's manifest is identical (modulo
+  version) to v0.6.1's. `ohara-cli-aarch64-apple-darwin.tar.xz`
+  retained.
+- [x] **Step 3: Confirm the `-update` shim asset** (used by
   axoupdater) is still emitted for the new artifact.
+  **OK:** `ohara-cli-aarch64-apple-darwin-update` and
+  `ohara-mcp-aarch64-apple-darwin-update` both present.
 
 ### Task 3.2 — Local upgrade smoke test
 
 **Files:**
 - (none — runtime test)
 
-- [ ] **Step 1: From a v0.6.1 install,** run
-  `ohara update --check` against a staging release tag (use a
-  pre-release `v0.6.2-rc.1` if cargo-dist supports it; otherwise
-  point axoupdater at a forked test repo).
-- [ ] **Step 2: Confirm the report says** "newer version available"
-  with v0.6.2 surfaced.
-- [ ] **Step 3: Run `ohara update`** and confirm the binary on disk
-  has been replaced (`ohara --version` shows the new SHA, file
-  mtime updated).
-- [ ] **Step 4: Run `ohara index fixtures/tiny/repo --embed-provider
+- [!] **Step 1: From a v0.6.1 install,** run
+  `ohara update --check` against a staging release tag. **Deferred.**
+  No v0.6.1 install on this host and no published v0.6.2 staging
+  release available. The plan's Phase 4.2 Step 5 covers the
+  manual upgrade smoke test against the real v0.6.2 tag.
+- [!] **Step 2: Confirm the report says** "newer version available".
+  **Deferred** (depends on Step 1).
+- [!] **Step 3: Run `ohara update`.** **Deferred** (depends on Step 1).
+- [x] **Step 4: Run `ohara index fixtures/tiny/repo --embed-provider
   coreml`** against the freshly-updated binary. Expect successful
   indexing — the proof that the CoreML EP is wired into the released
   artifact.
+  **DONE against the CI-built binary.** Extracted
+  `ohara-cli-aarch64-apple-darwin.tar.xz` from the PR's CI run,
+  ran `./ohara index <fixtures/tiny/repo copy> --embed-provider
+  coreml`. Logs show:
+  ```
+  embedder provider=CoreMl
+  Successfully registered `CoreMLExecutionProvider`
+  CoreMLExecutionProvider::GetCapability, number of partitions
+    supported by CoreML: 97 number of nodes in the graph: 623
+    number of nodes supported by CoreML: 447
+  indexed: 3 new commits, 3 hunks, 2 HEAD symbols
+  ```
+  CoreML EP registers and accepts partitions; index runs to
+  completion.
 
 ## Phase 4 — Documentation + release
 
@@ -136,39 +180,86 @@ runner images is the most likely failure point.
 - Modify: `docs-book/src/install.md`
 - Modify: `docs-book/src/changelog.md`
 
-- [ ] **Step 1: install.md "Build from source" section** —
+- [x] **Step 1: install.md "Build from source" section** —
   shorten. Apple Silicon users no longer need to rebuild for CoreML;
   CUDA still requires `--features cuda` from source. Add a one-line
   note about the `-cpu` opt-out artifact.
-- [ ] **Step 2: install.md "Known issues"** — drop the v0.6.1
+  **DONE.** `docs-book/src/install.md:53-74` rewritten — opening
+  paragraph now says the cargo-dist installer for Apple Silicon
+  bundles CoreML from v0.6.2 onwards. Source-build-with-features
+  block keeps `cuda` (still source-only) and `coreml` (with a
+  parenthetical noting the released binary already has it). The
+  `-cpu` opt-out artifact is *not* mentioned because Task 2.2 was
+  dropped (Risks #2) — instead the auto-downgrade callout points
+  users at `--embed-provider cpu` at runtime.
+- [x] **Step 2: install.md "Known issues"** — drop the v0.6.1
   workaround note about source-rebuild-for-CoreML; replace with a
   brief mention that v0.6.2's released binary already has CoreML
   for Apple Silicon.
-- [ ] **Step 3: changelog.md** — v0.6.2 entry: "Released binary on
+  **DONE.** The CoreML long-pass auto-downgrade blockquote at
+  `docs-book/src/install.md:76-88` now says "the released v0.6.2
+  binary's `--embed-provider auto` therefore resolves to CPU on
+  Apple Silicon when the upcoming index pass would walk 1,000
+  commits or more" — no more "rebuild from source for CoreML"
+  language.
+- [x] **Step 3: changelog.md** — v0.6.2 entry: "Released binary on
   `aarch64-apple-darwin` now bundles the CoreML execution provider.
   `ohara update` pulls it transparently. CPU-only opt-out artifact
   available for users who want the smaller / link-stable build."
-- [ ] **Step 4: Commit** `docs: v0.6.2 install + changelog updates`.
+  **DONE.** New top entry at `docs-book/src/changelog.md:7-37`.
+  Adjusted the "CPU-only opt-out artifact" language to match
+  reality: that artifact is *not* shipped (Risks #2 drop), users
+  fall back to `--embed-provider cpu` at runtime instead.
+- [x] **Step 4: Commit** `docs: v0.6.2 install + changelog updates`.
+  Pending — committed alongside the version bump in Task 4.2 Step 1.
 
 ### Task 4.2 — Cut the release
 
 **Files:**
 - Modify: `Cargo.toml` (workspace version bump)
 
-- [ ] **Step 1: Bump workspace version** to `0.6.2`.
-- [ ] **Step 2: `cargo dist plan`** one more time on the bumped
+- [x] **Step 1: Bump workspace version** to `0.6.2`.
+  **DONE** in commit `23ca596` (`Cargo.toml` + `Cargo.lock` —
+  only the 8 in-tree ohara crates moved; no third-party dep
+  churn). The Task 4.1 docs commit `f34cf8f` and the
+  pr-run-mode revert commit `cfd695c` precede it on
+  `release/v0.6.2`.
+- [x] **Step 2: `cargo dist plan`** one more time on the bumped
   branch. Sanity-check artifact names.
+  **DONE.** Output confirms the v0.6.2 asset list is byte-
+  identical (modulo version) to v0.6.1's: 4 targets × 2 apps =
+  8 `.tar.xz` archives + 8 `-update` shims, plus the two
+  `-installer.sh` scripts and `sha256.sum`. axoupdater follows
+  by asset name; v0.6.1 → v0.6.2 self-upgrade is a no-op for
+  users.
 - [ ] **Step 3: Tag `v0.6.2`** and push.
   `git tag -a v0.6.2 -m "Release v0.6.2: per-host distribution
   variants" && git push origin v0.6.2`.
+  **GATED.** Per the plan preamble ("Task 4 is the release tag
+  (irreversible — coordinate before pushing)"), I am holding
+  here for explicit human approval. The `release/v0.6.2` branch
+  has 4 ahead-of-main commits ready (`679714a`, `cfd695c`,
+  `f34cf8f`, `23ca596`); after approval the sequence is:
+  1. `git checkout main && git merge --ff-only release/v0.6.2`
+  2. `git push origin main`
+  3. `git tag -a v0.6.2 -m "..." && git push origin v0.6.2`
+  4. Watch `release.yml` (~12 min on past cadence).
 - [ ] **Step 4: Watch the release workflow.** ~12 min on past
   cadence. Confirm both `ohara-cli-aarch64-apple-darwin.tar.xz`
   (CoreML) and `ohara-cli-aarch64-apple-darwin-cpu.tar.xz` (CPU)
   are attached to the GitHub release.
+  **GATED — depends on Step 3.** Note: the `-cpu` opt-out
+  artifact is *not* shipped (Task 2.2 dropped per Risks #2);
+  this step verifies only the single `ohara-cli-aarch64-apple-
+  darwin.tar.xz` (CoreML) plus the matching `-update` shim.
 - [ ] **Step 5: Manual upgrade smoke test** from a previously-
   installed v0.6.1 binary on the local M-series host: `ohara update`,
   then `ohara index fixtures/tiny/repo` and confirm the embedder
   log line shows `provider=CoreMl`.
+  **GATED — depends on Step 3.** This subsumes the Phase 3
+  Task 3.2 Steps 1-3 deferrals (no v0.6.1 binary on this host
+  pre-tag; first runnable upgrade test is against the real
+  v0.6.2 release).
 
 ## Out of scope (deferred)
 
