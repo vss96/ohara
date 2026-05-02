@@ -4,6 +4,38 @@ User-facing release notes. The full commit log lives on
 [GitHub](https://github.com/vss96/ohara/commits/main); this page is
 the highlights.
 
+## v0.6.2 — Per-host distribution: CoreML in the Apple Silicon binary
+
+The released binary on `aarch64-apple-darwin` now bundles the CoreML
+execution provider. `ohara update` from a v0.6.1 install pulls the
+new artifact in transparently — the `aarch64-apple-darwin` asset
+name and `-update` shim are unchanged, so axoupdater follows
+without intervention.
+
+- **Apple Silicon users no longer need a source rebuild for CoreML.**
+  The auto-downgrade shipped in v0.6.1 (`--embed-provider auto` →
+  CPU on long passes, CoreML on short ones) becomes load-bearing on
+  the released binary: `query` and short `--incremental` calls now
+  hit CoreML by default, while 1,000+ commit cold-index passes
+  still fall back to CPU to dodge the
+  [`embed_batch` leak](https://github.com/vss96/ohara/blob/main/docs/perf/v0.6.1-leak-diagnosis.md).
+- **Linux x86_64 / Linux aarch64 / Intel macOS artifacts unchanged.**
+  cargo-dist 0.31 has no per-target features override, so we pass
+  `features = ["coreml"]` to every target's `cargo build` and let
+  `ohara-embed`'s target-conditional `ort` dependency strip the
+  CoreML wiring on non-macOS triples. No extra ort weight on Linux
+  artifacts; no link changes; no asset-name churn.
+- **A `-cpu` opt-out artifact is *not* shipped.** cargo-dist 0.31
+  does not support multiple builds per target, so the CoreML build
+  is the only Apple Silicon artifact. Users who want pure CPU
+  inference can still pass `--embed-provider cpu` (or rely on the
+  long-pass auto-downgrade); they just don't get a smaller binary.
+- **Internal:** `crates/ohara-embed/src/fastembed.rs` tightens the
+  `EmbedProvider::CoreMl` cfg gate from `feature = "coreml"` to
+  `all(feature = "coreml", target_os = "macos")`. Source builds
+  (`cargo build --release`) stay CPU-only by default; the CoreML
+  feature flag only flips on for the cargo-dist released binary.
+
 ## v0.6.1 — CoreML long-pass auto-downgrade
 
 Workaround release for the CoreML embedder leak called out under

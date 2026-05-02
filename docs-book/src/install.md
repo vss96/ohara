@@ -52,17 +52,18 @@ Both binaries land under `target/release/`.
 
 ### Build with hardware acceleration
 
-The cargo-dist installer publishes a single CPU-only binary per
-platform — same artifact for every host so the installer story stays
-simple. To wire hardware ONNX execution providers into the embedder,
-build from source with the matching cargo feature:
+The cargo-dist installer for `aarch64-apple-darwin` (Apple Silicon)
+bundles the CoreML execution provider from v0.6.2 onwards — you no
+longer need to rebuild from source to get hardware acceleration on
+Apple Silicon. CUDA on Linux still requires a source rebuild:
 
 ```sh
-# Apple silicon — CoreML
-cargo build --release --features coreml
-
 # Linux x86_64 + NVIDIA — CUDA
 cargo build --release --features cuda
+
+# Apple silicon — CoreML (only needed if you want CoreML on a
+# from-source build; the released binary already has it)
+cargo build --release --features coreml
 ```
 
 The features flow through `ohara-embed` to both `ohara` and
@@ -72,18 +73,19 @@ or leave it on the default `auto`, which picks CoreML on Apple
 silicon, CUDA when `CUDA_VISIBLE_DEVICES` is set, and CPU otherwise.
 Default features stay CPU-only.
 
-> **CoreML on long index runs (v0.6.1 workaround).** On Apple Silicon,
-> the CoreML execution path leaks ~4 MB per `embed_batch` call
-> (`MALLOC_LARGE` heap, see
+> **CoreML on long index runs (auto-downgrade still applies).** On
+> Apple Silicon, the CoreML execution path leaks ~4 MB per
+> `embed_batch` call (`MALLOC_LARGE` heap, see
 > [`docs/perf/v0.6.1-leak-diagnosis.md`](https://github.com/vss96/ohara/blob/main/docs/perf/v0.6.1-leak-diagnosis.md)) —
 > a 5,000+ commit first-time index would OOM the host before
-> completing. v0.6.1's `--embed-provider auto` therefore resolves to
-> CPU on Apple Silicon when the upcoming index pass would walk
-> 1,000 commits or more; short passes (`query`, `index --incremental`,
-> small repos) still pick CoreML. Pass `--embed-provider coreml`
-> explicitly to bypass the downgrade and accept the OOM risk; CPU
-> and CUDA paths are unaffected. Re-opened upstream investigation
-> (fastembed / ort) is tracked for a future release.
+> completing. The released v0.6.2 binary's `--embed-provider auto`
+> therefore resolves to CPU on Apple Silicon when the upcoming index
+> pass would walk 1,000 commits or more; short passes (`query`,
+> `index --incremental`, small repos) still pick CoreML. Pass
+> `--embed-provider coreml` explicitly to bypass the downgrade and
+> accept the OOM risk; CPU and CUDA paths are unaffected. Re-opened
+> upstream investigation (fastembed / ort) is tracked for a future
+> release.
 
 ## Updating
 
