@@ -40,6 +40,23 @@ V2 backfills both new FTS tables from existing `hunk` and `symbol`
 rows on first run, so a v0.3 binary opening a v0.2 index is searchable
 immediately without re-embedding.
 
+### V3 — index metadata (v0.7, plan 13)
+
+| Table / column | Kind | Purpose |
+|----------------|------|---------|
+| `index_metadata(repo_id, component, version, value_json, recorded_at)` | new table | Per-component record of how the index was built. Lets the runtime detect when an old index is incompatible with the current binary's embedder / chunker / parser / semantic-text versions and decide between "fine", "refresh recommended", and "rebuild required". |
+
+Initial component keys: `schema`, `embedding_model`,
+`embedding_dimension`, `reranker_model`, `chunker_version`,
+`semantic_text_version`, plus one parser key per language
+(`parser_rust`, `parser_python`, `parser_java`, `parser_kotlin`).
+
+V3 backfills only `(repo_id, 'schema', '3', …)` for every existing
+repo. Other components stay absent — the runtime reports them as
+`Unknown` rather than guessing what version the prior pass used. A
+subsequent index pass writes the current binary's values into the
+table at successful completion.
+
 ## Idempotency
 
 Indexing is structured so any pass can be repeated without

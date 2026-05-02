@@ -170,4 +170,130 @@ mod tests {
             .unwrap();
         assert_eq!(sib, "[]");
     }
+
+    #[test]
+    fn migrations_v3_creates_index_metadata_table_with_expected_columns() {
+        // Plan 13 Task 1.1: V3 adds the index_metadata table that the
+        // runtime uses to decide whether a prior index was built with a
+        // compatible embedder / chunker / parser version.
+        crate::codec::pool::register_vec_auto_extension().unwrap();
+        let mut c = Connection::open_in_memory().unwrap();
+        apply_pragmas(&c).unwrap();
+        load_vec_extension(&c).unwrap();
+        run(&mut c).unwrap();
+
+        let n: i64 = c
+            .query_row(
+                "SELECT count(*) FROM sqlite_master \
+                 WHERE type='table' AND name='index_metadata'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "V3 must create the index_metadata table");
+
+        // Column shape: repo_id, component, version, value_json,
+        // recorded_at; PK over (repo_id, component).
+        let mut stmt = c.prepare("PRAGMA table_info(index_metadata)").unwrap();
+        let columns: Vec<(String, String, i64)> = stmt
+            .query_map([], |r| {
+                let name: String = r.get(1)?;
+                let typ: String = r.get(2)?;
+                let pk: i64 = r.get(5)?;
+                Ok((name, typ, pk))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let names: Vec<&str> = columns.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "repo_id",
+                "component",
+                "version",
+                "value_json",
+                "recorded_at",
+            ],
+            "index_metadata column order is part of the migration contract"
+        );
+        // PK should cover repo_id (1) + component (2) — sqlite numbers
+        // composite PK columns starting at 1.
+        let pk_for = |target: &str| -> i64 {
+            columns
+                .iter()
+                .find(|(n, _, _)| n == target)
+                .map(|(_, _, pk)| *pk)
+                .unwrap_or(0)
+        };
+        assert_eq!(pk_for("repo_id"), 1, "repo_id is PK part 1");
+        assert_eq!(pk_for("component"), 2, "component is PK part 2");
+    }
+
+    #[test]
+    fn migrations_v3_backfills_schema_row_for_existing_repos() {
+        // Plan 13 Task 1.1 Step 3: existing repos must get a single
+        // `schema = current` row so callers can tell "old index, never
+        // recorded any metadata" apart from "freshly migrated; runtime
+        // hasn't recorded other components yet".
+        crate::codec::pool::register_vec_auto_extension().unwrap();
+        let c = Connection::open_in_memory().unwrap();
+        apply_pragmas(&c).unwrap();
+        load_vec_extension(&c).unwrap();
+
+        // Apply V1 + V2 manually so we can seed a pre-V3 repo row, the
+        // same pattern the V2 backfill test uses.
+        let v1_sql = include_str!("../migrations/V1__initial.sql");
+        c.execute_batch(v1_sql).unwrap();
+        let v2_sql = include_str!("../migrations/V2__fts_text_and_symbol_name.sql");
+        c.execute_batch(v2_sql).unwrap();
+
+        // Seed two pre-V3 repos.
+        c.execute(
+            "INSERT INTO repo (id, path, first_commit_sha, schema_version) \
+             VALUES ('repo-a', '/tmp/a', 'first-a', 2)",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO repo (id, path, first_commit_sha, schema_version) \
+             VALUES ('repo-b', '/tmp/b', 'first-b', 2)",
+            [],
+        )
+        .unwrap();
+
+        // Apply V3 manually.
+        let v3_sql = include_str!("../migrations/V3__index_metadata.sql");
+        c.execute_batch(v3_sql).unwrap();
+
+        // Each existing repo should have exactly one schema row, and
+        // no other component rows.
+        let n_total: i64 = c
+            .query_row("SELECT count(*) FROM index_metadata", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            n_total, 2,
+            "V3 backfill must add one row per existing repo and no others"
+        );
+        let n_schema: i64 = c
+            .query_row(
+                "SELECT count(*) FROM index_metadata WHERE component = 'schema'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n_schema, 2);
+        let version: String = c
+            .query_row(
+                "SELECT version FROM index_metadata \
+                 WHERE repo_id = 'repo-a' AND component = 'schema'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            version, "3",
+            "schema backfill records the V3 schema version"
+        );
+    }
 }
