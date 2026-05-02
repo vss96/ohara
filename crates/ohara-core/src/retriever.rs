@@ -381,6 +381,19 @@ mod tests {
         ) -> crate::Result<Vec<crate::types::Hunk>> {
             unreachable!("retriever tests should not exercise get_hunks_for_file_in_commit")
         }
+        async fn get_index_metadata(
+            &self,
+            _: &RepoId,
+        ) -> crate::Result<crate::index_metadata::StoredIndexMetadata> {
+            Ok(crate::index_metadata::StoredIndexMetadata::default())
+        }
+        async fn put_index_metadata(
+            &self,
+            _: &RepoId,
+            _: &[(String, String)],
+        ) -> crate::Result<()> {
+            Ok(())
+        }
     }
 
     struct FakeEmbedder;

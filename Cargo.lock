@@ -2247,6 +2247,8 @@ dependencies = [
  "ohara-core",
  "ohara-embed",
  "ohara-storage",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

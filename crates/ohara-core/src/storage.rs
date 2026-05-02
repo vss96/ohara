@@ -1,3 +1,4 @@
+use crate::index_metadata::StoredIndexMetadata;
 use crate::query::IndexStatus;
 use crate::types::{CommitMeta, Hunk, RepoId, Symbol};
 use crate::Result;
@@ -155,4 +156,23 @@ pub trait Storage: Send + Sync {
         sha: &str,
         file_path: &str,
     ) -> Result<Vec<Hunk>>;
+
+    // --- Index metadata (plan 13) ---
+
+    /// Read every `index_metadata` row for `repo_id` as a typed
+    /// `StoredIndexMetadata`. Components absent from the table are
+    /// absent from the returned map (callers diagnose them as
+    /// `Unknown`, not as a stored mismatch).
+    async fn get_index_metadata(&self, repo_id: &RepoId) -> Result<StoredIndexMetadata>;
+
+    /// Replace the `version` row for each `(component, version)` pair
+    /// passed in, scoped to `repo_id`. Components not in `components`
+    /// are left untouched — callers MUST NOT use this method to clear
+    /// stale rows; they must pass the new values for everything they
+    /// want to update. `recorded_at` is set to the current unix time.
+    async fn put_index_metadata(
+        &self,
+        repo_id: &RepoId,
+        components: &[(String, String)],
+    ) -> Result<()>;
 }

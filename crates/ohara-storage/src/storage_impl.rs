@@ -4,6 +4,7 @@ use crate::tables::repo;
 use anyhow::Result;
 use deadpool_sqlite::Pool;
 use ohara_core::{
+    index_metadata::StoredIndexMetadata,
     query::IndexStatus,
     storage::{CommitRecord, HunkHit, HunkRecord, Storage},
     types::{CommitMeta, Hunk, RepoId, Symbol},
@@ -193,6 +194,27 @@ impl Storage for SqliteStorage {
         let path = file_path.to_string();
         with_conn(&self.pool, move |c| {
             crate::tables::explain::get_hunks_for_file_in_commit(c, &sha, &path)
+        })
+        .await
+    }
+
+    async fn get_index_metadata(&self, repo_id: &RepoId) -> CoreResult<StoredIndexMetadata> {
+        let id = repo_id.as_str().to_string();
+        with_conn(&self.pool, move |c| {
+            crate::tables::index_metadata::get(c, &id)
+        })
+        .await
+    }
+
+    async fn put_index_metadata(
+        &self,
+        repo_id: &RepoId,
+        components: &[(String, String)],
+    ) -> CoreResult<()> {
+        let id = repo_id.as_str().to_string();
+        let comps = components.to_vec();
+        with_conn(&self.pool, move |c| {
+            crate::tables::index_metadata::put_many(c, &id, &comps)
         })
         .await
     }
@@ -912,6 +934,128 @@ mod tests {
         assert!(
             msg.contains("storage error: query:"),
             "expected a `query:`-stage Storage error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn index_metadata_round_trips_every_initial_component_key() {
+        // Plan 13 Task 2.1: write the full set of v0.7-era components
+        // and verify round-trip via get_index_metadata. Pins the API
+        // shape: caller passes (component, version) pairs, get returns
+        // the same map back.
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        let pairs: Vec<(String, String)> = vec![
+            ("schema".into(), "3".into()),
+            ("embedding_model".into(), "BAAI/bge-small-en-v1.5".into()),
+            ("embedding_dimension".into(), "384".into()),
+            ("reranker_model".into(), "bge-reranker-base".into()),
+            ("chunker_version".into(), "1".into()),
+            ("semantic_text_version".into(), "1".into()),
+            ("parser_rust".into(), "1".into()),
+            ("parser_python".into(), "1".into()),
+            ("parser_java".into(), "1".into()),
+            ("parser_kotlin".into(), "1".into()),
+        ];
+        s.put_index_metadata(&id, &pairs).await.unwrap();
+        let stored = s.get_index_metadata(&id).await.unwrap();
+        for (k, v) in &pairs {
+            assert_eq!(
+                stored.components.get(k),
+                Some(v),
+                "component {k} did not round-trip"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn put_index_metadata_replacement_is_scoped_to_passed_components() {
+        // Plan 13 Task 2.1 Step 2: put_index_metadata MUST NOT delete
+        // unrelated component rows — it only updates the components in
+        // the call. That property keeps future plans (12, 11) from
+        // having to re-write every key just to bump one of theirs.
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        s.put_index_metadata(
+            &id,
+            &[
+                ("chunker_version".into(), "1".into()),
+                ("parser_rust".into(), "1".into()),
+            ],
+        )
+        .await
+        .unwrap();
+
+        // A second put with a different component must leave the prior
+        // rows intact.
+        s.put_index_metadata(&id, &[("semantic_text_version".into(), "1".into())])
+            .await
+            .unwrap();
+
+        let stored = s.get_index_metadata(&id).await.unwrap();
+        assert_eq!(
+            stored.components.get("chunker_version").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            stored.components.get("parser_rust").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            stored
+                .components
+                .get("semantic_text_version")
+                .map(String::as_str),
+            Some("1")
+        );
+
+        // A third put that updates an existing component must replace
+        // its version (no duplicate rows).
+        s.put_index_metadata(&id, &[("chunker_version".into(), "2".into())])
+            .await
+            .unwrap();
+        let stored = s.get_index_metadata(&id).await.unwrap();
+        assert_eq!(
+            stored.components.get("chunker_version").map(String::as_str),
+            Some("2")
+        );
+        // Other components survive unchanged.
+        assert_eq!(
+            stored.components.get("parser_rust").map(String::as_str),
+            Some("1")
+        );
+
+        // Row count: one per unique component, no duplicates.
+        let pool = s.pool().clone();
+        let n: i64 = pool
+            .get()
+            .await
+            .unwrap()
+            .interact(|c| c.query_row("SELECT count(*) FROM index_metadata", [], |r| r.get(0)))
+            .await
+            .unwrap()
+            .unwrap();
+        // Only the 3 components this test wrote — V3's schema-backfill
+        // INSERT runs against the `repo` table at migration time, so
+        // a repo opened *after* the migration doesn't get a backfilled
+        // schema row. Plan 13 Task 2.2 will write `schema` explicitly
+        // at the end of every successful index pass.
+        assert_eq!(n, 3, "no duplicate rows from upserts");
+    }
+
+    #[tokio::test]
+    async fn get_index_metadata_returns_empty_for_unknown_repo() {
+        // A freshly-opened SqliteStorage with no repo yet returns an
+        // empty map (not an error). Callers diagnose this as Unknown,
+        // which is the correct user-facing verdict for a brand-new
+        // index dir before any open_repo call.
+        let dir = tempfile::tempdir().unwrap();
+        let s = SqliteStorage::open(dir.path().join("i.sqlite"))
+            .await
+            .unwrap();
+        let id = RepoId::from_parts("never-opened", "/tmp/x");
+        let stored = s.get_index_metadata(&id).await.unwrap();
+        assert!(
+            stored.components.is_empty(),
+            "unknown repo must yield an empty StoredIndexMetadata"
         );
     }
 

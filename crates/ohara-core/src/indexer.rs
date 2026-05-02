@@ -495,6 +495,15 @@ mod phase_timing_tests {
         ) -> Result<Vec<Hunk>> {
             Ok(vec![])
         }
+        async fn get_index_metadata(
+            &self,
+            _: &RepoId,
+        ) -> Result<crate::index_metadata::StoredIndexMetadata> {
+            Ok(crate::index_metadata::StoredIndexMetadata::default())
+        }
+        async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> Result<()> {
+            Ok(())
+        }
     }
 
     fn fake_commit(sha: &str) -> CommitMeta {

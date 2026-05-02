@@ -425,6 +425,15 @@ mod tests {
                 .cloned()
                 .unwrap_or_default())
         }
+        async fn get_index_metadata(
+            &self,
+            _: &RepoId,
+        ) -> Result<crate::index_metadata::StoredIndexMetadata> {
+            Ok(crate::index_metadata::StoredIndexMetadata::default())
+        }
+        async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> Result<()> {
+            Ok(())
+        }
     }
 
     /// Scripted blame source. Returns the supplied `Vec<BlameRange>`

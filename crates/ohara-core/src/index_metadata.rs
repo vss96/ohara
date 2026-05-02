@@ -250,7 +250,9 @@ mod tests {
     fn chunker_version_mismatch_needs_refresh() {
         let runtime = runtime_baseline();
         let mut stored = stored_complete(&runtime);
-        stored.components.insert("chunker_version".into(), "0".into());
+        stored
+            .components
+            .insert("chunker_version".into(), "0".into());
         match CompatibilityStatus::assess(&runtime, &stored) {
             CompatibilityStatus::QueryCompatibleNeedsRefresh { reason } => {
                 assert!(reason.contains("chunker_version"));
@@ -280,7 +282,9 @@ mod tests {
         stored
             .components
             .insert("embedding_dimension".into(), "768".into());
-        stored.components.insert("chunker_version".into(), "0".into());
+        stored
+            .components
+            .insert("chunker_version".into(), "0".into());
         assert!(matches!(
             CompatibilityStatus::assess(&runtime, &stored),
             CompatibilityStatus::NeedsRebuild { .. }
@@ -293,13 +297,8 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("\"status\":\"compatible\""), "got {json}");
 
-        let s = CompatibilityStatus::NeedsRebuild {
-            reason: "x".into(),
-        };
+        let s = CompatibilityStatus::NeedsRebuild { reason: "x".into() };
         let json = serde_json::to_string(&s).unwrap();
-        assert!(
-            json.contains("\"status\":\"needs_rebuild\""),
-            "got {json}"
-        );
+        assert!(json.contains("\"status\":\"needs_rebuild\""), "got {json}");
     }
 }
