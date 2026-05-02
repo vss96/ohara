@@ -1,6 +1,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use ohara_cli::commands;
+use tracing_indicatif::IndicatifLayer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Parser, Debug)]
 #[command(name = "ohara", version, about = "ohara — context lineage engine")]
@@ -27,13 +30,7 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ohara=debug")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    init_tracing();
     let cli = Cli::parse();
     match cli.command {
         Cmd::Init(a) => commands::init::run(a).await,
@@ -43,4 +40,31 @@ async fn main() -> Result<()> {
         Cmd::Explain(a) => commands::explain::run(a).await,
         Cmd::Update(a) => commands::update::run(a).await,
     }
+}
+
+/// Install the global tracing subscriber.
+///
+/// The CLI layers two `tracing_subscriber::Layer`s on top of the registry:
+///
+/// 1. `IndicatifLayer` — owns a `MultiProgress` that pins progress bars to
+///    the bottom of the terminal. Bars are driven by spans annotated via
+///    `tracing_indicatif::span_ext::IndicatifSpanExt::pb_set_*` (see
+///    `crate::progress::IndicatifProgress`).
+/// 2. `fmt::Layer` — the human-readable log writer, but with its writer
+///    redirected through `IndicatifLayer::get_stderr_writer()`. That writer
+///    calls `MultiProgress::suspend(...)` for every line, so log lines
+///    print *above* the progress bar instead of scrolling it away.
+///
+/// `EnvFilter` defaults to `info,ohara=debug` (override with `RUST_LOG`).
+fn init_tracing() {
+    let indicatif_layer = IndicatifLayer::new();
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ohara=debug"));
+    let fmt_layer =
+        tracing_subscriber::fmt::layer().with_writer(indicatif_layer.get_stderr_writer());
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt_layer)
+        .with(indicatif_layer)
+        .init();
 }
