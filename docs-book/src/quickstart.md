@@ -62,7 +62,7 @@ provenance.
 ## 4. Wire into Claude Code
 
 Point Claude at `ohara-mcp` and you're done — see
-[Wiring into Claude Code](./claude-code.md) for the
+[Wiring into MCP clients](./mcp-clients.md) for the
 `claude_desktop_config.json` snippet. Both
 [`find_pattern`](./tools/find_pattern.md) and
 [`explain_change`](./tools/explain_change.md) become available to

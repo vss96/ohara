@@ -103,5 +103,5 @@ works. See [`ohara update`](./cli/update.md) for the full flag set.
 
 Now that the binaries are on `PATH`, head to the
 [Quickstart](./quickstart.md) to index your first repo, or jump
-straight to [Wiring into Claude Code](./claude-code.md) if you
+straight to [Wiring into MCP clients](./mcp-clients.md) if you
 already know the drill.

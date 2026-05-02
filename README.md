@@ -98,9 +98,10 @@ binaries work everywhere out of the box.
 
 The first run downloads the BGE-small embedding model (~80MB, one time).
 
-## Wiring into Claude Code
+## Wiring into MCP clients
 
-In your `~/.claude/claude_desktop_config.json` (or per-repo MCP config), add:
+`ohara-mcp` speaks stdio MCP, so any MCP-aware client picks it up
+with the same shape:
 
 ```json
 {
@@ -114,7 +115,16 @@ In your `~/.claude/claude_desktop_config.json` (or per-repo MCP config), add:
 }
 ```
 
-The server reads the current working directory of the spawning Claude Code
+Drop that block into the right config file:
+
+- **Claude Code / Claude Desktop:** `~/.claude/claude_desktop_config.json`, `.mcp.json` per-repo, or `claude mcp add ohara <path>`.
+- **Cursor:** `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (per-workspace).
+- **OpenAI Codex CLI:** `~/.codex/config.toml` with a `[mcp_servers.ohara]` block (TOML, not JSON).
+- **OpenCode:** `~/.config/opencode/opencode.json` or repo-root `opencode.json` under an `mcp` key.
+
+Full config examples for each client live in the [docs site](https://vss96.github.io/ohara/mcp-clients.html).
+
+The server reads the current working directory of the spawning client
 session as the repo to query. Run `ohara index <repo>` once to bootstrap, then
 keep the index fresh with the post-commit hook:
 

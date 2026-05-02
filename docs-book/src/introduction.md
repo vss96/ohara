@@ -37,8 +37,8 @@ questions about the *history* of the code:
 
 - [Install](./install.md) — `curl | sh` install or build from source.
 - [Quickstart](./quickstart.md) — index a repo and run your first query.
-- [Wiring into Claude Code](./claude-code.md) — point Claude at the MCP
-  server.
+- [Wiring into MCP clients](./mcp-clients.md) — point Claude Code,
+  Cursor, Codex, OpenCode, or any MCP-aware client at the server.
 - [Architecture overview](./architecture/overview.md) — for contributors
   and the curious.
 
