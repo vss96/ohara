@@ -300,7 +300,10 @@ mod tests {
         // Apply V1+V2+V3 manually so we can seed a v0.6-era hunk.
         for (label, sql) in [
             ("V1", include_str!("../migrations/V1__initial.sql")),
-            ("V2", include_str!("../migrations/V2__fts_text_and_symbol_name.sql")),
+            (
+                "V2",
+                include_str!("../migrations/V2__fts_text_and_symbol_name.sql"),
+            ),
             ("V3", include_str!("../migrations/V3__index_metadata.sql")),
         ] {
             c.execute_batch(sql)
@@ -344,7 +347,10 @@ mod tests {
         let fts_n: i64 = c
             .query_row("SELECT count(*) FROM fts_hunk_semantic", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(fts_n, 1, "V4 backfill must mirror existing hunks into the FTS table");
+        assert_eq!(
+            fts_n, 1,
+            "V4 backfill must mirror existing hunks into the FTS table"
+        );
         let hs_n: i64 = c
             .query_row("SELECT count(*) FROM hunk_symbol", [], |r| r.get(0))
             .unwrap();

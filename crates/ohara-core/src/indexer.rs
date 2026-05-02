@@ -197,13 +197,15 @@ impl Indexer {
                     )
                     .await?;
 
+                // Plan 11: until the semantic-text builder + per-hunk
+                // attribution wire in (Task 2.1 / Task 3.1), use the
+                // legacy constructor — semantic_text falls back to
+                // diff_text and symbols stays empty so query lanes
+                // still return results.
                 let records: Vec<HunkRecord> = hunks
                     .into_iter()
                     .zip(hunk_embs.iter().cloned())
-                    .map(|(h, e)| HunkRecord {
-                        hunk: h,
-                        diff_emb: e,
-                    })
+                    .map(|(h, e)| HunkRecord::legacy(h, e))
                     .collect();
                 self.storage.put_hunks(repo_id, &records).await?;
                 timings.storage_write_ms += write_start.elapsed().as_millis() as u64;

@@ -1,6 +1,6 @@
 use crate::index_metadata::StoredIndexMetadata;
 use crate::query::IndexStatus;
-use crate::types::{CommitMeta, Hunk, RepoId, Symbol};
+use crate::types::{CommitMeta, Hunk, HunkSymbol, RepoId, Symbol};
 use crate::Result;
 use async_trait::async_trait;
 
@@ -16,6 +16,58 @@ pub type HunkId = i64;
 pub struct HunkRecord {
     pub hunk: Hunk,
     pub diff_emb: Vector,
+    /// Plan 11: normalized text fed to the embedder + the
+    /// `fts_hunk_semantic` BM25 lane in place of the raw diff. Falls
+    /// back to `hunk.diff_text` when the semantic-text builder yields
+    /// an empty body. Stored alongside the raw diff so display /
+    /// provenance still shows what the user expects.
+    pub semantic_text: String,
+    /// Plan 11: per-hunk symbol attribution (which symbols in the file
+    /// did this hunk actually touch). Empty when the parser couldn't
+    /// resolve the file or when no `ExactSpan` / `HunkHeader` evidence
+    /// applied; the v0.7 indexer never writes `FileFallback`-confidence
+    /// rows.
+    pub symbols: Vec<HunkSymbol>,
+}
+
+impl HunkRecord {
+    /// Construct a v0.6-compatible record (semantic_text falls back to
+    /// the raw diff text; no symbol attribution). Used by callers that
+    /// haven't been ported to plan 11's richer construction yet —
+    /// keeps test fakes and back-fill paths small.
+    pub fn legacy(hunk: Hunk, diff_emb: Vector) -> Self {
+        let semantic_text = hunk.diff_text.clone();
+        Self {
+            hunk,
+            diff_emb,
+            semantic_text,
+            symbols: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod hunk_record_tests {
+    use super::*;
+    use crate::types::ChangeKind;
+
+    #[test]
+    fn legacy_constructor_seeds_semantic_text_from_diff_text_and_no_symbols() {
+        // Plan 11 Task 1.2: HunkRecord::legacy is the v0.6-compat
+        // shim — semantic_text mirrors diff_text byte-for-byte and
+        // symbols stays empty so test mocks compile and pre-attribution
+        // index passes still produce a populated semantic-text FTS row.
+        let hunk = Hunk {
+            commit_sha: "abc".into(),
+            file_path: "src/x.rs".into(),
+            language: Some("rust".into()),
+            change_kind: ChangeKind::Added,
+            diff_text: "+fn foo() {}\n".into(),
+        };
+        let rec = HunkRecord::legacy(hunk.clone(), vec![0.0_f32; 4]);
+        assert_eq!(rec.semantic_text, hunk.diff_text);
+        assert!(rec.symbols.is_empty());
+    }
 }
 
 #[derive(Debug, Clone)]

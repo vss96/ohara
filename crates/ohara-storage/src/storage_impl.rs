@@ -474,16 +474,16 @@ mod tests {
         .await
         .unwrap();
 
-        let h = HunkRecord {
-            hunk: Hunk {
+        let h = HunkRecord::legacy(
+            Hunk {
                 commit_sha: "c1".into(),
                 file_path: "src/x.rs".into(),
                 language: Some("rust".into()),
                 change_kind: ChangeKind::Added,
                 diff_text: "+fn x() {}\n".into(),
             },
-            diff_emb: vec![0.5f32; 384],
-        };
+            vec![0.5f32; 384],
+        );
         s.put_hunks(&id, &[h]).await.unwrap();
 
         let pool = s.pool().clone();
@@ -528,15 +528,17 @@ mod tests {
         .await
         .unwrap();
 
-        let mk_hunk = |emb_val: f32, name: &str| HunkRecord {
-            hunk: Hunk {
-                commit_sha: "c1".into(),
-                file_path: format!("src/{name}.rs"),
-                language: Some("rust".into()),
-                change_kind: ChangeKind::Added,
-                diff_text: format!("+fn {name}() {{}}\n"),
-            },
-            diff_emb: vec![emb_val; 384],
+        let mk_hunk = |emb_val: f32, name: &str| {
+            HunkRecord::legacy(
+                Hunk {
+                    commit_sha: "c1".into(),
+                    file_path: format!("src/{name}.rs"),
+                    language: Some("rust".into()),
+                    change_kind: ChangeKind::Added,
+                    diff_text: format!("+fn {name}() {{}}\n"),
+                },
+                vec![emb_val; 384],
+            )
         };
         s.put_hunks(
             &id,
@@ -582,15 +584,17 @@ mod tests {
         .unwrap();
 
         // Three hunks with very different magnitudes — produces a wide range of L2 distances.
-        let mk = |val: f32, name: &str| HunkRecord {
-            hunk: Hunk {
-                commit_sha: "c1".into(),
-                file_path: format!("{name}.rs"),
-                language: Some("rust".into()),
-                change_kind: ChangeKind::Added,
-                diff_text: format!("+{name}"),
-            },
-            diff_emb: vec![val; 384],
+        let mk = |val: f32, name: &str| {
+            HunkRecord::legacy(
+                Hunk {
+                    commit_sha: "c1".into(),
+                    file_path: format!("{name}.rs"),
+                    language: Some("rust".into()),
+                    change_kind: ChangeKind::Added,
+                    diff_text: format!("+{name}"),
+                },
+                vec![val; 384],
+            )
         };
         s.put_hunks(
             &id,
@@ -655,15 +659,17 @@ mod tests {
 
         let recs: Vec<HunkRecord> = hunks
             .iter()
-            .map(|(name, diff, lang)| HunkRecord {
-                hunk: Hunk {
-                    commit_sha: commit_sha.into(),
-                    file_path: format!("src/{name}.rs"),
-                    language: lang.map(str::to_string),
-                    change_kind: ChangeKind::Added,
-                    diff_text: (*diff).to_string(),
-                },
-                diff_emb: vec![0.0f32; 384],
+            .map(|(name, diff, lang)| {
+                HunkRecord::legacy(
+                    Hunk {
+                        commit_sha: commit_sha.into(),
+                        file_path: format!("src/{name}.rs"),
+                        language: lang.map(str::to_string),
+                        change_kind: ChangeKind::Added,
+                        diff_text: (*diff).to_string(),
+                    },
+                    vec![0.0f32; 384],
+                )
             })
             .collect();
         s.put_hunks(id, &recs).await.unwrap();
@@ -836,26 +842,26 @@ mod tests {
         .await
         .unwrap();
         let hunks = vec![
-            HunkRecord {
-                hunk: Hunk {
+            HunkRecord::legacy(
+                Hunk {
                     commit_sha: "filter-sha".into(),
                     file_path: "src/auth.rs".into(),
                     language: Some("rust".into()),
                     change_kind: ChangeKind::Modified,
                     diff_text: "+    retry();\n".into(),
                 },
-                diff_emb: vec![0.0; 384],
-            },
-            HunkRecord {
-                hunk: Hunk {
+                vec![0.0; 384],
+            ),
+            HunkRecord::legacy(
+                Hunk {
                     commit_sha: "filter-sha".into(),
                     file_path: "src/other.rs".into(),
                     language: Some("rust".into()),
                     change_kind: ChangeKind::Added,
                     diff_text: "+    other();\n".into(),
                 },
-                diff_emb: vec![0.0; 384],
-            },
+                vec![0.0; 384],
+            ),
         ];
         s.put_hunks(&id, &hunks).await.unwrap();
 

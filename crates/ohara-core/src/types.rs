@@ -100,6 +100,71 @@ pub struct Hunk {
     pub diff_text: String,
 }
 
+/// Plan 11: confidence for which symbol(s) a hunk touched.
+///
+/// `ExactSpan` — a changed line intersects a parsed symbol's byte/line
+/// span. Highest confidence; the only kind the v0.7 retriever uses to
+/// "replace" the file-level symbol lane.
+///
+/// `HunkHeader` — git's hunk header named an enclosing function/class.
+/// Useful when the parser can't reach the file (binary, unsupported
+/// language) but git's heuristic still found a context label.
+///
+/// `FileFallback` — reserved for forward-compat. The v0.7 indexer
+/// never writes this kind; storing zero hunk_symbol rows is preferred
+/// over pretending file-level attribution is symbol-level. Future
+/// plans can opt in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttributionKind {
+    ExactSpan,
+    HunkHeader,
+    FileFallback,
+}
+
+impl AttributionKind {
+    /// Stable string used in the `hunk_symbol.attribution_kind`
+    /// column. Matches the lowercase variant name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AttributionKind::ExactSpan => "exact_span",
+            AttributionKind::HunkHeader => "hunk_header",
+            AttributionKind::FileFallback => "file_fallback",
+        }
+    }
+}
+
+impl std::str::FromStr for AttributionKind {
+    /// Empty error type — callers only need "matched / didn't match"
+    /// because the values come from a closed set written by ohara
+    /// itself, not arbitrary user input.
+    type Err = ();
+
+    /// Parse a stored `attribution_kind` string. Errors when the
+    /// value isn't one of the three closed-set values so callers can
+    /// decide whether to skip the row or surface a typed error.
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "exact_span" => Ok(AttributionKind::ExactSpan),
+            "hunk_header" => Ok(AttributionKind::HunkHeader),
+            "file_fallback" => Ok(AttributionKind::FileFallback),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Plan 11: one symbol a hunk touched, with attribution confidence.
+/// The `(commit_sha, file_path)` identity lives on the parent `Hunk`;
+/// each `HunkSymbol` carries only the symbol-side payload + kind of
+/// attribution evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HunkSymbol {
+    pub kind: SymbolKind,
+    pub name: String,
+    pub qualified_name: Option<String>,
+    pub attribution: AttributionKind,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Symbol {
     pub file_path: String,
@@ -160,5 +225,39 @@ mod symbol_tests {
         );
         assert_eq!(back.name, "alpha");
         assert_eq!(back.span_end, 42);
+    }
+
+    #[test]
+    fn attribution_kind_round_trips_via_string() {
+        // Plan 11 Task 1.2: stored values use the lowercase
+        // `exact_span` / `hunk_header` / `file_fallback` form. The
+        // round-trip helper backs both the storage layer and the
+        // hunk_symbol query helpers.
+        use std::str::FromStr;
+        for kind in [
+            AttributionKind::ExactSpan,
+            AttributionKind::HunkHeader,
+            AttributionKind::FileFallback,
+        ] {
+            assert_eq!(AttributionKind::from_str(kind.as_str()), Ok(kind));
+        }
+        assert_eq!(AttributionKind::from_str("garbage"), Err(()));
+    }
+
+    #[test]
+    fn hunk_symbol_serialises_with_snake_case_attribution() {
+        let hs = HunkSymbol {
+            kind: SymbolKind::Function,
+            name: "retry_with_backoff".into(),
+            qualified_name: Some("net::retry_with_backoff".into()),
+            attribution: AttributionKind::ExactSpan,
+        };
+        let json = serde_json::to_string(&hs).expect("serialize");
+        assert!(
+            json.contains("\"attribution\":\"exact_span\""),
+            "AttributionKind must serialise snake_case: {json}"
+        );
+        let back: HunkSymbol = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, hs);
     }
 }
