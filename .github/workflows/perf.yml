@@ -92,3 +92,76 @@ jobs:
           name: perf-output
           path: perf-output.log
           if-no-files-found: warn
+
+  context-engine-eval:
+    # Plan 10 Task 3.1 — informational retrieval-quality job.
+    # Triggered on demand only (workflow_dispatch / schedule). Failures
+    # do NOT gate releases until the harness has at least one release
+    # of stability behind it (Plan 10 Task 3.1 Step 2).
+    name: context_engine_eval
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - name: Checkout ohara
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain (stable)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-perf-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-perf-
+
+      - name: Cache fastembed model downloads
+        uses: actions/cache@v4
+        with:
+          path: .fastembed_cache
+          key: ${{ runner.os }}-fastembed-cpu-bge-small-and-reranker-v1
+
+      - name: Build context-engine eval fixture
+        run: ./tests/perf/build_context_eval_fixture.sh
+
+      - name: Run context_engine_eval (release)
+        id: eval
+        run: |
+          set -o pipefail
+          # --release so the numbers reflect the shipped profile.
+          # --include-ignored opts into the gated harness.
+          # --nocapture surfaces the JSON summary line so the annotation
+          # step below can scrape it.
+          cargo test -p ohara-perf-tests --release \
+            -- --include-ignored --nocapture context_engine_eval \
+            2>&1 | tee context-engine-eval.log
+
+      - name: Annotate retrieval-quality summary
+        if: always()
+        run: |
+          # The runner emits exactly one line beginning
+          # `perf::context_engine_eval` with the JSON metrics object.
+          # Surface it as a workflow notice so the metrics show up on
+          # the run summary tab without having to scroll the log.
+          line=$(grep "perf::context_engine_eval" context-engine-eval.log || true)
+          if [ -n "$line" ]; then
+            echo "::notice title=context_engine_eval::$line"
+          else
+            echo "::warning title=context_engine_eval::no metrics line found"
+          fi
+
+      - name: Upload eval log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: context-engine-eval
+          path: context-engine-eval.log
+          if-no-files-found: warn
