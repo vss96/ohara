@@ -12,7 +12,8 @@ Named after Ohara, the island in One Piece whose Tree of Knowledge held 5,000
 years of accumulated history — and whose archaeologists devoted their lives to
 reading it.
 
-**Status: v0.5.** Two MCP tools shipped:
+**Status: v0.6.** Two MCP tools shipped, plus throughput-prep
+plumbing and opt-in hardware acceleration on the indexer:
 
 - **`find_pattern`** — "how was X done before?" (semantic search over git
   history with three-lane retrieval pipeline + cross-encoder rerank,
@@ -21,13 +22,23 @@ reading it.
   (deterministic git-blame-based commit lookup for a file + line
   range; new in v0.5).
 
+v0.6 highlights: `--profile` per-phase wall-time JSON for the
+throughput baseline; `--embed-provider {auto,cpu,coreml,cuda}`
+auto-detect + `--resources {auto,conservative,aggressive}` policy;
+resume-crash fix in `commit::put` (DELETE-then-INSERT for
+`vec_commit` / `fts_commit`); a pinned progress bar that no longer
+scrolls off-screen when `tracing` log lines stream above it.
+
 History: v0.1 = Plan 1 foundation + `find_pattern`; v0.2 = `ohara init`
 post-commit hook + `--incremental` fast path; v0.3 = three-lane
 retrieval (vector KNN + FTS5 BM25 hunk-text + FTS5 BM25 symbol-name) →
 RRF → cross-encoder rerank (`bge-reranker-base`) → recency multiplier
 + AST sibling-merge chunking; v0.4 = Java 17/21 and Kotlin 1.9/2.0
 language support (sealed types, records, data classes, annotations
-preserved in `source_text` for Spring-friendly retrieval).
+preserved in `source_text` for Spring-friendly retrieval); v0.5 =
+`explain_change`; v0.5.1 = progress bar, abort-resume hardening, and
+`ohara update`. The full per-release breakdown lives in the
+[changelog](https://vss96.github.io/ohara/changelog.html).
 
 Languages: **Rust, Python, Java, Kotlin.** Class- and method-level
 annotations (`@RestController`, `@Service`, `@Component`,
@@ -61,6 +72,23 @@ script alongside the binary; either works.
 Produces two binaries under `target/release/`:
 - `ohara` — CLI for indexing and debugging
 - `ohara-mcp` — MCP server (stdio) for Claude Code
+
+### Build with hardware acceleration
+
+The pre-built cargo-dist binaries are CPU-only — same artifact for
+every host. To get hardware ONNX execution providers wired into the
+embedder, build from source with the matching cargo feature:
+
+    # Apple silicon — CoreML
+    cargo build --release --features coreml
+
+    # Linux x86_64 + NVIDIA — CUDA
+    cargo build --release --features cuda
+
+Pair the resulting binary with `ohara index --embed-provider coreml`
+(or `cuda`); see [`ohara index`](https://vss96.github.io/ohara/cli/index.html)
+for the full flag set. Default features stay CPU-only so the released
+binaries work everywhere out of the box.
 
 ## Quickstart
 
