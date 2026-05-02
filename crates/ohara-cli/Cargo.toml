@@ -31,5 +31,13 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[features]
+default = []
+# Pass-through to ohara-embed: enable hardware execution providers.
+# `cargo build --release --features coreml` (Apple Silicon) or
+# `cargo build --release --features cuda` (Linux x86_64 + NVIDIA).
+coreml = ["ohara-embed/coreml"]
+cuda = ["ohara-embed/cuda"]
+
 [dev-dependencies]
 tempfile = "3"

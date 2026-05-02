@@ -21,13 +21,11 @@ const DEFAULT_RERANKER_ID: &str = "bge-reranker-base";
 
 /// ONNX execution provider selector for the embedder + reranker.
 ///
-/// Plan 6 Task 3.1. Today only [`EmbedProvider::Cpu`] is supported in
-/// the shipped build because enabling CoreML / CUDA requires pulling
-/// `ort` in as a direct dep with its `coreml` / `cuda` feature flags
-/// (which in turn bring in platform-specific system libraries we
-/// haven't audited yet). The other arms are kept on the API so the
-/// CLI flag stays stable across the v0.6 series; flipping them on is
-/// a pure dependency / build-feature follow-up (no surface change).
+/// CoreML and CUDA are gated behind cargo features (`coreml` and
+/// `cuda` respectively). Building the binary without the feature and
+/// then asking for that provider returns an actionable error naming
+/// the build flag. The CLI surface (`--embed-provider {auto,cpu,
+/// coreml,cuda}`) stays stable across builds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum EmbedProvider {
     #[default]
@@ -53,17 +51,12 @@ impl FastEmbedProvider {
 
     /// Load BGE-small with the requested ONNX execution provider.
     ///
-    /// Currently CoreML / CUDA return an error explaining the build-time
-    /// dependency that needs to land before they can be enabled — see the
-    /// [`EmbedProvider`] doc-comment for context.
+    /// CoreML / CUDA are gated behind cargo features; without the
+    /// feature, the corresponding arm returns an actionable error.
     pub fn with_provider(provider: EmbedProvider) -> Result<Self> {
-        provider_unsupported_check(provider)?;
-        // `InitOptions` is `#[non_exhaustive]` in fastembed v4.9, so it cannot be
-        // constructed via struct-literal syntax from outside the crate. Use the
-        // builder API (`InitOptions::new(...).with_show_download_progress(...)`)
-        // which preserves the plan's intent: load BGE small with downloads silent.
         let opts =
             InitOptions::new(EmbeddingModel::BGESmallENV15).with_show_download_progress(false);
+        let opts = apply_provider_to_init(opts, provider)?;
         let model = TextEmbedding::try_new(opts)
             .context("loading BGE-small model (downloads ~80MB on first run)")?;
         Ok(Self {
@@ -74,25 +67,62 @@ impl FastEmbedProvider {
     }
 }
 
-/// Reject CoreML / CUDA at the boundary with a clear, single-source-of-truth
-/// error so both the embedder and the reranker fail the same way. Called by
-/// every `with_provider` constructor before any model loading begins.
-///
-/// When the `ort` direct-dep work lands this becomes a no-op (or grows a
-/// platform-availability check) and the existing error tests get retired.
-fn provider_unsupported_check(provider: EmbedProvider) -> Result<()> {
+/// Build the list of `ExecutionProviderDispatch`es to attach for the
+/// requested provider. Empty Vec = use ort's default CPU provider.
+/// Cargo-feature-gated: building without the relevant feature errors at
+/// the boundary with a message naming the missing build flag.
+fn execution_providers_for(
+    provider: EmbedProvider,
+) -> Result<Vec<fastembed::ExecutionProviderDispatch>> {
     match provider {
-        EmbedProvider::Cpu => Ok(()),
-        EmbedProvider::CoreMl => Err(anyhow!(
-            "embed-provider=coreml is not yet supported in this build \
-             (needs `ort` as a direct dep with the `coreml` feature; \
-             tracked under Plan 6 Task 3.1 follow-up)"
-        )),
-        EmbedProvider::Cuda => Err(anyhow!(
-            "embed-provider=cuda is not yet supported in this build \
-             (needs `ort` as a direct dep with the `cuda` feature; \
-             tracked under Plan 6 Task 3.1 follow-up)"
-        )),
+        EmbedProvider::Cpu => Ok(vec![]),
+        EmbedProvider::CoreMl => {
+            #[cfg(feature = "coreml")]
+            {
+                use ort::execution_providers::CoreMLExecutionProvider;
+                Ok(vec![CoreMLExecutionProvider::default().build()])
+            }
+            #[cfg(not(feature = "coreml"))]
+            Err(anyhow!(
+                "embed-provider=coreml is not enabled in this build. \
+                 Rebuild with `cargo build --release --features ohara-embed/coreml` \
+                 (Apple Silicon only — pulls in CoreML.framework at link time)."
+            ))
+        }
+        EmbedProvider::Cuda => {
+            #[cfg(feature = "cuda")]
+            {
+                use ort::execution_providers::CUDAExecutionProvider;
+                Ok(vec![CUDAExecutionProvider::default().build()])
+            }
+            #[cfg(not(feature = "cuda"))]
+            Err(anyhow!(
+                "embed-provider=cuda is not enabled in this build. \
+                 Rebuild with `cargo build --release --features ohara-embed/cuda` \
+                 (Linux x86_64 with NVIDIA GPU + CUDA toolkit at link time)."
+            ))
+        }
+    }
+}
+
+fn apply_provider_to_init(opts: InitOptions, provider: EmbedProvider) -> Result<InitOptions> {
+    let eps = execution_providers_for(provider)?;
+    if eps.is_empty() {
+        Ok(opts)
+    } else {
+        Ok(opts.with_execution_providers(eps))
+    }
+}
+
+fn apply_provider_to_rerank(
+    opts: RerankInitOptions,
+    provider: EmbedProvider,
+) -> Result<RerankInitOptions> {
+    let eps = execution_providers_for(provider)?;
+    if eps.is_empty() {
+        Ok(opts)
+    } else {
+        Ok(opts.with_execution_providers(eps))
     }
 }
 
@@ -145,12 +175,11 @@ impl FastEmbedReranker {
     }
 
     /// Load BGE-reranker-base with the requested ONNX execution provider.
-    /// Mirrors [`FastEmbedProvider::with_provider`] — see that doc-comment
-    /// for the current CoreML / CUDA support story.
+    /// Mirrors [`FastEmbedProvider::with_provider`].
     pub fn with_provider(provider: EmbedProvider) -> Result<Self> {
-        provider_unsupported_check(provider)?;
         let opts = RerankInitOptions::new(RerankerModel::BGERerankerBase)
             .with_show_download_progress(false);
+        let opts = apply_provider_to_rerank(opts, provider)?;
         let model = TextRerank::try_new(opts)
             .context("loading BGE-reranker-base (downloads ~110MB on first run)")?;
         Ok(Self {
@@ -262,33 +291,45 @@ mod tests {
     }
 
     #[test]
-    fn provider_check_accepts_cpu() {
-        // The default provider must always pass the boundary check, since
-        // it's what `FastEmbedProvider::new()` (and every existing call
-        // site) routes through.
-        provider_unsupported_check(EmbedProvider::Cpu).expect("cpu provider always supported");
+    fn provider_cpu_always_returns_empty_provider_list() {
+        // CPU = "use ort's default" = empty Vec, no extra providers.
+        let eps = execution_providers_for(EmbedProvider::Cpu).expect("cpu always supported");
+        assert!(eps.is_empty(), "CPU should not attach explicit providers");
     }
 
+    #[cfg(not(feature = "coreml"))]
     #[test]
-    fn provider_check_rejects_coreml_with_actionable_message() {
-        // Plan 6 Task 3.1: until we add `ort` as a direct dep with the
-        // `coreml` feature, the CoreML arm must fail loudly with a
-        // message that names the missing dependency so users + bug
-        // reports point at the right follow-up.
-        let err = provider_unsupported_check(EmbedProvider::CoreMl)
-            .expect_err("coreml unsupported in this build");
+    fn provider_coreml_without_feature_returns_actionable_message() {
+        let err = execution_providers_for(EmbedProvider::CoreMl)
+            .expect_err("coreml requires --features coreml");
         let s = err.to_string();
         assert!(s.contains("coreml"), "error should name the provider: {s}");
-        assert!(s.contains("ort"), "error should name the missing dep: {s}");
+        assert!(
+            s.contains("--features"),
+            "error should name the build flag: {s}"
+        );
     }
 
+    #[cfg(not(feature = "cuda"))]
     #[test]
-    fn provider_check_rejects_cuda_with_actionable_message() {
-        let err = provider_unsupported_check(EmbedProvider::Cuda)
-            .expect_err("cuda unsupported in this build");
+    fn provider_cuda_without_feature_returns_actionable_message() {
+        let err = execution_providers_for(EmbedProvider::Cuda)
+            .expect_err("cuda requires --features cuda");
         let s = err.to_string();
         assert!(s.contains("cuda"), "error should name the provider: {s}");
-        assert!(s.contains("ort"), "error should name the missing dep: {s}");
+        assert!(
+            s.contains("--features"),
+            "error should name the build flag: {s}"
+        );
+    }
+
+    #[cfg(feature = "coreml")]
+    #[test]
+    fn provider_coreml_with_feature_attaches_provider() {
+        // With the `coreml` feature on, the provider list is non-empty.
+        let eps = execution_providers_for(EmbedProvider::CoreMl)
+            .expect("coreml supported with feature on");
+        assert_eq!(eps.len(), 1, "CoreML should attach exactly one provider");
     }
 
     #[test]

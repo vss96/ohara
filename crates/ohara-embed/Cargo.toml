@@ -12,3 +12,16 @@ fastembed.workspace = true
 async-trait = "0.1"
 tokio = { workspace = true }
 tracing.workspace = true
+# Optional ONNX Runtime direct dep — only pulled in when a hardware
+# execution-provider feature is enabled. Pinned to fastembed 4.9's
+# transitive ort version so ExecutionProviderDispatch stays compatible.
+ort = { version = "=2.0.0-rc.9", optional = true }
+
+[features]
+default = []
+# Enable CoreML execution provider (Apple Silicon Neural Engine + GPU).
+# Requires CoreML.framework at build time — macOS-only.
+coreml = ["dep:ort", "ort/coreml"]
+# Enable CUDA execution provider. Requires CUDA toolkit at build time —
+# Linux x86_64 (and Windows) hosts with NVIDIA GPUs only.
+cuda = ["dep:ort", "ort/cuda"]
