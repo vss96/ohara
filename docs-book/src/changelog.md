@@ -4,6 +4,33 @@ User-facing release notes. The full commit log lives on
 [GitHub](https://github.com/vss96/ohara/commits/main); this page is
 the highlights.
 
+## v0.6.3 — Skip already-indexed commits on resume
+
+Resume on a merge-heavy history no longer re-embeds commits that are
+already in the index. Diagnosed on a live QuestDB resume: 273 commits
+with existing `commit_record` rows were re-walked and re-embedded
+because the single-SHA watermark only excludes the strict ancestor
+chain, missing anything reachable via a feature-branch merge or
+history rewrite. That cost ~14 minutes of CPU per resume cycle.
+
+- **New `Storage::commit_exists` PK lookup.** Sub-millisecond per
+  commit via `SELECT 1 FROM commit_record WHERE sha = ? LIMIT 1`. On
+  cold-index runs the added cost is ~0.1 s across thousands of
+  commits — well under measurement noise.
+- **Indexer short-circuit.** The per-commit loop in `Indexer::run`
+  now consults `commit_exists` before any hunk extraction or
+  embedder work and `continue`s on a hit, with a `tracing::debug!`
+  line for observability.
+- **Watermark advances through skip stretches.** A Ctrl-C right after
+  a long all-skip stretch leaves the watermark at the most recently
+  walked sha, so the next resume doesn't have to re-iterate them
+  either.
+- **No schema migration.** The lookup hits the existing
+  `commit_record.sha` primary-key index.
+
+Design notes:
+[`docs/superpowers/specs/2026-05-02-ohara-v0.6.3-resume-skip-rfc.md`](https://github.com/vss96/ohara/blob/main/docs/superpowers/specs/2026-05-02-ohara-v0.6.3-resume-skip-rfc.md).
+
 ## v0.6.2 — Per-host distribution: CoreML in the Apple Silicon binary
 
 The released binary on `aarch64-apple-darwin` now bundles the CoreML
