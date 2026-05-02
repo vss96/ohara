@@ -188,6 +188,9 @@ mod tests {
         async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> crate::Result<()> {
             Ok(())
         }
+        async fn commit_exists(&self, _: &str) -> crate::Result<bool> {
+            unreachable!("compute_index_status should not exercise commit_exists")
+        }
         async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> crate::Result<()> {
             Ok(())
         }

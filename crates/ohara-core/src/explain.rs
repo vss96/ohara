@@ -361,6 +361,9 @@ mod tests {
         async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> Result<()> {
             Ok(())
         }
+        async fn commit_exists(&self, _: &str) -> Result<bool> {
+            unreachable!("explain orchestrator should not exercise commit_exists")
+        }
         async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> Result<()> {
             Ok(())
         }

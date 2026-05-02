@@ -73,6 +73,12 @@ impl Storage for SqliteStorage {
         let rec = record.clone();
         with_conn(&self.pool, move |c| crate::tables::commit::put(c, &rec)).await
     }
+
+    async fn commit_exists(&self, sha: &str) -> CoreResult<bool> {
+        // Plan 9 / Task 1.1 placeholder: real PK lookup wired in Task 1.2.
+        let _ = sha;
+        Ok(false)
+    }
     async fn put_hunks(&self, _repo_id: &RepoId, records: &[HunkRecord]) -> CoreResult<()> {
         let recs = records.to_vec();
         with_conn(&self.pool, move |c| crate::tables::hunk::put_many(c, &recs)).await

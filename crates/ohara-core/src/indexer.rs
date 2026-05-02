@@ -310,6 +310,7 @@ mod phase_timing_tests {
     use crate::query::IndexStatus;
     use crate::types::{ChangeKind, CommitMeta, Hunk, RepoId, Symbol};
     use async_trait::async_trait;
+    use std::collections::HashSet;
     use std::sync::Mutex;
 
     struct FakeCommitSource {
@@ -368,6 +369,26 @@ mod phase_timing_tests {
     struct FakeStorage {
         write_sleep: std::time::Duration,
         last_indexed: Mutex<Option<String>>,
+        /// Plan 9: SHAs that already have a `commit_record` row, so the
+        /// indexer's resume short-circuit can ask "did we index this
+        /// already?" via `commit_exists`. `put_commit` adds to the set on
+        /// the write path so end-to-end tests don't have to pre-seed.
+        seen_commits: Mutex<HashSet<String>>,
+    }
+
+    impl FakeStorage {
+        fn new(write_sleep: std::time::Duration) -> Self {
+            Self {
+                write_sleep,
+                last_indexed: Mutex::new(None),
+                seen_commits: Mutex::new(HashSet::new()),
+            }
+        }
+
+        fn with_seen<I: IntoIterator<Item = String>>(self, shas: I) -> Self {
+            self.seen_commits.lock().unwrap().extend(shas);
+            self
+        }
     }
 
     #[async_trait]
@@ -386,9 +407,16 @@ mod phase_timing_tests {
             *self.last_indexed.lock().unwrap() = Some(sha.to_string());
             Ok(())
         }
-        async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> Result<()> {
+        async fn put_commit(&self, _: &RepoId, record: &CommitRecord) -> Result<()> {
             std::thread::sleep(self.write_sleep);
+            self.seen_commits
+                .lock()
+                .unwrap()
+                .insert(record.meta.commit_sha.clone());
             Ok(())
+        }
+        async fn commit_exists(&self, sha: &str) -> Result<bool> {
+            Ok(self.seen_commits.lock().unwrap().contains(sha))
         }
         async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> Result<()> {
             std::thread::sleep(self.write_sleep);
@@ -478,10 +506,7 @@ mod phase_timing_tests {
         // PhaseTimings field is non-zero — the contract from v0.6
         // Plan 6 Task 0.1.
         let sleep = std::time::Duration::from_millis(2);
-        let storage = std::sync::Arc::new(FakeStorage {
-            write_sleep: sleep,
-            last_indexed: Mutex::new(None),
-        });
+        let storage = std::sync::Arc::new(FakeStorage::new(sleep));
         let embedder = std::sync::Arc::new(FakeEmbedder { sleep });
 
         let commit_source = FakeCommitSource {
@@ -545,10 +570,7 @@ mod phase_timing_tests {
         // Replaces the previous `.expect("non-empty")` panic with a
         // typed OhraError::Embedding so a buggy embedder surfaces as a
         // clean error to the caller instead of crashing the indexer.
-        let storage = std::sync::Arc::new(FakeStorage {
-            write_sleep: std::time::Duration::from_millis(0),
-            last_indexed: Mutex::new(None),
-        });
+        let storage = std::sync::Arc::new(FakeStorage::new(std::time::Duration::from_millis(0)));
         let embedder = std::sync::Arc::new(EmptyEmbedder);
 
         let commit_source = FakeCommitSource {
@@ -576,5 +598,29 @@ mod phase_timing_tests {
             }
             other => panic!("expected OhraError::Embedding, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn commit_exists_returns_true_for_seeded_sha_and_false_otherwise() {
+        // Plan 9 Task 1.1: lock the trait shape — pre-seed the mock with
+        // two SHAs (mimicking commits whose `commit_record` row was
+        // written on a prior run) and verify the per-SHA lookup answers
+        // membership cleanly. Drives the indexer's resume short-circuit
+        // added in Plan 9 Task 2.1.
+        let storage = FakeStorage::new(std::time::Duration::from_millis(0))
+            .with_seen(["alpha".to_string(), "beta".to_string()]);
+
+        assert!(
+            storage.commit_exists("alpha").await.unwrap(),
+            "seeded sha must report present"
+        );
+        assert!(
+            storage.commit_exists("beta").await.unwrap(),
+            "seeded sha must report present"
+        );
+        assert!(
+            !storage.commit_exists("gamma").await.unwrap(),
+            "unseen sha must report absent"
+        );
     }
 }

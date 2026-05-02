@@ -58,6 +58,18 @@ pub trait Storage: Send + Sync {
     /// `record.meta.commit_sha` (INSERT OR REPLACE).
     async fn put_commit(&self, repo_id: &RepoId, record: &CommitRecord) -> Result<()>;
 
+    /// Cheap "is this commit already indexed?" check used by the indexer's
+    /// per-commit short-circuit on resume.
+    ///
+    /// The watermark only excludes a commit and its strict ancestor chain
+    /// (`git2::Revwalk::hide`). Commits reachable via a non-watermark-ancestor
+    /// path — merge from a feature branch, octopus merge, history rewrite —
+    /// would otherwise be re-walked and re-embedded even though their
+    /// `commit_record` row already exists. Implementations should answer
+    /// from the primary-key index on `commit_record.sha` so this stays
+    /// sub-millisecond per commit. See plan-9 / RFC v0.6.3.
+    async fn commit_exists(&self, sha: &str) -> Result<bool>;
+
     /// Persist a batch of hunks with their diff embeddings. Idempotent
     /// at the (commit_sha, file_path) grain — re-calling with the same
     /// hunk replaces the row rather than appending a duplicate.
