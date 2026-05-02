@@ -47,6 +47,22 @@ pub fn put(c: &mut Connection, record: &CommitRecord) -> Result<()> {
     Ok(())
 }
 
+/// Cheap "is this commit already indexed?" PK lookup used by the
+/// indexer's resume short-circuit (plan-9 / RFC v0.6.3). Returns true
+/// when `commit_record.sha = ?1` exists. The lookup hits the primary-key
+/// index, so cost is sub-millisecond per call — acceptable on cold
+/// indexes too (a 5,800-commit walk pays ~0.1 s in PK lookups).
+pub fn commit_exists(c: &Connection, sha: &str) -> Result<bool> {
+    let found: Option<i64> = c
+        .query_row(
+            "SELECT 1 FROM commit_record WHERE sha = ?1 LIMIT 1",
+            params![sha],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
+}
+
 /// Fetch a single commit's metadata by SHA. Returns `Ok(None)` if the
 /// SHA isn't present in `commit_record` (e.g., the commit is older than
 /// the local index watermark). Used by the `explain_change` orchestrator

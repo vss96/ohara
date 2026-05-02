@@ -75,9 +75,11 @@ impl Storage for SqliteStorage {
     }
 
     async fn commit_exists(&self, sha: &str) -> CoreResult<bool> {
-        // Plan 9 / Task 1.1 placeholder: real PK lookup wired in Task 1.2.
-        let _ = sha;
-        Ok(false)
+        let sha = sha.to_string();
+        with_conn(&self.pool, move |c| {
+            crate::tables::commit::commit_exists(c, &sha)
+        })
+        .await
     }
     async fn put_hunks(&self, _repo_id: &RepoId, records: &[HunkRecord]) -> CoreResult<()> {
         let recs = records.to_vec();
@@ -911,6 +913,36 @@ mod tests {
             msg.contains("storage error: query:"),
             "expected a `query:`-stage Storage error, got: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn commit_exists_reports_membership_after_put() {
+        // Plan 9 Task 1.2: PK lookup via commit_exists must answer
+        // "true" for SHAs we've put_commit'd and "false" for any other
+        // SHA. Drives the indexer's resume short-circuit (Task 2.1).
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        for sha in &["alpha", "beta"] {
+            let cm = CommitMeta {
+                commit_sha: (*sha).into(),
+                parent_sha: None,
+                is_merge: false,
+                author: None,
+                ts: 1,
+                message: format!("commit {sha}"),
+            };
+            s.put_commit(
+                &id,
+                &CommitRecord {
+                    meta: cm,
+                    message_emb: vec![0.0; 384],
+                },
+            )
+            .await
+            .unwrap();
+        }
+        assert!(s.commit_exists("alpha").await.unwrap());
+        assert!(s.commit_exists("beta").await.unwrap());
+        assert!(!s.commit_exists("gamma-never-put").await.unwrap());
     }
 
     #[tokio::test]
