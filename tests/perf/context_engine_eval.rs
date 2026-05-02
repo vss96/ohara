@@ -35,6 +35,11 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Exact rerun command for failure messages — kept as a constant so
+/// the assertion text and the per-failure dump stay in sync.
+const RERUN_CMD: &str =
+    "cargo test -p ohara-perf-tests -- --ignored context_engine_eval --nocapture";
+
 /// One row of `golden.jsonl`. Fields mirror the schema documented in
 /// `tests/perf/README.md` and `fixtures/context_engine_eval/README.md`.
 #[derive(Debug, Deserialize)]
@@ -279,9 +284,7 @@ fn print_failure_dump(results: &[CaseResult], summary: &EvalSummary, cases: &[Go
             );
         }
     }
-    eprintln!(
-        "\nrerun:\n  cargo test -p ohara-perf-tests -- --ignored context_engine_eval --nocapture\n"
-    );
+    eprintln!("\nrerun:\n  {RERUN_CMD}\n");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -397,22 +400,24 @@ async fn context_engine_eval_passes_thresholds() -> Result<()> {
 
     let max_ms = results.iter().map(|r| r.elapsed_ms).max().unwrap_or(0);
 
-    // Hard contracts (Plan 10 Task 2.1 Step 3).
+    // Hard contracts (Plan 10 Task 2.1 Step 3). Each failure message
+    // includes the rerun command so a CI log truncated to the assertion
+    // line still tells operators how to reproduce locally.
     assert!(
         (summary.recall_at_5 - 1.0).abs() < f64::EPSILON,
-        "recall_at_5 must be 1.0; got {} (failed_ids={:?})",
+        "recall_at_5 must be 1.0; got {} (failed_ids={:?}). Rerun: {RERUN_CMD}",
         summary.recall_at_5,
-        summary.failed_ids
+        summary.failed_ids,
     );
     assert!(
         summary.mrr >= 0.80,
-        "mrr must be >= 0.80; got {} (failed_ids={:?})",
+        "mrr must be >= 0.80; got {} (failed_ids={:?}). Rerun: {RERUN_CMD}",
         summary.mrr,
-        summary.failed_ids
+        summary.failed_ids,
     );
     assert!(
         max_ms < 2000,
-        "individual query exceeded the 2 s smoke threshold: {max_ms} ms"
+        "individual query exceeded the 2 s smoke threshold: {max_ms} ms. Rerun: {RERUN_CMD}",
     );
 
     Ok(())
