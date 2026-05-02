@@ -38,6 +38,13 @@ path = "embed_provider_paired.rs"
 name = "coreml_leak_repro"
 path = "coreml_leak_repro.rs"
 
+[[test]]
+# Plan 10 Task 2.1 — context-engine retrieval-quality runner. `#[ignore]`'d;
+# opt in via:
+#   cargo test -p ohara-perf-tests -- --ignored context_engine_eval --nocapture
+name = "context_engine_eval"
+path = "context_engine_eval.rs"
+
 [dev-dependencies]
 ohara-cli = { path = "../../crates/ohara-cli" }
 ohara-core = { path = "../../crates/ohara-core" }
@@ -45,6 +52,8 @@ ohara-embed = { path = "../../crates/ohara-embed" }
 ohara-storage = { path = "../../crates/ohara-storage" }
 anyhow.workspace = true
 chrono.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
 tempfile = "3"
 tokio = { workspace = true }
 tracing.workspace = true
