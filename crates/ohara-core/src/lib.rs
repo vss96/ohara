@@ -8,6 +8,7 @@ pub mod diff_text;
 pub mod embed;
 pub mod error;
 pub mod explain;
+pub mod index_metadata;
 pub mod indexer;
 pub mod paths;
 pub mod query;
@@ -19,6 +20,7 @@ pub use diff_text::{count_lines, truncate_diff, DIFF_EXCERPT_MAX_LINES};
 pub use embed::EmbeddingProvider;
 pub use error::{OhraError, Result};
 pub use explain::{BlameRange, BlameSource, ExplainHit, ExplainMeta, ExplainQuery};
+pub use index_metadata::{CompatibilityStatus, RuntimeIndexMetadata, StoredIndexMetadata};
 pub use indexer::{
     CommitSource, Indexer, IndexerReport, NullProgress, PhaseTimings, ProgressSink, SymbolSource,
 };
