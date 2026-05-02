@@ -74,6 +74,8 @@ async fn quest_db_baseline_under_threshold() {
         path: fixture,
         incremental: false,
         force: false,
+        rebuild: false,
+        yes: false,
         commit_batch: Some(512),
         threads: Some(0),
         no_progress: true,

@@ -42,6 +42,8 @@ async fn explain_e2e_returns_retry_commit_for_retry_lines() {
         path: repo.clone(),
         incremental: false,
         force: false,
+        rebuild: false,
+        yes: false,
         commit_batch: Some(512),
         threads: Some(0),
         no_progress: true,

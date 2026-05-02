@@ -73,6 +73,8 @@ async fn run_retry_pattern(arg: ProviderArg) -> RetryResult {
         path: repo.clone(),
         incremental: false,
         force: false,
+        rebuild: false,
+        yes: false,
         commit_batch: Some(512),
         threads: Some(0),
         no_progress: true,

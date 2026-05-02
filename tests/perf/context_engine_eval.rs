@@ -305,6 +305,8 @@ async fn context_engine_eval_passes_thresholds() -> Result<()> {
         path: fixture.clone(),
         incremental: false,
         force: false,
+        rebuild: false,
+        yes: false,
         commit_batch: Some(64),
         threads: Some(0),
         no_progress: true,

@@ -1,8 +1,8 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Args as ClapArgs;
 use ohara_core::query::CommitsBehind;
 use ohara_core::{Indexer, IndexerReport, PhaseTimings, Storage};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::provider::{
@@ -26,6 +26,21 @@ pub struct Args {
     /// (force wins if both are set).
     #[arg(long)]
     pub force: bool,
+    /// Plan 13: delete the existing index for this repo and rebuild
+    /// from scratch. Stronger than `--force` — `--force` only refreshes
+    /// HEAD-symbol rows, while `--rebuild` drops the entire commit /
+    /// hunk / vector / FTS state. Used when the binary's embedder
+    /// dimension or model differs from what the index was built with
+    /// (`ohara status` reports `compatibility: needs rebuild`).
+    /// Refuses to run unless `--yes` is also set, to keep an
+    /// accidental `--rebuild` from nuking a multi-hour index pass.
+    #[arg(long, conflicts_with_all = ["incremental", "force"])]
+    pub rebuild: bool,
+    /// Confirm a destructive operation (currently only `--rebuild`).
+    /// Without this flag, `--rebuild` errors out with a one-line
+    /// description of what would be deleted.
+    #[arg(long, requires = "rebuild")]
+    pub yes: bool,
     /// Number of commits to batch per storage transaction. Smaller =
     /// less peak RAM and more frequent fsyncs; larger = faster but
     /// uses more memory. When unset, `--resources` picks a value based
@@ -86,6 +101,47 @@ pub fn merge_with_resource_plan(
 /// driving a real index pass.
 pub fn phase_timings_json(pt: &PhaseTimings) -> String {
     serde_json::to_string(pt).expect("PhaseTimings serializes via derive(Serialize)")
+}
+
+/// Plan 13 Task 3.3 Step 2: refuse `--rebuild` unless the index DB
+/// path resolves under `OHARA_HOME`. Defensive belt against an edge
+/// case where the path resolver is replaced or `OHARA_HOME` is later
+/// altered to point somewhere unexpected.
+pub fn assert_rebuild_safe(db_path: &Path, ohara_home: &Path) -> Result<()> {
+    if !db_path.starts_with(ohara_home) {
+        bail!(
+            "refusing to rebuild: index DB path {} is not inside OHARA_HOME {}",
+            db_path.display(),
+            ohara_home.display(),
+        );
+    }
+    Ok(())
+}
+
+/// Plan 13 Task 3.3 Step 1: delete the index DB and its WAL / SHM
+/// sidecars. Each remove is best-effort — sidecars may legitimately
+/// not exist (a clean shutdown closes the WAL); only a permission /
+/// I/O error on the main DB is surfaced.
+pub fn delete_index_files(db_path: &Path) -> Result<()> {
+    if db_path.exists() {
+        std::fs::remove_file(db_path)
+            .map_err(|e| anyhow::anyhow!("failed to delete index DB {}: {e}", db_path.display()))?;
+    }
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = db_path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        let sidecar = PathBuf::from(sidecar);
+        // Sidecars are advisory; ignore "not found" but surface other I/O.
+        if let Err(e) = std::fs::remove_file(&sidecar) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(anyhow::anyhow!(
+                    "failed to delete sqlite sidecar {}: {e}",
+                    sidecar.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Count commits the upcoming `index` run would walk, then resolve the
@@ -151,6 +207,26 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
     let (repo_id, canonical, first_commit) = super::resolve_repo_id(&args.path)?;
     let db_path = super::index_db_path(&repo_id)?;
     tracing::info!(repo = %canonical.display(), id = repo_id.as_str(), db = %db_path.display(), "indexing");
+
+    // Plan 13: --rebuild path. Refuse without --yes; verify the DB
+    // path is under OHARA_HOME (defense-in-depth — index_db_path
+    // already builds it that way, but the assertion catches any
+    // future resolver change); delete the DB + its WAL / SHM
+    // sidecars; then fall through to the normal index flow, which
+    // will re-run migrations and rebuild every row from scratch.
+    if args.rebuild {
+        if !args.yes {
+            bail!(
+                "refusing to --rebuild without --yes: would delete {}.\n\
+                 Re-run with `--rebuild --yes` to confirm.",
+                db_path.display(),
+            );
+        }
+        let home = ohara_core::paths::ohara_home()?;
+        assert_rebuild_safe(&db_path, &home)?;
+        tracing::warn!(db = %db_path.display(), "rebuilding: deleting existing index DB");
+        delete_index_files(&db_path)?;
+    }
 
     // Resolve the resource plan up front so the chosen values are
     // logged once and re-used everywhere downstream.
@@ -272,6 +348,57 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         println!("{}", phase_timings_json(&report.phase_timings));
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod rebuild_safety_tests {
+    use super::*;
+
+    #[test]
+    fn assert_rebuild_safe_passes_for_path_under_ohara_home() {
+        let home = PathBuf::from("/tmp/some-ohara-home");
+        let db = home.join("indexes/abc/index.sqlite");
+        assert_rebuild_safe(&db, &home).expect("path under home must be safe");
+    }
+
+    #[test]
+    fn assert_rebuild_safe_rejects_path_outside_ohara_home() {
+        // Defense-in-depth: even if a future resolver returns a path
+        // outside OHARA_HOME, --rebuild must refuse rather than
+        // silently delete.
+        let home = PathBuf::from("/tmp/ohara-home");
+        let db = PathBuf::from("/etc/passwd");
+        let err = assert_rebuild_safe(&db, &home).expect_err("must reject foreign path");
+        assert!(
+            err.to_string().contains("not inside OHARA_HOME"),
+            "rejection message should name the constraint: {err}"
+        );
+    }
+
+    #[test]
+    fn delete_index_files_removes_main_db_and_present_sidecars() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("ix.sqlite");
+        let wal = dir.path().join("ix.sqlite-wal");
+        let shm = dir.path().join("ix.sqlite-shm");
+        std::fs::write(&db, b"db").unwrap();
+        std::fs::write(&wal, b"wal").unwrap();
+        std::fs::write(&shm, b"shm").unwrap();
+        delete_index_files(&db).expect("delete");
+        assert!(!db.exists(), "main db must be gone");
+        assert!(!wal.exists(), "wal sidecar must be gone");
+        assert!(!shm.exists(), "shm sidecar must be gone");
+    }
+
+    #[test]
+    fn delete_index_files_is_no_op_when_nothing_to_delete() {
+        // Sidecars are advisory — a missing -wal / -shm is not an
+        // error. The main DB also being absent is fine for the case
+        // where --rebuild runs before any successful index pass.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("never-existed.sqlite");
+        delete_index_files(&db).expect("missing files must be tolerated");
+    }
 }
 
 #[cfg(test)]

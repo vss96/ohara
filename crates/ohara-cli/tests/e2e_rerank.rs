@@ -73,6 +73,8 @@ async fn cross_encoder_picks_better_message_among_near_duplicates() {
         path: repo_dir.path().to_path_buf(),
         incremental: false,
         force: false,
+        rebuild: false,
+        yes: false,
         commit_batch: Some(512),
         threads: Some(0),
         no_progress: true,

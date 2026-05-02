@@ -8,9 +8,9 @@ for the full state machine.
 ## Usage
 
 ```
-ohara index [PATH] [--incremental] [--force] [--commit-batch N] \
-            [--threads N] [--no-progress] [--profile] \
-            [--embed-provider {auto,cpu,coreml,cuda}] \
+ohara index [PATH] [--incremental] [--force] [--rebuild --yes] \
+            [--commit-batch N] [--threads N] [--no-progress] \
+            [--profile] [--embed-provider {auto,cpu,coreml,cuda}] \
             [--resources {auto,conservative,aggressive}]
 ```
 
@@ -19,6 +19,8 @@ ohara index [PATH] [--incremental] [--force] [--commit-batch N] \
 | `PATH` (positional) | `.` | Path to the repo. |
 | `--incremental` | off | Skip the indexer (and embedder init) when the storage watermark already points at HEAD. Used by the post-commit hook to make no-op re-indexes nearly free. |
 | `--force` | off | Clear existing HEAD symbol rows and re-extract from scratch. Used after upgrades that change the AST chunker. Wins over `--incremental` if both are set; commit/hunk history is untouched. |
+| `--rebuild` | off | **Destructive.** Delete the entire index for this repo and rebuild from scratch. Stronger than `--force` (which only refreshes HEAD-symbol rows). Used when `ohara status` reports `compatibility: needs rebuild` (the binary's embedder dimension or model differs from what the index was built with). Requires `--yes` to confirm; conflicts with `--incremental` and `--force`. |
+| `--yes` | off | Confirm a destructive operation. Currently only valid alongside `--rebuild`. |
 | `--commit-batch` | from `--resources` | Commits per storage transaction. Smaller = less peak RAM and more frequent fsyncs; larger = faster but uses more memory. When unset, `--resources` picks a value from host core count. |
 | `--threads` | from `--resources` | Cap the embedder's ONNX runtime to this many threads (`0` = let `ort` decide, typically CPU count). When unset, `--resources` picks a value from host core count. |
 | `--no-progress` | off | Disable the progress bar even when stderr is a TTY. Structured `tracing::info!` events still fire every 100 commits. |
@@ -45,6 +47,13 @@ changed the chunker:
 
 ```sh
 ohara index --force
+```
+
+Full rebuild after an embedder/dimension change (`status` says
+`needs rebuild`):
+
+```sh
+ohara index --rebuild --yes
 ```
 
 Cap embedder threads on a shared box, larger batches for speed:
