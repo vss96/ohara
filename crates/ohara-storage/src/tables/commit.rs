@@ -7,6 +7,21 @@ use crate::codec::vec_codec;
 
 pub fn put(c: &mut Connection, record: &CommitRecord) -> Result<()> {
     let tx = c.transaction()?;
+    // Resume safety: clear sqlite-vec + FTS5 mirrors first, then INSERT.
+    // sqlite-vec's vec0 virtual tables do NOT honor `INSERT OR REPLACE`
+    // — re-inserting the same `commit_sha` raises "UNIQUE constraint
+    // failed on vec_commit primary key" even with OR REPLACE. So we
+    // explicitly DELETE-then-INSERT, matching the pattern hunk::put_many
+    // already uses for vec_hunk + fts_hunk_text. commit_record is a
+    // regular table so OR REPLACE there is fine.
+    tx.execute(
+        "DELETE FROM vec_commit WHERE commit_sha = ?1",
+        params![&record.meta.commit_sha],
+    )?;
+    tx.execute(
+        "DELETE FROM fts_commit WHERE sha = ?1",
+        params![&record.meta.commit_sha],
+    )?;
     tx.execute(
         "INSERT OR REPLACE INTO commit_record (sha, parent_sha, is_merge, ts, author, message)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -21,11 +36,11 @@ pub fn put(c: &mut Connection, record: &CommitRecord) -> Result<()> {
     )?;
     let bytes = vec_codec::vec_to_bytes(&record.message_emb);
     tx.execute(
-        "INSERT OR REPLACE INTO vec_commit (commit_sha, message_emb) VALUES (?1, ?2)",
+        "INSERT INTO vec_commit (commit_sha, message_emb) VALUES (?1, ?2)",
         params![&record.meta.commit_sha, bytes],
     )?;
     tx.execute(
-        "INSERT OR REPLACE INTO fts_commit (sha, message) VALUES (?1, ?2)",
+        "INSERT INTO fts_commit (sha, message) VALUES (?1, ?2)",
         params![&record.meta.commit_sha, &record.meta.message],
     )?;
     tx.commit()?;

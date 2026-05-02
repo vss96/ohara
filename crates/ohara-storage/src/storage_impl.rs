@@ -261,6 +261,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn put_commit_is_idempotent_under_resume() {
+        // Resume safety: re-running put_commit on the same SHA after a
+        // mid-walk abort must not raise "UNIQUE constraint failed on
+        // vec_commit primary key" (sqlite-vec's vec0 virtual tables don't
+        // honor INSERT OR REPLACE — we DELETE-then-INSERT instead).
+        let dir = tempfile::tempdir().unwrap();
+        let s = SqliteStorage::open(dir.path().join("i.sqlite"))
+            .await
+            .unwrap();
+        let id = RepoId::from_parts("first", "/repo");
+        s.open_repo(&id, "/repo", "first").await.unwrap();
+
+        let cm = CommitMeta {
+            commit_sha: "dup".into(),
+            parent_sha: None,
+            is_merge: false,
+            author: None,
+            ts: 1,
+            message: "first".into(),
+        };
+        // First put — populates commit_record + vec_commit + fts_commit.
+        s.put_commit(
+            &id,
+            &CommitRecord {
+                meta: cm.clone(),
+                message_emb: vec![0.1; 384],
+            },
+        )
+        .await
+        .unwrap();
+
+        // Second put with the SAME sha — must succeed (the resume case).
+        // Different message + embedding to verify replace-semantics.
+        let cm2 = CommitMeta {
+            message: "second".into(),
+            ..cm
+        };
+        s.put_commit(
+            &id,
+            &CommitRecord {
+                meta: cm2,
+                message_emb: vec![0.9; 384],
+            },
+        )
+        .await
+        .unwrap();
+
+        let pool = s.pool().clone();
+        // Exactly one row in each table — replace, not duplicate.
+        let n_commit: i64 = pool
+            .get()
+            .await
+            .unwrap()
+            .interact(|c| c.query_row("SELECT count(*) FROM commit_record", [], |r| r.get(0)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(n_commit, 1, "commit_record must dedupe by sha");
+        let n_vec: i64 = pool
+            .get()
+            .await
+            .unwrap()
+            .interact(|c| c.query_row("SELECT count(*) FROM vec_commit", [], |r| r.get(0)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(n_vec, 1, "vec_commit must dedupe by sha (sqlite-vec quirk)");
+        let n_fts: i64 = pool
+            .get()
+            .await
+            .unwrap()
+            .interact(|c| c.query_row("SELECT count(*) FROM fts_commit", [], |r| r.get(0)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(n_fts, 1, "fts_commit must dedupe by sha");
+
+        // Replace semantics: the second put's message wins.
+        let msg: String = pool
+            .get()
+            .await
+            .unwrap()
+            .interact(|c| {
+                c.query_row(
+                    "SELECT message FROM commit_record WHERE sha = 'dup'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(msg, "second");
+    }
+
+    #[tokio::test]
     async fn put_commit_embedding_round_trips_through_sqlite() {
         let dir = tempfile::tempdir().unwrap();
         let s = SqliteStorage::open(dir.path().join("i.sqlite"))
