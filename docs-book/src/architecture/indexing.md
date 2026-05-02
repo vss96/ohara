@@ -84,6 +84,30 @@ stdout after the run. Captures per-phase wall-time
 throughput baseline; see
 `docs/perf/v0.6-baseline.md` for the template.
 
+## v0.6 indexer knobs
+
+A few v0.6 additions worth singling out — the full flag reference is
+on [`ohara index`](../cli/index.md):
+
+- **`--embed-provider {auto,cpu,coreml,cuda}`.** Picks the ONNX
+  execution provider for the embedder. `auto` (default) chooses
+  CoreML on Apple silicon, CUDA when `CUDA_VISIBLE_DEVICES` is set,
+  and CPU otherwise. CoreML / CUDA require a feature-flagged
+  build — see [Install → hardware acceleration](../install.md#build-with-hardware-acceleration);
+  the published cargo-dist binaries are CPU-only.
+- **`--resources {auto,conservative,aggressive}`.** A small lookup
+  table that picks reasonable `--commit-batch` / `--threads` /
+  `--embed-provider` defaults from the host's logical core count.
+  Explicit flags always override the picked plan, so
+  `--resources aggressive --commit-batch 256` is meaningful.
+- **`--profile`.** Already covered above — emits the per-phase
+  `PhaseTimings` JSON used by the throughput baseline.
+- **Pinned progress bar.** The CLI now wires
+  [`tracing-indicatif`](https://github.com/emersonford/tracing-indicatif)
+  into its `tracing` subscriber, so the indexer's progress bar stays
+  pinned to the bottom of the terminal while `tracing::info!` events
+  stream above it. No more "log line scrolled the bar away."
+
 ## Known limits
 
 `ohara index` is currently single-process. On large polyglot

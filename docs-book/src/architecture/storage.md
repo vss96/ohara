@@ -69,6 +69,16 @@ Schema version (`repo.schema_version`) is bumped when migrations land.
 A v0.3 binary on a v0.2 index runs migration V2; a v0.2 binary on a
 v0.3 index aborts with a clean error rather than risking a downgrade.
 
+## Source layout
+
+Storage code lives under `crates/ohara-storage/src/`. As of v0.6 the
+crate is split into two submodules: `tables/` (one file per table —
+`commit`, `hunk`, `symbol`, `repo`, `blob_cache`, plus the FTS / vec
+mirror tables) and `codec/` (row codecs like `change_kind` and
+`file_path` interning, factored out of the table modules so the
+mapping is shared and unit-tested in one place). Internal-only — no
+public API change.
+
 ## Why SQLite
 
 A single static binary that survives `cp index.sqlite` and `rsync`

@@ -53,6 +53,10 @@ The chunker also records sibling-symbol names in a JSON-encoded
 `fts_symbol_name` BM25 lane, so a query for "X" matches not just
 symbols literally named X but symbols that share a parent with one.
 
+As of v0.6 the per-language extractors live under
+`crates/ohara-parse/src/languages/` (one module per language) — same
+behavior, tighter directory tree.
+
 ## Future languages
 
 Tracked on the [Roadmap](../roadmap.md). New languages are mostly a

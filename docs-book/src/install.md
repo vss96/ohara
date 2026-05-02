@@ -50,6 +50,28 @@ cargo build --release --workspace
 
 Both binaries land under `target/release/`.
 
+### Build with hardware acceleration
+
+The cargo-dist installer publishes a single CPU-only binary per
+platform — same artifact for every host so the installer story stays
+simple. To wire hardware ONNX execution providers into the embedder,
+build from source with the matching cargo feature:
+
+```sh
+# Apple silicon — CoreML
+cargo build --release --features coreml
+
+# Linux x86_64 + NVIDIA — CUDA
+cargo build --release --features cuda
+```
+
+The features flow through `ohara-embed` to both `ohara` and
+`ohara-mcp`. Pair the resulting binary with
+[`ohara index --embed-provider coreml`](./cli/index.md) (or `cuda`) —
+or leave it on the default `auto`, which picks CoreML on Apple
+silicon, CUDA when `CUDA_VISIBLE_DEVICES` is set, and CPU otherwise.
+Default features stay CPU-only.
+
 ## Updating
 
 The CLI can self-update in place:
