@@ -20,7 +20,10 @@ use tokio::sync::Mutex;
 /// (plan 13) so an old index built with a different model triggers a
 /// rebuild prompt.
 pub const DEFAULT_MODEL_ID: &str = "bge-small-en-v1.5";
-const DEFAULT_DIM: usize = 384;
+/// Vector dimension produced by `DEFAULT_MODEL_ID`. Exposed so the
+/// `ohara status` command can build the runtime compatibility
+/// expectation without loading the embedder (plan 13 Task 3.1).
+pub const DEFAULT_DIM: usize = 384;
 /// Stable id of the default cross-encoder reranker model. Recorded in
 /// `index_metadata` so a reranker swap triggers a refresh prompt.
 pub const DEFAULT_RERANKER_ID: &str = "bge-reranker-base";
