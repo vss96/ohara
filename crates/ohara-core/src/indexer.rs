@@ -114,6 +114,25 @@ impl Indexer {
 
         for chunk in commits.chunks(self.batch_commits) {
             for cm in chunk {
+                // Plan 9: resume short-circuit. The watermark only excludes
+                // strict ancestors of the last-indexed sha; commits reachable
+                // via a different parent path (merge from a feature branch,
+                // octopus merge, history rewrite) would otherwise be re-walked
+                // and re-embedded even though their commit_record row already
+                // exists. A sub-millisecond PK lookup avoids 14+ minutes of
+                // wasted embedding on merge-heavy resumes.
+                if self.storage.commit_exists(&cm.commit_sha).await? {
+                    tracing::debug!(sha = %cm.commit_sha, "skip already-indexed commit");
+                    latest_sha = Some(cm.commit_sha.clone());
+                    commits_done += 1;
+                    self.progress.commit_done(commits_done, total_hunks);
+                    if commits_done % PROGRESS_INTERVAL == 0 {
+                        if let Some(sha) = latest_sha.as_deref() {
+                            self.storage.set_last_indexed_commit(repo_id, sha).await?;
+                        }
+                    }
+                    continue;
+                }
                 let extract_start = Instant::now();
                 let hunks = commit_source.hunks_for_commit(&cm.commit_sha).await?;
                 timings.diff_extract_ms += extract_start.elapsed().as_millis() as u64;
@@ -598,6 +617,128 @@ mod phase_timing_tests {
             }
             other => panic!("expected OhraError::Embedding, got {other:?}"),
         }
+    }
+
+    /// Counts `embed_batch` calls so the skip-already-indexed regression
+    /// can assert the embedder was hit exactly once per *new* commit.
+    /// Returns the same shape FakeEmbedder does (one zero vector per
+    /// input text) so the indexer's downstream split_first / persist
+    /// paths still work.
+    struct CountingEmbedder {
+        calls: Mutex<usize>,
+    }
+
+    impl CountingEmbedder {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(0),
+            }
+        }
+        fn call_count(&self) -> usize {
+            *self.calls.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl crate::EmbeddingProvider for CountingEmbedder {
+        fn dimension(&self) -> usize {
+            4
+        }
+        fn model_id(&self) -> &str {
+            "counting"
+        }
+        async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            *self.calls.lock().unwrap() += 1;
+            Ok(texts.iter().map(|_| vec![0.0_f32; 4]).collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn run_skips_already_indexed_commits_and_only_embeds_new_ones() {
+        // Plan 9 Task 2.1: resume safety. The CommitSource returns three
+        // SHAs but two of them already have `commit_record` rows from a
+        // prior run (the merge-from-feature-branch case described in the
+        // RFC). The indexer must short-circuit on those two and only fire
+        // the embedder for the genuinely new SHA.
+        let storage = std::sync::Arc::new(
+            FakeStorage::new(std::time::Duration::from_millis(0))
+                .with_seen(["already-a".to_string(), "already-b".to_string()]),
+        );
+        let embedder = std::sync::Arc::new(CountingEmbedder::new());
+
+        let commit_source = FakeCommitSource {
+            commits: vec![
+                fake_commit("already-a"),
+                fake_commit("already-b"),
+                fake_commit("brand-new-c"),
+            ],
+            hunks: vec![fake_hunk("any", "+x\n")],
+            sleep_per_call: std::time::Duration::from_millis(0),
+        };
+        let symbol_source = FakeSymbolSource {
+            symbols: vec![],
+            sleep: std::time::Duration::from_millis(0),
+        };
+
+        let indexer = Indexer::new(storage.clone(), embedder.clone());
+        let repo_id = RepoId::from_parts("first", "/tmp/skip-test");
+        indexer
+            .run(&repo_id, &commit_source, &symbol_source)
+            .await
+            .expect("indexer run");
+
+        assert_eq!(
+            embedder.call_count(),
+            1,
+            "embedder must run only for the one new commit, skipping the two pre-seeded SHAs"
+        );
+    }
+
+    #[tokio::test]
+    async fn watermark_advances_through_consecutive_skipped_commits() {
+        // Plan 9 Task 2.1 Step 3: a long stretch of already-indexed
+        // commits (no new work) must still leave a fresh watermark on
+        // disk. Otherwise a Ctrl-C immediately after a skip stretch would
+        // make the next resume re-walk them — correct but wasted work.
+        // Drive enough commits to fire the periodic-flush check at least
+        // once (PROGRESS_INTERVAL == 100), then assert the watermark
+        // points at the last-walked sha.
+        let storage = std::sync::Arc::new(FakeStorage::new(std::time::Duration::from_millis(0)));
+        // Pre-seed 150 commits — well past the 100-tick periodic flush.
+        let shas: Vec<String> = (0..150).map(|i| format!("seen-{i:03}")).collect();
+        for sha in &shas {
+            storage.seen_commits.lock().unwrap().insert(sha.clone());
+        }
+
+        let commit_source = FakeCommitSource {
+            commits: shas.iter().map(|s| fake_commit(s)).collect(),
+            hunks: vec![],
+            sleep_per_call: std::time::Duration::from_millis(0),
+        };
+        let symbol_source = FakeSymbolSource {
+            symbols: vec![],
+            sleep: std::time::Duration::from_millis(0),
+        };
+        let embedder = std::sync::Arc::new(CountingEmbedder::new());
+
+        let indexer = Indexer::new(storage.clone(), embedder.clone());
+        let repo_id = RepoId::from_parts("first", "/tmp/skip-watermark");
+        indexer
+            .run(&repo_id, &commit_source, &symbol_source)
+            .await
+            .expect("indexer run");
+
+        assert_eq!(
+            embedder.call_count(),
+            0,
+            "no new commits — embedder must not be hit at all"
+        );
+        let last = storage.last_indexed.lock().unwrap().clone();
+        assert_eq!(
+            last.as_deref(),
+            Some(shas.last().unwrap().as_str()),
+            "watermark must advance to the final walked sha even through an all-skip run"
+        );
     }
 
     #[tokio::test]
