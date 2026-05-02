@@ -232,34 +232,64 @@ runner images is the most likely failure point.
   `-installer.sh` scripts and `sha256.sum`. axoupdater follows
   by asset name; v0.6.1 → v0.6.2 self-upgrade is a no-op for
   users.
-- [ ] **Step 3: Tag `v0.6.2`** and push.
+- [x] **Step 3: Tag `v0.6.2`** and push.
   `git tag -a v0.6.2 -m "Release v0.6.2: per-host distribution
   variants" && git push origin v0.6.2`.
-  **GATED.** Per the plan preamble ("Task 4 is the release tag
-  (irreversible — coordinate before pushing)"), I am holding
-  here for explicit human approval. The `release/v0.6.2` branch
-  has 4 ahead-of-main commits ready (`679714a`, `cfd695c`,
-  `f34cf8f`, `23ca596`); after approval the sequence is:
+  **DONE** after explicit user approval ("finish the release").
+  Sequence executed:
   1. `git checkout main && git merge --ff-only release/v0.6.2`
-  2. `git push origin main`
-  3. `git tag -a v0.6.2 -m "..." && git push origin v0.6.2`
-  4. Watch `release.yml` (~12 min on past cadence).
-- [ ] **Step 4: Watch the release workflow.** ~12 min on past
+     (5 commits, ae59bbb..91f8a65) — `git push origin main` OK
+     (branch protection bypass logged on the server side, expected).
+  2. `git tag -a v0.6.2 -m "..." && git push origin v0.6.2` —
+     annotated tag pointing at `91f8a65`, pushed cleanly.
+  3. release.yml run
+     [25249409668](https://github.com/vss96/ohara/actions/runs/25249409668)
+     fired automatically on the tag push.
+- [x] **Step 4: Watch the release workflow.** ~12 min on past
   cadence. Confirm both `ohara-cli-aarch64-apple-darwin.tar.xz`
   (CoreML) and `ohara-cli-aarch64-apple-darwin-cpu.tar.xz` (CPU)
   are attached to the GitHub release.
-  **GATED — depends on Step 3.** Note: the `-cpu` opt-out
-  artifact is *not* shipped (Task 2.2 dropped per Risks #2);
-  this step verifies only the single `ohara-cli-aarch64-apple-
-  darwin.tar.xz` (CoreML) plus the matching `-update` shim.
-- [ ] **Step 5: Manual upgrade smoke test** from a previously-
+  **DONE.** Run [25249409668](https://github.com/vss96/ohara/actions/runs/25249409668)
+  finished green in ~9.5 min:
+  - plan: 19s
+  - build-local-artifacts (aarch64-unknown-linux-gnu): 4m23s
+  - build-local-artifacts (x86_64-unknown-linux-gnu): 4m7s
+  - build-local-artifacts (aarch64-apple-darwin): 6m3s
+  - build-local-artifacts (x86_64-apple-darwin): 8m10s
+  - build-global-artifacts: 17s; host: 29s; announce: 6s
+  GitHub Release at https://github.com/vss96/ohara/releases/tag/v0.6.2
+  has all 38 expected assets: 4 targets × 2 apps = 8 `.tar.xz` +
+  8 `.sha256` + 8 `-update` shims, plus `ohara-cli-installer.sh`,
+  `ohara-mcp-installer.sh`, `dist-manifest.json`, `sha256.sum`,
+  `source.tar.gz`(+`.sha256`). The `-cpu` opt-out artifact is
+  intentionally absent (Risks #2 drop).
+- [x] **Step 5: Manual upgrade smoke test** from a previously-
   installed v0.6.1 binary on the local M-series host: `ohara update`,
   then `ohara index fixtures/tiny/repo` and confirm the embedder
   log line shows `provider=CoreMl`.
-  **GATED — depends on Step 3.** This subsumes the Phase 3
-  Task 3.2 Steps 1-3 deferrals (no v0.6.1 binary on this host
-  pre-tag; first runnable upgrade test is against the real
-  v0.6.2 release).
+  **DONE on the local M-series dev box.**
+  - Pre-upgrade: `ohara --version` → `ohara 0.6.1 (70f542f)` at
+    `/Users/vss/.cargo/bin/ohara`. Receipt
+    `~/.config/ohara-cli/ohara-cli-receipt.json` present.
+  - `ohara update --check` → `update available: 0.6.2`.
+  - `ohara update` → `downloading ohara-cli 0.6.2
+    aarch64-apple-darwin / installing to /Users/vss/.cargo/bin /
+    everything's installed! / updated to 0.6.2: installed at
+    /Users/vss/.cargo`.
+  - Post-upgrade: `ohara --version` → `ohara 0.6.2 (91f8a65)`,
+    Mach-O 64-bit executable arm64.
+  - `RUST_LOG=info ohara index <fixtures/tiny/repo copy>
+    --embed-provider coreml` produced the expected log lines:
+    ```
+    embedder provider=CoreMl
+    Successfully registered `CoreMLExecutionProvider`
+    CoreMLExecutionProvider::GetCapability, number of partitions
+      supported by CoreML: 97 number of nodes in the graph: 623
+      number of nodes supported by CoreML: 447
+    indexed: 3 new commits, 3 hunks, 2 HEAD symbols
+    ```
+  axoupdater 0.10's asset-name-based upgrade path works without
+  intervention; the CoreML EP is wired into the released binary.
 
 ## Out of scope (deferred)
 
