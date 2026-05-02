@@ -26,6 +26,13 @@ pub fn put_many(c: &mut Connection, records: &[HunkRecord]) -> Result<()> {
              (SELECT id FROM hunk WHERE commit_sha = ?1)",
             params![sha],
         )?;
+        // Plan 11: same resume-clear pattern for the new
+        // fts_hunk_semantic mirror.
+        tx.execute(
+            "DELETE FROM fts_hunk_semantic WHERE hunk_id IN \
+             (SELECT id FROM hunk WHERE commit_sha = ?1)",
+            params![sha],
+        )?;
         tx.execute(
             "DELETE FROM vec_hunk WHERE hunk_id IN \
              (SELECT id FROM hunk WHERE commit_sha = ?1)",
@@ -35,14 +42,23 @@ pub fn put_many(c: &mut Connection, records: &[HunkRecord]) -> Result<()> {
     }
     for r in records {
         let fp_id = upsert_file_path(&tx, &r.hunk.file_path, r.hunk.language.as_deref())?;
+        // Plan 11: persist the semantic-text representation alongside
+        // the raw diff. Empty semantic_text from a legacy caller falls
+        // back to diff_text via COALESCE so the FTS lane never sees
+        // an empty document.
         tx.execute(
-            "INSERT INTO hunk (commit_sha, file_path_id, change_kind, diff_text)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO hunk (commit_sha, file_path_id, change_kind, diff_text, semantic_text)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 &r.hunk.commit_sha,
                 fp_id,
                 change_kind_to_str(r.hunk.change_kind),
                 &r.hunk.diff_text,
+                if r.semantic_text.is_empty() {
+                    &r.hunk.diff_text
+                } else {
+                    &r.semantic_text
+                },
             ],
         )?;
         let hunk_id: i64 = tx.last_insert_rowid();
@@ -56,6 +72,17 @@ pub fn put_many(c: &mut Connection, records: &[HunkRecord]) -> Result<()> {
         tx.execute(
             "INSERT INTO fts_hunk_text (hunk_id, content) VALUES (?1, ?2)",
             params![hunk_id, &r.hunk.diff_text],
+        )?;
+        // Plan 11: mirror the semantic_text into fts_hunk_semantic
+        // so the new BM25-by-semantic-text lane can query it.
+        let semantic_for_fts: &str = if r.semantic_text.is_empty() {
+            &r.hunk.diff_text
+        } else {
+            &r.semantic_text
+        };
+        tx.execute(
+            "INSERT INTO fts_hunk_semantic (hunk_id, content) VALUES (?1, ?2)",
+            params![hunk_id, semantic_for_fts],
         )?;
     }
     tx.commit()?;

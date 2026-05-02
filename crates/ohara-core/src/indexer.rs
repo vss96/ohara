@@ -166,8 +166,29 @@ impl Indexer {
                     timings.total_added_lines += count_added_lines(&h.diff_text);
                 }
 
+                // Plan 11 Task 2.1 Step 3: build the semantic-text
+                // representation up front so the embedder + the new
+                // fts_hunk_semantic lane both see normalized,
+                // signal-dense text. Symbol attribution wires in via
+                // plan 11 Task 3.1; until then symbols stays empty
+                // and the builder skips the `symbols:` section.
+                // Step 4 fallback: when the builder's added_lines
+                // section is empty (deletion-only hunk, etc.), fall
+                // back to raw diff_text so the embedder still sees
+                // the change rather than an empty string.
+                let semantic_texts: Vec<String> = hunks
+                    .iter()
+                    .map(|h| {
+                        let body = crate::hunk_text::build(h, &cm.message, &[]);
+                        if body.contains("added_lines:") {
+                            body
+                        } else {
+                            h.diff_text.clone()
+                        }
+                    })
+                    .collect();
                 let texts: Vec<String> = std::iter::once(cm.message.clone())
-                    .chain(hunks.iter().map(|h| h.diff_text.clone()))
+                    .chain(semantic_texts.iter().cloned())
                     .collect();
                 let embed_start = Instant::now();
                 let embs = self.embedder.embed_batch(&texts).await?;
@@ -197,15 +218,20 @@ impl Indexer {
                     )
                     .await?;
 
-                // Plan 11: until the semantic-text builder + per-hunk
-                // attribution wire in (Task 2.1 / Task 3.1), use the
-                // legacy constructor — semantic_text falls back to
-                // diff_text and symbols stays empty so query lanes
-                // still return results.
+                // Plan 11 Task 2.1: persist both raw diff (display /
+                // provenance) and the semantic_text built above
+                // (search-time). Symbol attribution wires in at
+                // Task 3.1; until then `symbols` stays empty.
                 let records: Vec<HunkRecord> = hunks
                     .into_iter()
                     .zip(hunk_embs.iter().cloned())
-                    .map(|(h, e)| HunkRecord::legacy(h, e))
+                    .zip(semantic_texts.into_iter())
+                    .map(|((h, e), semantic_text)| HunkRecord {
+                        hunk: h,
+                        diff_emb: e,
+                        semantic_text,
+                        symbols: Vec::new(),
+                    })
                     .collect();
                 self.storage.put_hunks(repo_id, &records).await?;
                 timings.storage_write_ms += write_start.elapsed().as_millis() as u64;
