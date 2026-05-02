@@ -10,34 +10,40 @@
 | **v0.4** | Java + Kotlin | Plan 4 — Java 17/21 (sealed types, records) and Kotlin 1.9/2.0 (data classes, objects). Annotations preserved in `source_text` for Spring-friendly retrieval. |
 | **v0.5** | `explain_change` | Plan 5 — second MCP tool, deterministic git-blame-backed lookup of "why does THIS code look the way it does?". |
 | **v0.5.1** | Polish | Progress bar, abort-resume hardening, `ohara update` self-update via axoupdater. |
+| **v0.6.0** | Throughput prep | `--profile` PhaseTimings JSON, `--embed-provider` auto-detect, `--resources` policy, CoreML/CUDA feature wiring, resume-crash fix, pinned progress bar. |
 
 The [Changelog](./changelog.md) has a per-tag breakdown.
 
 ## In flight
 
-### v0.6 — indexing throughput
+### v0.6.1 / v0.7 — Phase 2B (gated on baseline data)
 
-A first-time `ohara index` of a real-world Java/Kotlin repo (5k–50k
-commits, hundreds of MB of pack data) currently takes hours. v0.6 is
-about cutting that by an order of magnitude without regressing
-retrieval quality.
+v0.6.0 shipped the measurement infrastructure (`--profile`, weekly
+perf workflow, QuestDB fixture) and the hardware-acceleration
+opt-in (`--embed-provider`, `--resources`, CoreML / CUDA feature
+flags). What hasn't shipped yet is the actual throughput surgery —
+those changes are gated on the QuestDB baseline data so we know we're
+optimizing the right phase.
 
-**Phase 1 already shipped:** the `--profile` flag + `PhaseTimings`
-report give per-phase wall-time and hunk-text inflation numbers
-required to pick the right knob to turn. See
-`docs/perf/v0.6-baseline.md` for the QuestDB baseline.
+Candidates from Plan 6 Phase 2B, in rough order of expected impact:
 
-**Success criteria** (one of):
+- **Hunk-text trimming.** `total_diff_bytes / total_added_lines`
+  from `PhaseTimings` is currently north of useful; the embed phase
+  is paying for boilerplate it doesn't benefit from.
+- **Pipeline parallelism.** The walk → embed → write path is
+  serialized today. A bounded channel between phases lets the embed
+  GPU/CoreML keep going while SQLite drains the previous batch.
+- **Recency-first / partial index.** The (B) success criterion from
+  the v0.6 RFC: index the newest-N commits first and backfill older
+  history in the background, with `_meta` exposing what window is
+  covered.
+
+**Success criteria** (one of, unchanged from the v0.6 RFC):
 
 - **(A)** First-time index of a QuestDB-class repo finishes in under
   **15 minutes** on a typical M-series laptop.
-- **(B)** Time-to-useful (newest-N-commits indexed first, older
-  history backfilled in the background) is under **3 minutes**, with
-  `_meta` clearly exposing what window has been covered.
-
-(B) is interesting because it changes the user contract from "wait
-for completion" to "useful immediately, quality improves." Reasonable
-to ship both: (B) first, (A) eventually.
+- **(B)** Time-to-useful is under **3 minutes**, with `_meta` clearly
+  exposing what window has been covered.
 
 The full RFC is at
 [`docs/superpowers/specs/2026-05-01-ohara-v0.6-indexing-throughput-rfc.md`](https://github.com/vss96/ohara/blob/main/docs/superpowers/specs/2026-05-01-ohara-v0.6-indexing-throughput-rfc.md).

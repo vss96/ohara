@@ -4,6 +4,35 @@ User-facing release notes. The full commit log lives on
 [GitHub](https://github.com/vss96/ohara/commits/main); this page is
 the highlights.
 
+## v0.6.0 — Throughput prep, hardware acceleration opt-in
+
+- **`--embed-provider {auto,cpu,coreml,cuda}`** CLI flag with
+  auto-detect (CoreML on Apple silicon, CUDA when
+  `CUDA_VISIBLE_DEVICES` is set, else CPU).
+- **`--resources {auto,conservative,aggressive}`** resource policy
+  picks `--commit-batch` / `--threads` / `--embed-provider` defaults
+  from host core count; explicit flags still override.
+- **`--profile`** dumps per-phase wall-time JSON for benchmarking;
+  feeds the v0.6 throughput baseline at `docs/perf/v0.6-baseline.md`.
+- **`--no-progress`** suppresses the progress bar in CI (structured
+  `tracing::info!` events still fire every 100 commits).
+- **tracing-indicatif:** progress bar pinned to the bottom of the
+  terminal, `tracing` log lines stream above without scrolling the
+  bar away.
+- **Cargo features `coreml` and `cuda`** wire ONNX execution
+  providers through `ohara-embed` → `ohara-cli` / `ohara-mcp`. The
+  cargo-dist release binaries stay CPU-only; build from source with
+  `--features coreml` (Apple silicon) or `--features cuda` (Linux
+  NVIDIA) to opt in.
+- **Resume-crash fix:** `commit::put` is now DELETE-then-INSERT for
+  `vec_commit` and `fts_commit`. Closes a "UNIQUE constraint failed"
+  crash on resume after a kill mid-walk.
+- **`ohara --version`** now reports `ohara 0.6.0 (<sha>)` so local
+  builds are distinguishable from released ones.
+- **Internal:** `ohara-storage/src/` split into `tables/` + `codec/`;
+  `ohara-parse/src/` extractors consolidated under `languages/`. No
+  public API change.
+
 ## v0.5.1
 
 - **Self-update.** `ohara update` (and `--check` / `--prerelease`)
