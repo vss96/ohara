@@ -31,6 +31,13 @@ path = "example_paired.rs"
 name = "embed_provider_paired"
 path = "embed_provider_paired.rs"
 
+[[test]]
+# Plan 7 Task 1.1 — minimal CoreML memory-leak reproduction harness.
+# `#[ignore]`'d; requires the `ohara-embed/coreml` feature. See the
+# file-level docs for build / run / sampling commands.
+name = "coreml_leak_repro"
+path = "coreml_leak_repro.rs"
+
 [dev-dependencies]
 ohara-cli = { path = "../../crates/ohara-cli" }
 ohara-core = { path = "../../crates/ohara-core" }
