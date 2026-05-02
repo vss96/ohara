@@ -1,0 +1,45 @@
+# One-shot probe: confirm a hosted macos-14 (Apple Silicon) runner can
+# link CoreML.framework when ohara-cli is built with `--features coreml`.
+#
+# This workflow exists solely to validate Phase 1 of plan-8 (per-host
+# distribution variants for v0.6.2). Delete after producing one green
+# run; the real wiring lives in cargo-dist's release workflow.
+#
+# Trigger: workflow_dispatch only — no automatic firing.
+
+name: Probe CoreML link
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: cargo build --features coreml on macos-14
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Show toolchain context
+        run: |
+          uname -a
+          xcodebuild -version || true
+          xcrun --show-sdk-path
+          xcrun --find clang
+          rustc --version --verbose
+
+      - name: Install Rust (matching rust-toolchain.toml)
+        # rust-toolchain.toml pins the channel; rustup picks it up.
+        run: rustup show
+
+      - name: Build ohara-cli with coreml feature
+        run: cargo build --release --features coreml -p ohara-cli
+
+      - name: Smoke-test the resulting binary
+        run: |
+          ./target/release/ohara --version
+          file ./target/release/ohara
