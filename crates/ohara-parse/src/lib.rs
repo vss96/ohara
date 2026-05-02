@@ -6,12 +6,36 @@ pub mod languages;
 use anyhow::Result;
 use ohara_core::indexer::SymbolSource;
 use ohara_core::types::Symbol;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// 500-token target budget for the AST sibling-merge chunker. Matches
 /// plan 3 §C-2; tuned to stay well under common embedder context
 /// limits (e.g. BGE small/base sit at 512).
 const CHUNK_MAX_TOKENS: usize = 500;
+
+/// AST sibling-merge chunker version (plan 13). Bump this when the
+/// chunker's output semantics change in a way that would invalidate
+/// previously-indexed `hunk` / `symbol` rows. Stored under the
+/// `chunker_version` component key.
+pub const CHUNKER_VERSION: &str = "1";
+
+/// Returns `language -> parser_version` for every language this crate
+/// can index. Used by the indexer to record per-parser metadata so the
+/// runtime can detect when an old index was built with a different
+/// parser version. Bump a value here when a per-language extractor's
+/// output semantics change.
+pub fn parser_versions() -> BTreeMap<String, String> {
+    [
+        ("rust", "1"),
+        ("python", "1"),
+        ("java", "1"),
+        ("kotlin", "1"),
+    ]
+    .into_iter()
+    .map(|(lang, ver)| (lang.to_string(), ver.to_string()))
+    .collect()
+}
 
 pub fn extract_for_path(path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symbol>> {
     let ext = Path::new(path).extension().and_then(|e| e.to_str());

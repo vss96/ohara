@@ -2,4 +2,6 @@
 //! and `ohara_core::RerankProvider`.
 
 pub mod fastembed;
-pub use fastembed::{EmbedProvider, FastEmbedProvider, FastEmbedReranker};
+pub use fastembed::{
+    EmbedProvider, FastEmbedProvider, FastEmbedReranker, DEFAULT_MODEL_ID, DEFAULT_RERANKER_ID,
+};

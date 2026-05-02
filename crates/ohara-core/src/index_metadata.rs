@@ -15,8 +15,18 @@
 //! an `ohara index --force` repopulates them without re-embedding the
 //! whole history.
 
+use crate::EmbeddingProvider;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// Refinery schema version this binary expects. Bumped in lock-step
+/// with new `crates/ohara-storage/migrations/V*.sql` files.
+pub const SCHEMA_VERSION: &str = "3";
+
+/// Semantic-text builder version (plan 11). `"0"` means "no semantic
+/// text yet — the embedder + FTS lanes see raw `diff_text`". Plan 11
+/// bumps this to `"1"` when the semantic-text section-builder lands.
+pub const SEMANTIC_TEXT_VERSION: &str = "0";
 
 /// What the current binary expects the index to have been built with.
 /// Built fresh on every CLI / MCP invocation from the actual
@@ -40,6 +50,59 @@ pub struct RuntimeIndexMetadata {
     /// `language -> parser_version` for every language the binary
     /// can index. Stored under `parser_<language>` component keys.
     pub parser_versions: BTreeMap<String, String>,
+}
+
+impl RuntimeIndexMetadata {
+    /// Build the current runtime metadata from the live embedder
+    /// handle plus caller-supplied derived-component versions. The
+    /// embedder is the only source of truth for `embedding_model` and
+    /// `embedding_dimension`; the rest comes from constants owned by
+    /// the crate that hosts the relevant code.
+    ///
+    /// Callers in the CLI / MCP wire `chunker_version`,
+    /// `parser_versions` from `ohara_parse::CHUNKER_VERSION` /
+    /// `ohara_parse::parser_versions()`, and `reranker_model` from
+    /// `FastEmbedReranker::model_id()`.
+    pub fn current(
+        embedder: &dyn EmbeddingProvider,
+        reranker_model: impl Into<String>,
+        chunker_version: impl Into<String>,
+        parser_versions: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            embedding_model: embedder.model_id().to_string(),
+            embedding_dimension: u32::try_from(embedder.dimension()).unwrap_or(u32::MAX),
+            reranker_model: reranker_model.into(),
+            chunker_version: chunker_version.into(),
+            semantic_text_version: SEMANTIC_TEXT_VERSION.to_string(),
+            parser_versions,
+        }
+    }
+
+    /// Flatten this metadata into the `(component, version)` pair list
+    /// expected by `Storage::put_index_metadata`. Field order is
+    /// stable across runs (BTreeMap iteration + a fixed prefix).
+    pub fn to_storage_components(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = vec![
+            ("schema".into(), self.schema_version.clone()),
+            ("embedding_model".into(), self.embedding_model.clone()),
+            (
+                "embedding_dimension".into(),
+                self.embedding_dimension.to_string(),
+            ),
+            ("reranker_model".into(), self.reranker_model.clone()),
+            ("chunker_version".into(), self.chunker_version.clone()),
+            (
+                "semantic_text_version".into(),
+                self.semantic_text_version.clone(),
+            ),
+        ];
+        for (lang, ver) in &self.parser_versions {
+            out.push((format!("parser_{lang}"), ver.clone()));
+        }
+        out
+    }
 }
 
 /// Per-component snapshot read from the `index_metadata` table.

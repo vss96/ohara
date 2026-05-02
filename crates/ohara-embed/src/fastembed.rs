@@ -15,9 +15,15 @@ use ohara_core::{EmbeddingProvider, Result as CoreResult};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-const DEFAULT_MODEL_ID: &str = "bge-small-en-v1.5";
+/// Stable id of the default embedder model. Mirrored on every
+/// `FastEmbedProvider::model_id()` and recorded in `index_metadata`
+/// (plan 13) so an old index built with a different model triggers a
+/// rebuild prompt.
+pub const DEFAULT_MODEL_ID: &str = "bge-small-en-v1.5";
 const DEFAULT_DIM: usize = 384;
-const DEFAULT_RERANKER_ID: &str = "bge-reranker-base";
+/// Stable id of the default cross-encoder reranker model. Recorded in
+/// `index_metadata` so a reranker swap triggers a refresh prompt.
+pub const DEFAULT_RERANKER_ID: &str = "bge-reranker-base";
 
 /// ONNX execution provider selector for the embedder + reranker.
 ///

@@ -1,3 +1,4 @@
+use crate::index_metadata::RuntimeIndexMetadata;
 use crate::storage::{CommitRecord, HunkRecord};
 use crate::types::{CommitMeta, Hunk, RepoId, Symbol};
 use crate::{EmbeddingProvider, OhraError, Result, Storage};
@@ -56,6 +57,11 @@ pub struct Indexer {
     #[allow(dead_code)]
     embed_batch: usize,
     progress: Arc<dyn ProgressSink>,
+    /// Plan 13: optional runtime metadata recorded at the end of a
+    /// successful index pass. Left unset by tests that don't care about
+    /// compatibility tracking; the CLI / MCP wire it from
+    /// `RuntimeIndexMetadata::current(...)`.
+    runtime_metadata: Option<RuntimeIndexMetadata>,
 }
 
 impl Indexer {
@@ -66,6 +72,7 @@ impl Indexer {
             batch_commits: 512,
             embed_batch: 32,
             progress: Arc::new(NullProgress),
+            runtime_metadata: None,
         }
     }
 
@@ -80,6 +87,15 @@ impl Indexer {
     /// but use more RAM. Default 512.
     pub fn with_batch_commits(mut self, n: usize) -> Self {
         self.batch_commits = n.max(1);
+        self
+    }
+
+    /// Plan 13: record the supplied runtime metadata to
+    /// `Storage::put_index_metadata` at the end of a successful index
+    /// pass. Set by callers that want the post-run compatibility check
+    /// to find current-binary metadata in the index.
+    pub fn with_runtime_metadata(mut self, meta: RuntimeIndexMetadata) -> Self {
+        self.runtime_metadata = Some(meta);
         self
     }
 
@@ -227,6 +243,18 @@ impl Indexer {
 
         if let Some(sha) = latest_sha.as_deref() {
             self.storage.set_last_indexed_commit(repo_id, sha).await?;
+        }
+
+        // Plan 13: write runtime metadata only on full success — after
+        // hunks, HEAD symbols, and the final watermark are persisted.
+        // A failure earlier in the pass propagates as `?` above, which
+        // means we never reach this point and the previously-recorded
+        // metadata is preserved (so a half-finished run can't claim
+        // the new version is complete).
+        if let Some(meta) = &self.runtime_metadata {
+            self.storage
+                .put_index_metadata(repo_id, &meta.to_storage_components())
+                .await?;
         }
 
         self.progress
@@ -393,6 +421,11 @@ mod phase_timing_tests {
         /// already?" via `commit_exists`. `put_commit` adds to the set on
         /// the write path so end-to-end tests don't have to pre-seed.
         seen_commits: Mutex<HashSet<String>>,
+        /// Plan 13: most-recent argument the indexer passed to
+        /// `put_index_metadata`. `None` means "no metadata write
+        /// happened" — the partial-failure test checks this stays
+        /// unchanged across a failed run.
+        last_metadata: Mutex<Option<Vec<(String, String)>>>,
     }
 
     impl FakeStorage {
@@ -401,6 +434,7 @@ mod phase_timing_tests {
                 write_sleep,
                 last_indexed: Mutex::new(None),
                 seen_commits: Mutex::new(HashSet::new()),
+                last_metadata: Mutex::new(None),
             }
         }
 
@@ -501,7 +535,12 @@ mod phase_timing_tests {
         ) -> Result<crate::index_metadata::StoredIndexMetadata> {
             Ok(crate::index_metadata::StoredIndexMetadata::default())
         }
-        async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> Result<()> {
+        async fn put_index_metadata(
+            &self,
+            _: &RepoId,
+            components: &[(String, String)],
+        ) -> Result<()> {
+            *self.last_metadata.lock().unwrap() = Some(components.to_vec());
             Ok(())
         }
     }
@@ -747,6 +786,98 @@ mod phase_timing_tests {
             last.as_deref(),
             Some(shas.last().unwrap().as_str()),
             "watermark must advance to the final walked sha even through an all-skip run"
+        );
+    }
+
+    fn fake_runtime_metadata() -> crate::index_metadata::RuntimeIndexMetadata {
+        let mut parsers = std::collections::BTreeMap::new();
+        parsers.insert("rust".to_string(), "1".to_string());
+        crate::index_metadata::RuntimeIndexMetadata {
+            schema_version: "3".into(),
+            embedding_model: "fake-model".into(),
+            embedding_dimension: 4,
+            reranker_model: "fake-reranker".into(),
+            chunker_version: "1".into(),
+            semantic_text_version: "0".into(),
+            parser_versions: parsers,
+        }
+    }
+
+    #[tokio::test]
+    async fn run_writes_runtime_metadata_on_success() {
+        // Plan 13 Task 2.2 Step 3: a successful indexing pass must
+        // record the runtime-supplied metadata to storage so the next
+        // CLI status / MCP query can verify compatibility.
+        let storage = std::sync::Arc::new(FakeStorage::new(std::time::Duration::from_millis(0)));
+        let embedder = std::sync::Arc::new(FakeEmbedder {
+            sleep: std::time::Duration::from_millis(0),
+        });
+        let commit_source = FakeCommitSource {
+            commits: vec![fake_commit("aaaa")],
+            hunks: vec![fake_hunk("aaaa", "+x\n")],
+            sleep_per_call: std::time::Duration::from_millis(0),
+        };
+        let symbol_source = FakeSymbolSource {
+            symbols: vec![],
+            sleep: std::time::Duration::from_millis(0),
+        };
+
+        let indexer =
+            Indexer::new(storage.clone(), embedder).with_runtime_metadata(fake_runtime_metadata());
+        let repo_id = RepoId::from_parts("first", "/tmp/meta-success");
+        indexer
+            .run(&repo_id, &commit_source, &symbol_source)
+            .await
+            .expect("indexer run");
+
+        let written = storage
+            .last_metadata
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("indexer must write runtime metadata on success");
+        let by_key: std::collections::BTreeMap<&str, &str> = written
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        assert_eq!(by_key.get("schema").copied(), Some("3"));
+        assert_eq!(by_key.get("embedding_model").copied(), Some("fake-model"));
+        assert_eq!(by_key.get("embedding_dimension").copied(), Some("4"));
+        assert_eq!(by_key.get("chunker_version").copied(), Some("1"));
+        assert_eq!(by_key.get("parser_rust").copied(), Some("1"));
+    }
+
+    #[tokio::test]
+    async fn run_does_not_write_metadata_when_indexer_fails_partway() {
+        // Plan 13 Task 2.2 Step 4: if a pass fails before reaching the
+        // metadata-write step (here: the embedder returns empty for
+        // non-empty input — same path the existing typed-error test
+        // exercises), storage MUST NOT see a put_index_metadata call.
+        // That keeps a half-finished run from claiming the new
+        // version is complete.
+        let storage = std::sync::Arc::new(FakeStorage::new(std::time::Duration::from_millis(0)));
+        let embedder = std::sync::Arc::new(EmptyEmbedder);
+        let commit_source = FakeCommitSource {
+            commits: vec![fake_commit("aaaa")],
+            hunks: vec![fake_hunk("aaaa", "+x\n")],
+            sleep_per_call: std::time::Duration::from_millis(0),
+        };
+        let symbol_source = FakeSymbolSource {
+            symbols: vec![],
+            sleep: std::time::Duration::from_millis(0),
+        };
+
+        let indexer =
+            Indexer::new(storage.clone(), embedder).with_runtime_metadata(fake_runtime_metadata());
+        let repo_id = RepoId::from_parts("first", "/tmp/meta-failure");
+        let _err = indexer
+            .run(&repo_id, &commit_source, &symbol_source)
+            .await
+            .expect_err("indexer must surface the embedder error");
+
+        assert!(
+            storage.last_metadata.lock().unwrap().is_none(),
+            "metadata write must NOT happen when the pass fails partway"
         );
     }
 

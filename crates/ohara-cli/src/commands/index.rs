@@ -233,9 +233,22 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         Arc::new(crate::progress::IndicatifProgress::new())
     };
 
+    // Plan 13: build the runtime metadata snapshot up front so a
+    // successful pass records "this index was built with X embedder /
+    // chunker / parser versions" alongside its hunks. The snapshot
+    // sources truth from the live embedder handle (model + dim) plus
+    // the constants owned by ohara-embed / ohara-parse / ohara-core.
+    let runtime_metadata = ohara_core::RuntimeIndexMetadata::current(
+        embedder.as_ref(),
+        ohara_embed::DEFAULT_RERANKER_ID,
+        ohara_parse::CHUNKER_VERSION,
+        ohara_parse::parser_versions(),
+    );
+
     let indexer = Indexer::new(storage.clone(), embedder.clone())
         .with_batch_commits(plan.commit_batch)
-        .with_progress(progress);
+        .with_progress(progress)
+        .with_runtime_metadata(runtime_metadata);
     let report = indexer
         .run(&repo_id, &commit_source, &symbol_source)
         .await?;
