@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 
 /// Refinery schema version this binary expects. Bumped in lock-step
 /// with new `crates/ohara-storage/migrations/V*.sql` files.
-pub const SCHEMA_VERSION: &str = "3";
+pub const SCHEMA_VERSION: &str = "4";
 
 /// Semantic-text builder version (plan 11). `"0"` means "no semantic
 /// text yet — the embedder + FTS lanes see raw `diff_text`". Plan 11
@@ -151,14 +151,20 @@ impl CompatibilityStatus {
     /// diagnosis dominates a refresh recommendation, and a missing
     /// embedding row is a stronger signal than a missing chunker row.
     pub fn assess(runtime: &RuntimeIndexMetadata, stored: &StoredIndexMetadata) -> Self {
-        // 1. Vector-affecting components (mismatch -> rebuild).
-        let vector_affecting: [(&str, String); 3] = [
+        // 1. Vector-affecting components (mismatch -> rebuild). Only
+        //    embedding-side mismatches go here: a different embedder or
+        //    a different vector dimension means stored KNN vectors would
+        //    be wrong against a query embedded by the current binary.
+        //    Schema lives in the derived bucket below — refinery
+        //    migrations are append-only and additive, so a schema bump
+        //    needs a refresh to populate the new columns / tables, not
+        //    a vector rebuild.
+        let vector_affecting: [(&str, String); 2] = [
             ("embedding_model", runtime.embedding_model.clone()),
             (
                 "embedding_dimension",
                 runtime.embedding_dimension.to_string(),
             ),
-            ("schema", runtime.schema_version.clone()),
         ];
         let mut missing: Vec<String> = Vec::new();
         for (key, expected) in &vector_affecting {
@@ -177,6 +183,7 @@ impl CompatibilityStatus {
 
         // 2. Derived components (mismatch -> refresh).
         let mut derived: Vec<(String, String)> = vec![
+            ("schema".to_string(), runtime.schema_version.clone()),
             (
                 "chunker_version".to_string(),
                 runtime.chunker_version.clone(),
