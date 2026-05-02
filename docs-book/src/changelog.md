@@ -16,7 +16,7 @@ documented workaround rather than an in-tree fix; the upstream
 investigation in fastembed / ort is re-opened.
 
 - **`--embed-provider auto` now downgrades to CPU on Apple Silicon
-  for long index passes** (more than 1,000 commits to walk).
+  for long index passes** (1,000 commits or more to walk).
   Short-lived `query` and `index --incremental` calls keep the
   CoreML auto-pick. Threshold lives in
   [`crates/ohara-cli/src/commands/provider.rs`](https://github.com/vss96/ohara/blob/main/crates/ohara-cli/src/commands/provider.rs).

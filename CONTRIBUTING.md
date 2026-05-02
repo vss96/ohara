@@ -95,7 +95,7 @@ Long `if` / `else if` ladders are a refactor signal.
 - Use `rayon` for CPU-bound work (parsing, embedding inference, batch transforms).
 - **MUST NOT** call `block_on` or any other blocking runtime API from inside an async function. Move CPU work to `tokio::task::spawn_blocking` or `rayon`, then `await` the join handle.
 - Spawned tasks **MUST** be either awaited, joined into a `JoinSet`, or have their cancellation behaviour documented. Fire-and-forget tasks are a code smell.
-- All logging **MUST** go through `tracing`. `println!` and `eprintln!` are reserved for **user-facing CLI output in `ohara-cli`** (e.g. command results). They **MUST NOT** appear in any other crate.
+- All logging **MUST** go through `tracing`. `println!` and `eprintln!` are reserved for **user-facing CLI output in `ohara-cli`** (e.g. command results). They **MUST NOT** appear in any other crate. Two narrow exemptions: `build.rs` scripts (which communicate with cargo via `println!("cargo:...")`) and standalone harnesses under `tests/perf/` (which print operator-facing diagnostics; these binaries are run manually, never in CI). Anything else routes through `tracing`.
 - Spans **SHOULD** be added at meaningful operation boundaries (one indexing run, one query, one MCP request) and **SHOULD** carry structured fields rather than formatted strings.
 
 ---
@@ -117,6 +117,7 @@ Long `if` / `else if` ladders are a refactor signal.
 ## 6. Visibility & Module Hygiene
 
 - Default visibility is `pub(crate)`. Items are made `pub` **only** when they are part of the crate's intentional external API.
+- The binary crates `ohara-cli` and `ohara-mcp` also expose a `lib.rs` that the binary's `main.rs` and the `tests/perf` crate consume. Items in those binary-crate libraries are `pub` **only** when an external caller (the bin or `tests/perf`) actually uses them; everything else stays `pub(crate)`.
 - Re-exports at `lib.rs` define the crate's public surface. If it is not re-exported (or `pub` in a `pub mod`), it is not API.
 - Public items in library crates **MUST** carry `///` doc comments. Every `lib.rs` **MUST** carry a crate-level `//!` doc comment summarising the crate's role and key traits.
 

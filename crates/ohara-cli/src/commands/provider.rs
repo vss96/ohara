@@ -10,8 +10,8 @@ use ohara_embed::EmbedProvider;
 
 /// Long-pass commit threshold for auto-downgrading CoreML → CPU.
 ///
-/// Plan 7 Phase 2B: an `index` run that will walk more than this many
-/// commits with `--embed-provider auto` resolves to CPU on Apple
+/// Plan 7 Phase 2B: an `index` run that will walk this many commits
+/// or more with `--embed-provider auto` resolves to CPU on Apple
 /// Silicon, because the CoreML embedder leaks ~4 MB/batch
 /// (`docs/perf/v0.6.1-leak-diagnosis.md`) and would OOM the host
 /// before completing. Short index passes (incremental, small repos,
@@ -20,7 +20,7 @@ use ohara_embed::EmbedProvider;
 /// Set conservatively against a typical 16–24 GB Apple Silicon host;
 /// users with larger memory who want CoreML for long passes can pass
 /// `--embed-provider coreml` explicitly to bypass the downgrade.
-pub const LONG_PASS_THRESHOLD: u64 = 1000;
+pub(crate) const LONG_PASS_THRESHOLD: u64 = 1000;
 
 /// Clap-friendly mirror of [`EmbedProvider`] with an extra `Auto`
 /// variant for "pick the best available provider for this host".
@@ -61,29 +61,31 @@ pub fn resolve_provider(arg: ProviderArg) -> EmbedProvider {
 /// optional note describing whether the resolution was downgraded
 /// from CoreML to CPU on a long index pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProviderResolution {
+pub(crate) struct ProviderResolution {
     /// Provider the caller should construct.
-    pub provider: EmbedProvider,
+    pub(crate) provider: EmbedProvider,
     /// Set when an `Auto` resolution that would otherwise pick CoreML
-    /// was downgraded to CPU because `commits_to_walk` exceeded
+    /// was downgraded to CPU because `commits_to_walk` met or exceeded
     /// [`LONG_PASS_THRESHOLD`]. Carries the count for logging.
-    pub downgraded_from_coreml: Option<u64>,
+    pub(crate) downgraded_from_coreml: Option<u64>,
 }
 
 /// Resolve a `ProviderArg` to a concrete provider, applying the
 /// long-pass downgrade rule from Plan 7 Phase 2B.
 ///
 /// Behaviour:
-/// - `Auto` + `commits_to_walk > threshold` + auto-pick is CoreML →
+/// - `Auto` + `commits_to_walk >= threshold` + auto-pick is CoreML →
 ///   downgrade to CPU and record the count in
-///   [`ProviderResolution::downgraded_from_coreml`].
+///   [`ProviderResolution::downgraded_from_coreml`]. The boundary is
+///   inclusive because a repo at exactly the threshold is the most
+///   at-risk case, not the safest.
 /// - `Auto` + short pass, or auto-pick is not CoreML → pass through
 ///   to [`detect_provider`].
 /// - Explicit `Cpu` / `Coreml` / `Cuda` → honour the user's choice
 ///   regardless of pass length. The leak warning for explicit CoreML
 ///   is the caller's responsibility (it depends on host
 ///   architecture, not on this function's output).
-pub fn resolve_with_downgrade(
+pub(crate) fn resolve_with_downgrade(
     arg: ProviderArg,
     commits_to_walk: u64,
     threshold: u64,
@@ -95,7 +97,7 @@ pub fn resolve_with_downgrade(
         };
     }
     let auto_pick = detect_provider();
-    if matches!(auto_pick, EmbedProvider::CoreMl) && commits_to_walk > threshold {
+    if matches!(auto_pick, EmbedProvider::CoreMl) && commits_to_walk >= threshold {
         return ProviderResolution {
             provider: EmbedProvider::Cpu,
             downgraded_from_coreml: Some(commits_to_walk),
@@ -114,7 +116,7 @@ pub fn resolve_with_downgrade(
 /// macOS-on-Apple-silicon check is exact (compile-time `cfg!`) while
 /// the CUDA check is just "an env var is set", which travels with
 /// shell sessions and isn't a reliable hardware signal.
-pub fn detect_provider() -> EmbedProvider {
+pub(crate) fn detect_provider() -> EmbedProvider {
     if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
         EmbedProvider::CoreMl
     } else if std::env::var_os("CUDA_VISIBLE_DEVICES").is_some() {
@@ -212,14 +214,33 @@ mod tests {
     }
 
     #[test]
-    fn auto_at_threshold_does_not_downgrade() {
-        // Boundary: equal to threshold is short-pass, strictly greater
-        // is long-pass. This matches the `>` in the implementation
-        // and keeps the threshold easy to reason about (`> 1000`
-        // means "1001 or more").
-        let r = resolve_with_downgrade(ProviderArg::Auto, LONG_PASS_THRESHOLD, LONG_PASS_THRESHOLD);
+    fn auto_just_below_threshold_does_not_downgrade() {
+        // Boundary: strictly less than threshold is short-pass.
+        // The cutoff is `>=` in the implementation so a repo at
+        // exactly `LONG_PASS_THRESHOLD` already gets the safety net.
+        let r = resolve_with_downgrade(
+            ProviderArg::Auto,
+            LONG_PASS_THRESHOLD - 1,
+            LONG_PASS_THRESHOLD,
+        );
         assert_eq!(r.provider, detect_provider());
         assert!(r.downgraded_from_coreml.is_none());
+    }
+
+    #[test]
+    fn auto_at_threshold_downgrades_when_auto_picks_coreml() {
+        // Boundary: a repo at exactly the threshold is the most at-risk
+        // case (right on the edge of OOM territory) so it must trip the
+        // downgrade rather than being treated as a short pass. This
+        // matches the `>=` in the implementation.
+        let r = resolve_with_downgrade(ProviderArg::Auto, LONG_PASS_THRESHOLD, LONG_PASS_THRESHOLD);
+        if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
+            assert_eq!(r.provider, EmbedProvider::Cpu);
+            assert_eq!(r.downgraded_from_coreml, Some(LONG_PASS_THRESHOLD));
+        } else {
+            assert_eq!(r.provider, detect_provider());
+            assert!(r.downgraded_from_coreml.is_none());
+        }
     }
 
     #[test]

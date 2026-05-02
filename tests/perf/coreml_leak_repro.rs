@@ -118,7 +118,7 @@ async fn coreml_leak_repro() {
     );
 
     let mut embedder =
-        FastEmbedProvider::with_provider(provider).expect("invariant: failed to init embedder");
+        FastEmbedProvider::with_provider(provider).expect("test harness: failed to init embedder");
     let started = Instant::now();
     let mut window_started = Instant::now();
 
@@ -127,7 +127,7 @@ async fn coreml_leak_repro() {
             if iter > 0 && iter % k == 0 {
                 eprintln!("[iter {iter}] rebuilding embedder (probe 2.1, K={k})");
                 embedder = FastEmbedProvider::with_provider(provider)
-                    .expect("invariant: failed to rebuild embedder");
+                    .expect("test harness: failed to rebuild embedder");
             }
         }
 
@@ -138,7 +138,7 @@ async fn coreml_leak_repro() {
         embedder
             .embed_batch(&texts)
             .await
-            .expect("invariant: embed_batch failed mid-run");
+            .expect("test harness: embed_batch failed mid-run");
 
         if (iter + 1) % report_every == 0 {
             let elapsed = window_started.elapsed();

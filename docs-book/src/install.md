@@ -78,8 +78,8 @@ Default features stay CPU-only.
 > [`docs/perf/v0.6.1-leak-diagnosis.md`](https://github.com/vss96/ohara/blob/main/docs/perf/v0.6.1-leak-diagnosis.md)) —
 > a 5,000+ commit first-time index would OOM the host before
 > completing. v0.6.1's `--embed-provider auto` therefore resolves to
-> CPU on Apple Silicon when the upcoming index pass would walk more
-> than 1,000 commits; short passes (`query`, `index --incremental`,
+> CPU on Apple Silicon when the upcoming index pass would walk
+> 1,000 commits or more; short passes (`query`, `index --incremental`,
 > small repos) still pick CoreML. Pass `--embed-provider coreml`
 > explicitly to bypass the downgrade and accept the OOM risk; CPU
 > and CUDA paths are unaffected. Re-opened upstream investigation
