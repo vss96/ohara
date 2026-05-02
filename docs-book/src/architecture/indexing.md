@@ -74,6 +74,18 @@ plus `put_hunks`'s DELETE-then-INSERT semantics, gives the contract:
 - Anything outside the commit walk (HEAD-symbol extraction, the final
   watermark advance) is small enough to redo cleanly.
 
+The watermark is a single SHA, so on resume the indexer also
+short-circuits per-commit when `commit_record` already has a row for
+the SHA being walked (v0.6.3). This matters on merge-heavy histories:
+`git2::Revwalk::hide(watermark)` only excludes the watermark and its
+strict ancestor chain, so commits reachable via a different parent
+path — feature-branch merges, octopus merges, history rewrites — would
+otherwise be re-walked and re-embedded even though they're already in
+the index. A sub-millisecond PK lookup avoids that wasted embedder
+cost. See
+[`docs/superpowers/specs/2026-05-02-ohara-v0.6.3-resume-skip-rfc.md`](https://github.com/vss96/ohara/blob/main/docs/superpowers/specs/2026-05-02-ohara-v0.6.3-resume-skip-rfc.md)
+for the design.
+
 ## Profiling
 
 Pass `--profile` to dump a single-line JSON `PhaseTimings` blob on
