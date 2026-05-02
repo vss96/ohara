@@ -192,3 +192,32 @@ An agent **MUST NOT** declare a task complete until all of the following hold:
 9. Any rule in this document the change bends is explicitly called out in the agent's reply.
 
 If unsure about an API boundary, a trait split, or whether a refactor is in scope: **stop and ask** rather than guess.
+
+---
+
+## 14. Retrieval-quality eval (plan 10)
+
+The context-engine eval harness lives at `tests/perf/context_engine_eval.rs`
+and is gated behind `#[ignore]` so the default test run stays fast. It is
+the project's regression tripwire for product-critical retrieval queries.
+
+- Any PR that changes **retrieval ranking, chunking, hunk text, symbol
+  attribution, or query parsing** **MUST** run the harness and paste the
+  JSON summary line into the PR description:
+
+  ```bash
+  cargo test -p ohara-perf-tests -- --ignored context_engine_eval --nocapture
+  ```
+
+  The summary is the single line beginning `perf::context_engine_eval`
+  (cases, recall_at_1, recall_at_5, mrr, ndcg_lite, p50_ms, p95_ms,
+  failed_ids).
+
+- Acceptable exceptions (no eval needed): pure documentation, the
+  release workflow, presentation-only CLI changes that don't touch
+  ranking, refactors that don't move retrieval code.
+
+- A regression in the harness is **a reason to look closely**, not
+  necessarily a reason to revert. The cases are hand-picked tripwires;
+  use the per-failed-case dump to decide whether a change traded one
+  query's quality for another's, and call the trade-off out in the PR.
