@@ -61,6 +61,38 @@ duplicate symbols when run over a v0.2-era index).
 untouched — they're append-only and embed-stable. `--force` wins over
 `--incremental` if both flags are set.
 
+## Index compatibility (v0.7)
+
+A v0.7 index records per-component metadata in the `index_metadata`
+table at the end of every successful pass: embedding model, embedding
+dimension, reranker model, AST chunker version, semantic-text
+version, schema version, and one parser version per language. On
+every CLI / MCP invocation the runtime builds the same snapshot from
+constants and compares the two. The verdict is one of:
+
+| Verdict | Meaning | What it gates |
+|---|---|---|
+| `compatible` | Every recorded component matches the binary. | Nothing — proceed. |
+| `query-compatible, refresh recommended` | A *derived* component bumped (chunker, parser, semantic-text, reranker). KNN still works because the vectors are unchanged; the derived rows are stale. | `ohara index --force` to refresh derived rows. |
+| `needs rebuild` | A *vector-affecting* component differs (embedding model, dimension, schema). KNN against this index would return wrong results. | `ohara index --rebuild` to drop and rebuild. `find_pattern` MCP refuses to run; `explain_change` continues because blame doesn't use vectors. |
+| `unknown` | Pre-v0.7 index, or freshly migrated before any v0.7+ pass wrote metadata. | `ohara index --force` records current versions; future runs become `compatible`. |
+
+`--force` vs `--rebuild`:
+
+- `--force` refreshes derived symbol/chunker outputs without touching
+  the commit/hunk/vector history. Cheap; safe to re-run.
+- `--rebuild` deletes the entire index and rebuilds from scratch.
+  Slow and destructive; requires `--yes` to confirm. Use only when
+  the verdict is `needs rebuild`.
+
+Component-version constants live in their owning crates:
+[`ohara_parse::CHUNKER_VERSION`](https://github.com/vss96/ohara/blob/main/crates/ohara-parse/src/lib.rs)
++ `parser_versions()`, `ohara_embed::DEFAULT_MODEL_ID` /
+`DEFAULT_DIM` / `DEFAULT_RERANKER_ID`, and
+`ohara_core::index_metadata::{SCHEMA_VERSION, SEMANTIC_TEXT_VERSION}`.
+Bump a constant when its owning code's output semantics change in a
+way that would invalidate previously-indexed rows.
+
 ## Abort-resume contract
 
 The watermark advances every 100 commits during the commit walk. That,

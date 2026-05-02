@@ -135,6 +135,25 @@ The hook runs `ohara index --incremental` after every commit. It's safe to
 re-run `ohara init` (idempotent) and the hook fails closed if the `ohara`
 binary isn't on `PATH` (won't block your commits).
 
+## Upgrading & index compatibility
+
+Each ohara release records the embedder, chunker, and parser versions it
+used to build the index. After upgrading, run `ohara status` — the
+`compatibility:` line tells you whether the existing index is still
+usable as-is, needs a cheap refresh, or needs a full rebuild. The two
+recovery commands:
+
+- `ohara index --force` — refreshes derived symbol/chunker rows when
+  only those bumped. Commit + hunk + vector history is untouched.
+- `ohara index --rebuild --yes` — drops the entire index and rebuilds
+  from scratch. Required when the embedder model or vector dimension
+  changed; KNN against a stale-vector index would otherwise return
+  wrong results, and `find_pattern` (MCP) refuses to run until you
+  rebuild.
+
+Full design + the per-verdict table live in
+[`docs-book/src/architecture/indexing.md`](https://vss96.github.io/ohara/architecture/indexing.html#index-compatibility-v07).
+
 ## Layout
 
 See `docs/superpowers/specs/2026-04-30-ohara-context-engine-design.md` for the
