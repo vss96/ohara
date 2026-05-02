@@ -29,22 +29,22 @@ in the indexer test module.
 - Modify: `crates/ohara-storage/src/lib.rs` (the SqliteStorage impl)
 - Modify: `crates/ohara-storage/src/tables/commit.rs` (raw query)
 
-- [ ] **Step 1: Write the failing trait-level test.** In
+- [x] **Step 1: Write the failing trait-level test.** In
   `crates/ohara-core/src/indexer.rs` (where the existing
   `MockStorage` lives in `#[cfg(test)] mod tests`), extend the mock
   to track which commits "exist" and add a test that
   `commit_exists(known_sha)` returns true and `commit_exists(unknown_sha)`
   returns false. (This locks the trait shape before we wire it up to
   sqlite.) Run: should fail with "no method named `commit_exists`".
-- [ ] **Step 2: Add the trait method to `Storage`.** Signature:
+- [x] **Step 2: Add the trait method to `Storage`.** Signature:
   `async fn commit_exists(&self, sha: &str) -> Result<bool>;`. Doc
   comment should reference plan-9 / RFC for context. Run the test:
   should now fail with "MockStorage doesn't implement
   commit_exists".
-- [ ] **Step 3: Implement on the test mock.** Whatever shape the
+- [x] **Step 3: Implement on the test mock.** Whatever shape the
   existing mock uses for tracking commit state, mirror it. Test
   passes.
-- [ ] **Step 4: Commit.** `feat(core): add Storage::commit_exists for
+- [x] **Step 4: Commit.** `feat(core): add Storage::commit_exists for
   resume skip-check`.
 
 ### Task 1.2 — Sqlite impl
@@ -53,23 +53,26 @@ in the indexer test module.
 - Modify: `crates/ohara-storage/src/tables/commit.rs`
 - Modify: `crates/ohara-storage/src/lib.rs`
 
-- [ ] **Step 1: Write the failing test in
+- [x] **Step 1: Write the failing test in
   `crates/ohara-storage/src/tables/commit.rs`** (alongside existing
   `commit::put` tests): insert two commits, assert
   `commit_exists` for both shas is true; assert
   `commit_exists` for a random sha is false. Run: should fail with
-  "no method named `commit_exists`".
-- [ ] **Step 2: Implement `pub fn commit_exists(c: &mut Connection,
+  "no method named `commit_exists`". *(Landed in
+  `storage_impl.rs::tests` instead — that file owns every existing
+  storage round-trip test; no inline `#[cfg(test)]` mod existed in
+  any `tables/*.rs`.)*
+- [x] **Step 2: Implement `pub fn commit_exists(c: &mut Connection,
   sha: &str) -> Result<bool>`** in `commit.rs`. Body:
   `SELECT 1 FROM commit_record WHERE sha = ?1 LIMIT 1`, return
   `Ok(rows.next()?.is_some())`. Run the table-level test: passes.
-- [ ] **Step 3: Wire up `SqliteStorage::commit_exists`** in
+- [x] **Step 3: Wire up `SqliteStorage::commit_exists`** in
   `crates/ohara-storage/src/lib.rs` to delegate to
   `commit::commit_exists` inside `with_connection`. Cargo build
   workspace. Existing trait test from Task 1.1 should now pass
   end-to-end if a sqlite backing is used by the test (or stay
   scoped to mock — that's fine).
-- [ ] **Step 4: Commit.** `feat(storage): implement commit_exists
+- [x] **Step 4: Commit.** `feat(storage): implement commit_exists
   with PK lookup`.
 
 ## Phase 2 — Indexer skip-check
@@ -79,25 +82,27 @@ in the indexer test module.
 **Files:**
 - Modify: `crates/ohara-core/src/indexer.rs`
 
-- [ ] **Step 1: Write the failing regression test.** In
+- [x] **Step 1: Write the failing regression test.** In
   `indexer.rs`'s test module: build a `MockStorage` pre-seeded with
   two commits' worth of `commit_record` rows; run `Indexer::run` on
   a `MockGit` that returns those two SHAs plus one new SHA from
   `list_commits`; assert the embedder mock saw exactly **one**
   `embed_batch` call (for the new commit only). Run: should fail
   because today the indexer hits the embedder for all three.
-- [ ] **Step 2: Add the short-circuit.** In the per-commit loop in
+- [x] **Step 2: Add the short-circuit.** In the per-commit loop in
   `Indexer::run`, before any hunk-extraction or embedding work,
   call `self.storage.commit_exists(&meta.commit_sha).await?` — if
   true, `continue`. Tracing: `tracing::debug!(sha = %meta.commit_sha,
   "skip already-indexed commit");`. Run the test: passes.
-- [ ] **Step 3: Verify watermark semantics.** Add a second test
+- [x] **Step 3: Verify watermark semantics.** Add a second test
   asserting that the watermark advances even when the loop has
   consecutive skipped commits (so a Ctrl-C right after a series of
   skips doesn't re-walk them next time). The fix here may be
   threading `latest_sha` through the skip branch — confirm before
-  writing. Run: passes.
-- [ ] **Step 4: Commit.** `feat(core): skip already-indexed commits
+  writing. Run: passes. *(Threaded `latest_sha` + `commits_done` +
+  the periodic watermark-flush check through the skip branch so the
+  invariant holds across long all-skip stretches.)*
+- [x] **Step 4: Commit.** `feat(core): skip already-indexed commits
   on resume to avoid duplicate embedding`.
 
 ## Phase 3 — Doc + release
@@ -107,13 +112,13 @@ in the indexer test module.
 **Files:**
 - Modify: `docs-book/src/architecture/indexing.md`
 
-- [ ] **Step 1: Add a one-paragraph note** under the existing
+- [x] **Step 1: Add a one-paragraph note** under the existing
   resume / abort-resume section: "The watermark is a single SHA;
   on resume the indexer also short-circuits per-commit when
   `commit_record` already has a row, so merge-heavy histories
   don't pay re-embedding cost for commits reachable via a
   non-watermark-ancestor path." Link to the RFC.
-- [ ] **Step 2: Commit.** `docs(arch): note skip-already-indexed on
+- [x] **Step 2: Commit.** `docs(arch): note skip-already-indexed on
   resume`.
 
 ### Task 3.2 — Changelog + version bump + release
@@ -122,22 +127,23 @@ in the indexer test module.
 - Modify: `docs-book/src/changelog.md`
 - Modify: `Cargo.toml` (workspace version)
 
-- [ ] **Step 1: Add v0.6.3 changelog entry** above v0.6.2:
+- [x] **Step 1: Add v0.6.3 changelog entry** above v0.6.2:
   resume now skips commits that already have a `commit_record` row,
   fixing duplicate embedding cost on merge-heavy repos. Link to
   the RFC.
-- [ ] **Step 2: Bump workspace version to `0.6.3`.**
+- [x] **Step 2: Bump workspace version to `0.6.3`.**
 - [ ] **Step 3: Tag and push.** `git tag -a v0.6.3 -m "Release
   v0.6.3: skip already-indexed commits on resume" && git push
-  origin v0.6.3`.
+  origin v0.6.3`. *(Deferred to user — release action.)*
 - [ ] **Step 4: Watch the cargo-dist release workflow.** Confirm
   v0.6.3 artifacts publish; the per-host CoreML wiring from v0.6.2
-  carries forward unchanged.
+  carries forward unchanged. *(Deferred to user.)*
 - [ ] **Step 5: Spot-check on a live resume.** On a host that has
   the QuestDB index-in-progress: kill, `ohara update`, resume.
   Watch the log for `skip already-indexed commit` debug lines and
   confirm the first ~273 commits-already-in-DB get skipped under
-  30s instead of taking ~14 min to re-embed.
+  30s instead of taking ~14 min to re-embed. *(Deferred to user —
+  needs the live host.)*
 
 ## Risks
 
