@@ -1,10 +1,13 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
+use ohara_core::query::CommitsBehind;
 use ohara_core::{Indexer, IndexerReport, PhaseTimings, Storage};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::provider::{resolve_provider, ProviderArg};
+use super::provider::{
+    resolve_with_downgrade, ProviderArg, ProviderResolution, LONG_PASS_THRESHOLD,
+};
 use crate::resources::{apply_intensity, detect_host, pick_resources, ResourcePlan, ResourcesArg};
 
 #[derive(ClapArgs, Debug)]
@@ -85,6 +88,65 @@ pub fn phase_timings_json(pt: &PhaseTimings) -> String {
     serde_json::to_string(pt).expect("PhaseTimings serializes via derive(Serialize)")
 }
 
+/// Count commits the upcoming `index` run would walk, then resolve the
+/// `--embed-provider` flag with the Plan 7 Phase 2B long-pass downgrade
+/// applied.
+///
+/// The two log emissions live here, not in
+/// [`super::provider::resolve_with_downgrade`], because they depend on
+/// the runtime context (commit count, `tracing` subscriber): the
+/// downgrade `warn!` so users can see why CoreML wasn't picked, and a
+/// separate `warn!` when the user passed `--embed-provider coreml`
+/// explicitly on Apple Silicon (the path most likely to OOM).
+///
+/// Returns the concrete [`ohara_embed::EmbedProvider`] the embedder
+/// should be constructed with.
+async fn resolve_and_warn(
+    arg: ProviderArg,
+    repo_id: &ohara_core::RepoId,
+    storage: &Arc<ohara_storage::SqliteStorage>,
+    repo_path: &std::path::Path,
+) -> Result<ohara_embed::EmbedProvider> {
+    let st = storage.get_index_status(repo_id).await?;
+    let commits_behind = ohara_git::GitCommitsBehind::open(repo_path)?;
+    let commits_to_walk = commits_behind
+        .count_since(st.last_indexed_commit.as_deref())
+        .await?;
+
+    let resolution = resolve_with_downgrade(arg, commits_to_walk, LONG_PASS_THRESHOLD);
+    log_resolution_warnings(arg, commits_to_walk, &resolution);
+    Ok(resolution.provider)
+}
+
+/// Pure helper for the warnings emitted by [`resolve_and_warn`].
+/// Pulled out so the wording is unit-testable without a real repo or
+/// storage handle.
+fn log_resolution_warnings(
+    arg: ProviderArg,
+    commits_to_walk: u64,
+    resolution: &ProviderResolution,
+) {
+    if let Some(commits) = resolution.downgraded_from_coreml {
+        tracing::warn!(
+            commits,
+            threshold = LONG_PASS_THRESHOLD,
+            "auto-downgrading embedder from CoreML to CPU: long index pass would OOM (see docs/perf/v0.6.1-leak-diagnosis.md). \
+             Pass --embed-provider coreml explicitly to bypass.",
+        );
+        return;
+    }
+    if matches!(arg, ProviderArg::Coreml)
+        && cfg!(target_os = "macos")
+        && cfg!(target_arch = "aarch64")
+    {
+        tracing::warn!(
+            commits = commits_to_walk,
+            "--embed-provider coreml on Apple Silicon leaks ~4 MB/batch (see docs/perf/v0.6.1-leak-diagnosis.md). \
+             For long index passes use --embed-provider auto to fall back to CPU automatically.",
+        );
+    }
+}
+
 pub async fn run(args: Args) -> Result<IndexerReport> {
     let (repo_id, canonical, first_commit) = super::resolve_repo_id(&args.path)?;
     let db_path = super::index_db_path(&repo_id)?;
@@ -153,7 +215,8 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         tracing::info!(threads = plan.threads, "capping embedder threads");
     }
 
-    let chosen_provider = resolve_provider(plan.embed_provider);
+    let chosen_provider =
+        resolve_and_warn(plan.embed_provider, &repo_id, &storage, &canonical).await?;
     tracing::info!(provider = ?chosen_provider, "embedder");
     let embedder = Arc::new(
         tokio::task::spawn_blocking(move || {
@@ -304,5 +367,46 @@ mod merge_tests {
                 embed_provider: ProviderArg::Cpu,
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod warning_tests {
+    use super::*;
+    use ohara_embed::EmbedProvider;
+
+    /// `log_resolution_warnings` is pure (just emits `tracing` events)
+    /// so it can't directly fail a test, but the branches are
+    /// straightforward enough that an "it doesn't panic on every
+    /// permutation" smoke test plus the
+    /// `super::super::provider::tests::*` resolution tests cover the
+    /// behaviour. This module exists so the function is referenced
+    /// from a test target — protecting against accidental dead-code
+    /// removal — and so a future structured-log assertion has a
+    /// place to land.
+    #[test]
+    fn warnings_handle_every_resolution_permutation() {
+        let downgraded = ProviderResolution {
+            provider: EmbedProvider::Cpu,
+            downgraded_from_coreml: Some(LONG_PASS_THRESHOLD + 1),
+        };
+        let coreml_passthrough = ProviderResolution {
+            provider: EmbedProvider::CoreMl,
+            downgraded_from_coreml: None,
+        };
+        let cpu_passthrough = ProviderResolution {
+            provider: EmbedProvider::Cpu,
+            downgraded_from_coreml: None,
+        };
+        for arg in [
+            ProviderArg::Auto,
+            ProviderArg::Cpu,
+            ProviderArg::Coreml,
+            ProviderArg::Cuda,
+        ] {
+            log_resolution_warnings(arg, 0, &cpu_passthrough);
+            log_resolution_warnings(arg, 50, &coreml_passthrough);
+            log_resolution_warnings(arg, LONG_PASS_THRESHOLD + 1, &downgraded);
+        }
     }
 }
