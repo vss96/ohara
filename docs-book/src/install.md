@@ -72,14 +72,18 @@ or leave it on the default `auto`, which picks CoreML on Apple
 silicon, CUDA when `CUDA_VISIBLE_DEVICES` is set, and CPU otherwise.
 Default features stay CPU-only.
 
-> **Known issue (CoreML on long index runs).** On a 5,000+ commit
-> first-time index, the CoreML execution path can leak unbounded
-> memory — observed climbing to 32 GB+ before macOS jetsam reaps the
-> process. The leak appears specific to repeated small-batch inference
-> through `ort`'s CoreML provider; CPU and CUDA paths are unaffected.
-> Workaround for v0.6: use `--embed-provider cpu` for cold first-time
-> indexes; CoreML is still useful for short-lived `ohara query` /
-> `ohara index --incremental` calls. Tracked for v0.6.1 investigation.
+> **CoreML on long index runs (v0.6.1 workaround).** On Apple Silicon,
+> the CoreML execution path leaks ~4 MB per `embed_batch` call
+> (`MALLOC_LARGE` heap, see
+> [`docs/perf/v0.6.1-leak-diagnosis.md`](https://github.com/vss96/ohara/blob/main/docs/perf/v0.6.1-leak-diagnosis.md)) —
+> a 5,000+ commit first-time index would OOM the host before
+> completing. v0.6.1's `--embed-provider auto` therefore resolves to
+> CPU on Apple Silicon when the upcoming index pass would walk more
+> than 1,000 commits; short passes (`query`, `index --incremental`,
+> small repos) still pick CoreML. Pass `--embed-provider coreml`
+> explicitly to bypass the downgrade and accept the OOM risk; CPU
+> and CUDA paths are unaffected. Re-opened upstream investigation
+> (fastembed / ort) is tracked for a future release.
 
 ## Updating
 

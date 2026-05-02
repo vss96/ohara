@@ -4,6 +4,37 @@ User-facing release notes. The full commit log lives on
 [GitHub](https://github.com/vss96/ohara/commits/main); this page is
 the highlights.
 
+## v0.6.1 — CoreML long-pass auto-downgrade
+
+Workaround release for the CoreML embedder leak called out under
+v0.6.0's "Known issues". Diagnosis is in
+[`docs/perf/v0.6.1-leak-diagnosis.md`](https://github.com/vss96/ohara/blob/main/docs/perf/v0.6.1-leak-diagnosis.md):
+the leak is heap-attributable (~4 MB / `embed_batch`, `MALLOC_LARGE`),
+not an `MLModel` / ANE-side retention. Rebuild-cadence probes
+mitigate by ~2× but don't bound the growth, so v0.6.1 ships a
+documented workaround rather than an in-tree fix; the upstream
+investigation in fastembed / ort is re-opened.
+
+- **`--embed-provider auto` now downgrades to CPU on Apple Silicon
+  for long index passes** (more than 1,000 commits to walk).
+  Short-lived `query` and `index --incremental` calls keep the
+  CoreML auto-pick. Threshold lives in
+  [`crates/ohara-cli/src/commands/provider.rs`](https://github.com/vss96/ohara/blob/main/crates/ohara-cli/src/commands/provider.rs).
+- **Explicit `--embed-provider coreml` is honoured unchanged**, with
+  a one-time `tracing::warn!` on startup pointing at the diagnosis
+  doc. Bypass the downgrade with this flag if you have headroom and
+  want the speedup.
+- **`tests/perf/coreml_leak_repro.rs`** (`#[ignore]`'d) ships as the
+  regression harness. Re-run with `--features ohara-embed/coreml`
+  on Apple Silicon when an upstream candidate fix lands.
+
+### Migration
+
+Anyone using v0.6.0 with the documented workaround
+(`--embed-provider cpu`) can drop the flag — `--embed-provider auto`
+now does the same thing for long passes. CUDA and CPU users see no
+change.
+
 ## v0.6.0 — Throughput prep, hardware acceleration opt-in
 
 - **`--embed-provider {auto,cpu,coreml,cuda}`** CLI flag with
@@ -40,9 +71,10 @@ the highlights.
   coreml`, memory grows unbounded (observed 32 GB+ before macOS
   jetsam kills the process). The leak appears specific to repeated
   small-batch inference through `ort`'s CoreML provider; the CPU and
-  CUDA paths are unaffected. Use `--embed-provider cpu` for cold
-  first-time indexes; CoreML is fine for short-lived `ohara query` /
-  `ohara index --incremental` calls. Tracked for v0.6.1.
+  CUDA paths are unaffected. **Documented workaround in v0.6.1**:
+  `--embed-provider auto` downgrades to CPU for long passes on
+  Apple Silicon — see the v0.6.1 entry above and
+  [`docs/perf/v0.6.1-leak-diagnosis.md`](https://github.com/vss96/ohara/blob/main/docs/perf/v0.6.1-leak-diagnosis.md).
 
 ## v0.5.1
 
