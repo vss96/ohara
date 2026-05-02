@@ -72,6 +72,15 @@ or leave it on the default `auto`, which picks CoreML on Apple
 silicon, CUDA when `CUDA_VISIBLE_DEVICES` is set, and CPU otherwise.
 Default features stay CPU-only.
 
+> **Known issue (CoreML on long index runs).** On a 5,000+ commit
+> first-time index, the CoreML execution path can leak unbounded
+> memory — observed climbing to 32 GB+ before macOS jetsam reaps the
+> process. The leak appears specific to repeated small-batch inference
+> through `ort`'s CoreML provider; CPU and CUDA paths are unaffected.
+> Workaround for v0.6: use `--embed-provider cpu` for cold first-time
+> indexes; CoreML is still useful for short-lived `ohara query` /
+> `ohara index --incremental` calls. Tracked for v0.6.1 investigation.
+
 ## Updating
 
 The CLI can self-update in place:

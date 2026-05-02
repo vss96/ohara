@@ -33,6 +33,17 @@ the highlights.
   `ohara-parse/src/` extractors consolidated under `languages/`. No
   public API change.
 
+### Known issues
+
+- **CoreML memory leak on long cold-index runs (Apple silicon).** On a
+  5,000+ commit first-time `ohara index` with `--embed-provider
+  coreml`, memory grows unbounded (observed 32 GB+ before macOS
+  jetsam kills the process). The leak appears specific to repeated
+  small-batch inference through `ort`'s CoreML provider; the CPU and
+  CUDA paths are unaffected. Use `--embed-provider cpu` for cold
+  first-time indexes; CoreML is fine for short-lived `ohara query` /
+  `ohara index --incremental` calls. Tracked for v0.6.1.
+
 ## v0.5.1
 
 - **Self-update.** `ohara update` (and `--check` / `--prerelease`)
