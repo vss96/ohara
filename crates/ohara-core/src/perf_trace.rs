@@ -96,6 +96,56 @@ mod tests {
         }
     }
 
+    struct PhaseEventFull {
+        phase: Option<String>,
+        has_elapsed_ms: bool,
+        hit_count: Option<u64>,
+    }
+
+    struct PhaseVisitorFull<'a>(&'a mut PhaseEventFull);
+
+    impl Visit for PhaseVisitorFull<'_> {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "phase" {
+                self.0.phase = Some(value.to_owned());
+            }
+        }
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            if field.name() == "elapsed_ms" {
+                self.0.has_elapsed_ms = true;
+            }
+            if field.name() == "hit_count" {
+                self.0.hit_count = Some(value);
+            }
+        }
+
+        fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
+    }
+
+    struct CaptureLayerFull {
+        captured: Arc<Mutex<Vec<PhaseEventFull>>>,
+    }
+
+    impl<S: tracing::Subscriber> Layer<S> for CaptureLayerFull {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != "ohara::phase" {
+                return;
+            }
+            let mut pe = PhaseEventFull {
+                phase: None,
+                has_elapsed_ms: false,
+                hit_count: None,
+            };
+            event.record(&mut PhaseVisitorFull(&mut pe));
+            self.captured.lock().unwrap().push(pe);
+        }
+    }
+
     #[test]
     fn timed_phase_emits_one_event_with_phase_and_elapsed_ms() {
         use super::timed_phase;
@@ -118,5 +168,31 @@ mod tests {
         let ev = &events[0];
         assert_eq!(ev.phase.as_deref(), Some("lane_knn"), "phase name mismatch");
         assert!(ev.has_elapsed_ms, "elapsed_ms field was not recorded");
+    }
+
+    #[test]
+    fn timed_phase_with_count_emits_phase_elapsed_ms_and_hit_count() {
+        use super::timed_phase_with_count;
+
+        let captured: Arc<Mutex<Vec<PhaseEventFull>>> = Arc::new(Mutex::new(Vec::new()));
+        let layer = CaptureLayerFull {
+            captured: Arc::clone(&captured),
+        };
+        let subscriber = tracing_subscriber::Registry::default().with(layer);
+
+        tracing::subscriber::with_default(subscriber, || {
+            futures::executor::block_on(async {
+                let result =
+                    timed_phase_with_count("rerank", async { (vec!["a", "b", "c"], 3) }).await;
+                assert_eq!(result, vec!["a", "b", "c"]);
+            });
+        });
+
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 1, "expected exactly one phase event");
+        let ev = &events[0];
+        assert_eq!(ev.phase.as_deref(), Some("rerank"), "phase name mismatch");
+        assert!(ev.has_elapsed_ms, "elapsed_ms field was not recorded");
+        assert_eq!(ev.hit_count, Some(3), "hit_count field mismatch");
     }
 }
