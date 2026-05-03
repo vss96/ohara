@@ -14,6 +14,7 @@ pub mod index_metadata;
 pub mod indexer;
 pub mod paths;
 pub mod query;
+pub mod query_understanding;
 pub mod retriever;
 pub mod storage;
 pub mod types;
