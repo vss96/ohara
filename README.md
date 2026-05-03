@@ -19,8 +19,11 @@ plumbing and opt-in hardware acceleration on the indexer:
   history with three-lane retrieval pipeline + cross-encoder rerank,
   shipped in v0.3).
 - **`explain_change`** — "why does THIS code look the way it does?"
-  (deterministic git-blame-based commit lookup for a file + line
-  range; new in v0.5).
+  Two answers: which commits introduced these lines exactly
+  (`hits[]`, blame-backed `provenance = "EXACT"`) and what nearby
+  changes shaped this area contextually (`_meta.explain.related_commits[]`,
+  file-scope neighbours `provenance = "INFERRED"`). Blame is from
+  v0.5; the contextual enrichment lands in v0.7 (plan 12).
 
 v0.6 highlights: `--profile` per-phase wall-time JSON for the
 throughput baseline; `--embed-provider {auto,cpu,coreml,cuda}`

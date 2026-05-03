@@ -1,12 +1,19 @@
 # `explain_change`
 
-Git-archaeology over a specific file and line range. Answers **"why
-does THIS code look the way it does?"** by walking `git blame` and
-returning the commits that introduced and shaped those lines,
-newest-first.
+Git-archaeology over a specific file and line range. Two questions
+in one tool:
 
-Deterministic — backed by `git blame`, not embeddings. Every result
-has `provenance = "EXACT"`. Companion to
+1. **"Which commits introduced these lines?"** Backed by `git blame`,
+   exact attribution. Each blame `hits[i]` carries
+   `provenance = "EXACT"`.
+2. **"What nearby changes shaped this area?"** Plan 12 enrichment.
+   Contextual commits that touched the same file around the blame
+   anchors, returned under `_meta.explain.related_commits` with
+   `provenance = "INFERRED"` so clients don't confuse them with
+   line-level proof.
+
+Deterministic — backed by `git blame` + a cheap indexed
+`get_neighboring_file_commits` lookup, not embeddings. Companion to
 [`find_pattern`](./find_pattern.md), which is semantic.
 
 ## When to use
@@ -36,6 +43,7 @@ Schema source: `ExplainChangeInput` in
 | `line_end` | integer | `0` | 1-based end line, inclusive. `0` is a sentinel meaning "end of file" — the server resolves it by reading the workdir checkout. |
 | `k` | integer | `5` | Number of commits to return; clamped to `1..=20`. |
 | `include_diff` | boolean | `true` | Include `diff_excerpt` in each hit. Set to `false` for a tighter response when only the blame attribution matters. |
+| `include_related` | boolean | CLI: `true` / MCP: `false` | Plan 12 Task 3.2 — attach contextual commits under `_meta.explain.related_commits`. CLI defaults to on so `ohara explain` answers include nearby context; MCP defaults to off to keep the response payload predictable. |
 
 If only `file` is provided, the tool explains the whole file (line 1
 through end-of-file) with the default `k = 5`.
@@ -67,7 +75,17 @@ A JSON document with `hits` and `_meta`. Each hit follows the
       "lines_queried": [40, 60],
       "commits_unique": 1,
       "blame_coverage": 1.0,
-      "limitation": null
+      "limitation": null,
+      "related_commits": [
+        {
+          "commit_sha": "5a4b3c2d...",
+          "commit_message": "auth: add token refresh helper",
+          "commit_author": "Bob",
+          "commit_date": "2024-10-20T14:11:00Z",
+          "touched_hunks": 2,
+          "provenance": "INFERRED"
+        }
+      ]
     }
   }
 }
@@ -84,6 +102,23 @@ Notes on the `_meta.explain` block:
 - `limitation` is a free-form note when the result set is constrained
   (e.g. "file does not exist in HEAD" or "file was renamed; pre-rename
   history not reached").
+- `related_commits` (plan 12) is the file-scope context list — commits
+  that touched the same file near each blame anchor. **These are NOT
+  proof of line-level ownership**; they're labelled
+  `provenance = "INFERRED"` and capped at 2 commits before + 2
+  commits after each blame anchor, deduped across anchors. The list
+  is omitted entirely when `include_related = false` or no
+  neighbouring commits exist.
+- `enrichment_limitation` is a free-form note when enrichment was
+  constrained (e.g. "no indexed blame anchors — no contextual
+  neighbours available").
+
+### How to read the two response sections
+
+| Field | Provenance | Meaning |
+|---|---|---|
+| `hits[i]` | `EXACT` | This commit introduced these specific lines (git blame). |
+| `_meta.explain.related_commits[i]` | `INFERRED` | This commit touched the same file in the same time window, but doesn't necessarily own these lines. Use as context, not proof. |
 
 ## Example
 
