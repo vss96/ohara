@@ -84,6 +84,20 @@ fn init_tracing(perf_acc: Option<PerfAccumulator>) {
     let indicatif_layer = IndicatifLayer::new();
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ohara=debug"));
+    // When --trace-perf is on, force-enable `ohara::phase=info` so the
+    // PerfAccumulator sees events even if RUST_LOG is set to filter
+    // info-level messages globally (e.g. RUST_LOG=warn). Without this,
+    // operators who quiet log noise via RUST_LOG would get an empty
+    // [phase] summary and no signal that events were dropped.
+    let env_filter = if perf_acc.is_some() {
+        env_filter.add_directive(
+            "ohara::phase=info"
+                .parse()
+                .expect("invariant: ohara::phase=info is a valid directive"),
+        )
+    } else {
+        env_filter
+    };
     let fmt_layer =
         tracing_subscriber::fmt::layer().with_writer(indicatif_layer.get_stderr_writer());
     let registry = tracing_subscriber::registry()
