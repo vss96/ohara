@@ -750,20 +750,43 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn find_pattern_emits_expected_phase_events() {
+    // ---- Phase-event capture infrastructure ---------------------------------
+    //
+    // A per-test thread-local subscriber is racy: a parallel test's noop
+    // dispatcher can win the `DefaultCallsite::register()` race and cache
+    // `Interest::never()` for `timed_phase`'s callsite before ours installs,
+    // making events invisible.
+    //
+    // Fix: install one global subscriber for the whole test binary via
+    // `set_global_default` + `OnceLock`.  Callsites are then registered with
+    // `Interest::always()` from the start.  Each caller of
+    // `acquire_phase_collector` gets an exclusive `Arc<Mutex<BTreeSet>>`
+    // (serialised behind a global mutex) that the shared layer writes into.
+
+    type PhaseSink = Mutex<Option<Arc<Mutex<std::collections::BTreeSet<String>>>>>;
+
+    /// Returns the global phase-event sink slot.
+    fn phase_sink() -> &'static PhaseSink {
+        use std::sync::OnceLock;
+        static SINK: OnceLock<PhaseSink> = OnceLock::new();
+        SINK.get_or_init(|| Mutex::new(None))
+    }
+
+    /// Acquires exclusive access to the phase-event capture slot.
+    ///
+    /// Returns `(seen, guard)`.  While `guard` is live the global `PhaseLayer`
+    /// writes `ohara::phase` event names into `seen`.  Dropping `guard` clears
+    /// the slot and releases the serialisation lock.
+    fn acquire_phase_collector() -> (Arc<Mutex<std::collections::BTreeSet<String>>>, PhaseGuard) {
         use std::collections::BTreeSet;
-        use std::sync::{Arc, Mutex};
+        use std::sync::OnceLock;
         use tracing::field::{Field, Visit};
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::Layer;
 
-        struct PhaseSet {
-            seen: Arc<Mutex<BTreeSet<String>>>,
-        }
+        struct PhaseLayer;
 
         struct PhaseVisitor<'a>(&'a mut Option<String>);
-
         impl Visit for PhaseVisitor<'_> {
             fn record_str(&mut self, field: &Field, value: &str) {
                 if field.name() == "phase" {
@@ -773,7 +796,7 @@ mod tests {
             fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
         }
 
-        impl<S: tracing::Subscriber> Layer<S> for PhaseSet {
+        impl<S: tracing::Subscriber> Layer<S> for PhaseLayer {
             fn on_event(
                 &self,
                 event: &tracing::Event<'_>,
@@ -785,16 +808,45 @@ mod tests {
                 let mut phase: Option<String> = None;
                 event.record(&mut PhaseVisitor(&mut phase));
                 if let Some(p) = phase {
-                    self.seen.lock().unwrap().insert(p);
+                    if let Some(sink) = phase_sink().lock().unwrap().as_ref() {
+                        sink.lock().unwrap().insert(p);
+                    }
                 }
             }
         }
 
+        // Install the global subscriber exactly once per process.
+        static INSTALLED: OnceLock<()> = OnceLock::new();
+        INSTALLED.get_or_init(|| {
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::Registry::default().with(PhaseLayer),
+            )
+            .expect("global tracing subscriber set once");
+        });
+
+        // Serialise so only one test writes to the sink at a time.
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock_guard = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
         let seen: Arc<Mutex<BTreeSet<String>>> = Arc::new(Mutex::new(BTreeSet::new()));
-        let layer = PhaseSet {
-            seen: Arc::clone(&seen),
-        };
-        let subscriber = tracing_subscriber::Registry::default().with(layer);
+        *phase_sink().lock().unwrap() = Some(Arc::clone(&seen));
+        (seen, PhaseGuard(lock_guard))
+    }
+
+    struct PhaseGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    impl Drop for PhaseGuard {
+        fn drop(&mut self) {
+            *phase_sink().lock().unwrap() = None;
+            // self.0 (the serialisation lock guard) drops here.
+        }
+    }
+
+    #[test]
+    fn find_pattern_emits_expected_phase_events() {
+        let (seen, _guard) = acquire_phase_collector();
 
         let now = 1_700_000_000;
         let knn = vec![fake_hit(1, "a", now, 0.9, "diff-a")];
@@ -811,10 +863,11 @@ mod tests {
         };
         let id = RepoId::from_parts("x", "/y");
 
-        tracing::subscriber::with_default(subscriber, || {
-            futures::executor::block_on(async {
-                let _ = r.find_pattern(&id, &q, now).await.unwrap();
-            });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let _ = r.find_pattern(&id, &q, now).await.unwrap();
         });
 
         let seen = seen.lock().unwrap();
