@@ -30,3 +30,10 @@ install-updater = true
 # stay CPU-only by default — the feature only flips on for the
 # released binary path. See plan-8 / multi-dist RFC.
 features = ["coreml"]
+# cargo-dist hardcodes workflow permissions to `contents: write` only. GitHub also
+# requires `workflows: write` when `gh release create --target` applies to a commit
+# that touches `.github/workflows/**` (403 otherwise; cli/cli#9514). We extend
+# `.github/workflows/release.yml` with that scope. With `allow-dirty = ["ci"]`,
+# `dist generate` does not overwrite CI; remove `ci` from this list temporarily when
+# refreshing generated workflows from a newer cargo-dist, then restore the permissions.
+allow-dirty = ["ci"]
