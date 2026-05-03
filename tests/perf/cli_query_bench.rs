@@ -14,6 +14,7 @@
 //!     --ignored cli_query_bench --nocapture
 //! ```
 
+use ohara_perf_tests::{current_git_sha, ensure_medium_fixture, workspace_root};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -56,36 +57,6 @@ struct RunReport {
     phases: BTreeMap<String, PhaseStats>,
 }
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace root resolves")
-        .to_path_buf()
-}
-
-fn ensure_medium_fixture() -> PathBuf {
-    let root = workspace_root();
-    let script = root.join("fixtures/build_medium.sh");
-    let status = Command::new("bash")
-        .arg(&script)
-        .status()
-        .expect("invoke build_medium.sh");
-    assert!(status.success(), "build_medium.sh failed");
-    let dest = root.join("fixtures/medium/repo");
-    assert!(dest.join(".git").is_dir(), "medium fixture not present");
-    dest
-}
-
-fn current_git_sha(root: &std::path::Path) -> String {
-    let out = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(root)
-        .output()
-        .expect("git rev-parse");
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
-
 /// Parse one `[phase] <name>     <N>ms ...` line from `--trace-perf`
 /// stderr. Returns `(name, ms)` or `None` when the line is the trailing
 /// `total` summary or any unrelated stderr noise.
@@ -94,7 +65,7 @@ fn parse_phase_line(line: &str) -> Option<(String, u64)> {
     let rest = l.strip_prefix("[phase] ")?;
     let mut it = rest.split_whitespace();
     let name = it.next()?.to_string();
-    if name == "total" {
+    if name == "sum_of_phases" {
         return None;
     }
     let ms_token = it.next()?;

@@ -3,14 +3,14 @@
 //! totals + counts, and prints a compact summary to stderr at
 //! process exit.
 //!
-//! End-user output shape (one line per phase, plus a `total`):
+//! End-user output shape (one line per phase, plus a `sum_of_phases`):
 //!
 //! ```text
 //! [phase] storage_open    8ms    n=1
 //! [phase] embed_load   1820ms    n=1
 //! [phase] embed_query    12ms    n=1
 //! [phase] lane_knn       24ms    n=1   hits=87
-//! [phase] total        7042ms
+//! [phase] sum_of_phases  7042ms
 //! ```
 
 use std::sync::Arc;
@@ -33,6 +33,13 @@ pub struct PerfAccumulator {
 }
 
 impl PerfAccumulator {
+    /// Print the accumulated per-phase summary to stderr.
+    ///
+    /// The footer reports `sum_of_phases`, NOT wall-clock — phases run
+    /// inside `tokio::join!` (the four lane queries) overlap in real
+    /// time, so summing their `elapsed_ms` overestimates wall-clock.
+    /// Operators wanting wall-clock should diff the harness output's
+    /// `wall_ms` field, not this stderr summary.
     pub fn print_summary_to_stderr(&self) {
         let phases = self.phases.lock().unwrap_or_else(|e| e.into_inner());
         let mut total_ms = 0_u64;
@@ -51,7 +58,7 @@ impl PerfAccumulator {
                 hits = hits_part,
             );
         }
-        eprintln!("[phase] {:<22} {:>5}ms", "total", total_ms);
+        eprintln!("[phase] {:<22} {:>5}ms", "sum_of_phases", total_ms);
     }
 }
 

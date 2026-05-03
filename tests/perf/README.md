@@ -212,7 +212,7 @@ on the `ohara::phase` tracing target. End-of-process stderr summary:
 [phase] lane_fts_text    18ms   n=1   hits=87
 [phase] rerank          780ms   n=1
 [phase] hydrate_symbols  45ms   n=1
-[phase] total          7042ms
+[phase] sum_of_phases  7042ms
 ```
 
 Equivalent MCP per-phase data is captured by `mcp_query_bench` directly via
