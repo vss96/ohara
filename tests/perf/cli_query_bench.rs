@@ -153,6 +153,11 @@ fn cli_query_bench_emits_run_report() {
                 phases.entry(name).or_default().samples.push(ms);
             }
         }
+        assert!(
+            !phases.is_empty(),
+            "iter {i}: no [phase] lines captured in stderr — \
+             is --trace-perf wired up correctly?"
+        );
     }
 
     let utc = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
