@@ -44,6 +44,102 @@ pub async fn timed_phase_with_count<T, F: Future<Output = (T, usize)>>(
     out
 }
 
+/// Shared test fixture for capturing `ohara::phase` events emitted by
+/// `timed_phase` under libtest parallelism.
+///
+/// A per-test thread-local subscriber is racy: a parallel test's noop
+/// dispatcher can win the `DefaultCallsite::register()` race and cache
+/// `Interest::never()` for `timed_phase`'s callsite before ours installs,
+/// making events invisible.
+///
+/// Fix: install one global subscriber for the whole test binary via
+/// `set_global_default` + `OnceLock`. Callsites are then registered with
+/// `Interest::always()` from the start. Each caller of
+/// `acquire_phase_collector` gets an exclusive `Arc<Mutex<BTreeSet>>`
+/// (serialised behind a global mutex) that the shared layer writes into.
+#[cfg(test)]
+pub(crate) mod test_phase_capture {
+    use std::collections::BTreeSet;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::Layer;
+
+    pub(crate) type PhaseSink = Mutex<Option<Arc<Mutex<BTreeSet<String>>>>>;
+
+    /// Returns the global phase-event sink slot.
+    pub(crate) fn phase_sink() -> &'static PhaseSink {
+        static SINK: OnceLock<PhaseSink> = OnceLock::new();
+        SINK.get_or_init(|| Mutex::new(None))
+    }
+
+    struct PhaseLayer;
+
+    struct PhaseVisitor<'a>(&'a mut Option<String>);
+    impl Visit for PhaseVisitor<'_> {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "phase" {
+                *self.0 = Some(value.to_owned());
+            }
+        }
+        fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
+    }
+
+    impl<S: tracing::Subscriber> Layer<S> for PhaseLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != "ohara::phase" {
+                return;
+            }
+            let mut phase: Option<String> = None;
+            event.record(&mut PhaseVisitor(&mut phase));
+            if let Some(p) = phase {
+                if let Some(sink) = phase_sink().lock().unwrap().as_ref() {
+                    sink.lock().unwrap().insert(p);
+                }
+            }
+        }
+    }
+
+    pub(crate) struct PhaseGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    impl Drop for PhaseGuard {
+        fn drop(&mut self) {
+            *phase_sink().lock().unwrap() = None;
+            // self.0 (the serialisation lock guard) drops here.
+        }
+    }
+
+    /// Acquires exclusive access to the phase-event capture slot.
+    ///
+    /// Returns `(seen, guard)`. While `guard` is live the global `PhaseLayer`
+    /// writes `ohara::phase` event names into `seen`. Dropping `guard` clears
+    /// the slot and releases the serialisation lock.
+    pub(crate) fn acquire_phase_collector() -> (Arc<Mutex<BTreeSet<String>>>, PhaseGuard) {
+        // Install the global subscriber exactly once per process.
+        static INSTALLED: OnceLock<()> = OnceLock::new();
+        INSTALLED.get_or_init(|| {
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::Registry::default().with(PhaseLayer),
+            )
+            .expect("global tracing subscriber set once");
+        });
+
+        // Serialise so only one test writes to the sink at a time.
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock_guard = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let seen: Arc<Mutex<BTreeSet<String>>> = Arc::new(Mutex::new(BTreeSet::new()));
+        *phase_sink().lock().unwrap() = Some(Arc::clone(&seen));
+        (seen, PhaseGuard(lock_guard))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};

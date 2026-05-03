@@ -958,4 +958,45 @@ mod tests {
         let (_hits, meta) = explain_change(&storage, &blamer, &id, &q).await.unwrap();
         assert!(meta.related_commits.is_empty());
     }
+
+    #[test]
+    fn explain_change_emits_blame_and_hydrate_phases() {
+        let (seen, _guard) = crate::perf_trace::test_phase_capture::acquire_phase_collector();
+
+        let mut storage = FakeStorageOrch::new();
+        storage.seed_commit(cm("abc", 1_000, "msg"));
+        storage.seed_hunk("abc", "src/a.rs", "+    a();\n");
+        let blamer = ScriptedBlamer {
+            out: vec![BlameRange {
+                commit_sha: "abc".into(),
+                lines: vec![1, 2, 3],
+            }],
+            last_args: Mutex::new(None),
+        };
+        let q = ExplainQuery {
+            file: "src/a.rs".into(),
+            line_start: 1,
+            line_end: 3,
+            k: 5,
+            include_diff: true,
+            include_related: false,
+        };
+        let id = RepoId::from_parts("seed", "/r");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let _ = explain_change(&storage, &blamer, &id, &q).await.unwrap();
+        });
+
+        let seen = seen.lock().unwrap();
+        for required in ["blame", "hydrate_explain"] {
+            assert!(
+                seen.contains(required),
+                "missing phase event {required}; seen = {:?}",
+                *seen
+            );
+        }
+    }
 }
