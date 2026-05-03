@@ -76,6 +76,53 @@ impl CommitSource for GitCommitSource {
         .await
         .map_err(|e| ohara_core::OhraError::Git(format!("hunks_for_commit: join: {e}")))?
     }
+
+    /// Plan 11: read the post-image content of `path` at `sha`.
+    /// Returns `Ok(None)` for files that don't exist at the commit
+    /// (deleted, renamed-away) or whose content isn't valid UTF-8
+    /// (binary blob — symbol attribution doesn't apply). Errors only
+    /// on git lookup failures, not on missing-file or
+    /// non-UTF-8 content.
+    #[tracing::instrument(skip(self), fields(repo = %self.repo_path.display()))]
+    async fn file_at_commit(&self, sha: &str, path: &str) -> ohara_core::Result<Option<String>> {
+        let sha = sha.to_string();
+        let path = path.to_string();
+        let repo = self.repo.clone();
+        tokio::task::spawn_blocking(move || -> ohara_core::Result<Option<String>> {
+            let guard = repo
+                .lock()
+                .map_err(|e| ohara_core::OhraError::Git(format!("repo lock poisoned: {e}")))?;
+            let oid = git2::Oid::from_str(&sha)
+                .map_err(|e| ohara_core::OhraError::Git(format!("parse oid {sha}: {e}")))?;
+            let commit = guard
+                .find_commit(oid)
+                .map_err(|e| ohara_core::OhraError::Git(format!("find commit {sha}: {e}")))?;
+            let tree = commit
+                .tree()
+                .map_err(|e| ohara_core::OhraError::Git(format!("tree for {sha}: {e}")))?;
+            // get_path returns Err for missing entries — treat that as
+            // "file not present at this commit" (Ok(None)) rather than
+            // bubbling.
+            let entry = match tree.get_path(std::path::Path::new(&path)) {
+                Ok(e) => e,
+                Err(_) => return Ok(None),
+            };
+            let object = entry
+                .to_object(&guard)
+                .map_err(|e| ohara_core::OhraError::Git(format!("entry to_object: {e}")))?;
+            let blob = match object.into_blob() {
+                Ok(b) => b,
+                Err(_) => return Ok(None), // not a blob (submodule, etc.)
+            };
+            // Binary content -> None; symbol attribution is text-only.
+            match std::str::from_utf8(blob.content()) {
+                Ok(s) => Ok(Some(s.to_string())),
+                Err(_) => Ok(None),
+            }
+        })
+        .await
+        .map_err(|e| ohara_core::OhraError::Git(format!("file_at_commit: join: {e}")))?
+    }
 }
 
 /// Adapter implementing the git-free `CommitsBehind` trait from

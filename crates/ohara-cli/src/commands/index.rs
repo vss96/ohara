@@ -324,7 +324,13 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
     let indexer = Indexer::new(storage.clone(), embedder.clone())
         .with_batch_commits(plan.commit_batch)
         .with_progress(progress)
-        .with_runtime_metadata(runtime_metadata);
+        .with_runtime_metadata(runtime_metadata)
+        // Plan 11: enable ExactSpan hunk-symbol attribution by wiring
+        // the tree-sitter atomic extractor through. Falls back to
+        // HunkHeader-only attribution for files the parser can't
+        // reach (binary blobs, unsupported languages); see
+        // crates/ohara-core/src/hunk_attribution.rs.
+        .with_atomic_symbol_extractor(Arc::new(ohara_parse::TreeSitterAtomicExtractor));
     let report = indexer
         .run(&repo_id, &commit_source, &symbol_source)
         .await?;

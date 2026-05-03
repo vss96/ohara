@@ -23,10 +23,10 @@ use std::collections::BTreeMap;
 /// with new `crates/ohara-storage/migrations/V*.sql` files.
 pub const SCHEMA_VERSION: &str = "4";
 
-/// Semantic-text builder version (plan 11). `"0"` means "no semantic
-/// text yet — the embedder + FTS lanes see raw `diff_text`". Plan 11
-/// bumps this to `"1"` when the semantic-text section-builder lands.
-pub const SEMANTIC_TEXT_VERSION: &str = "0";
+/// Semantic-text builder version (plan 11). `"1"` is the
+/// section-structured builder that lands in plan 11 Task 2.1
+/// (commit / file / language / symbols / change / added_lines).
+pub const SEMANTIC_TEXT_VERSION: &str = "1";
 
 /// What the current binary expects the index to have been built with.
 /// Built fresh on every CLI / MCP invocation from the actual

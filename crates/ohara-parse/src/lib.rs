@@ -4,10 +4,28 @@ pub mod chunker;
 pub mod languages;
 
 use anyhow::Result;
-use ohara_core::indexer::SymbolSource;
+use ohara_core::indexer::{AtomicSymbolExtractor, SymbolSource};
 use ohara_core::types::Symbol;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+/// Plan 11: implements `ohara_core::AtomicSymbolExtractor` by
+/// delegating to `extract_atomic_symbols` against the language
+/// matching `path`'s extension. Construct via `Default` and pass to
+/// `Indexer::with_atomic_symbol_extractor`.
+#[derive(Default)]
+pub struct TreeSitterAtomicExtractor;
+
+impl AtomicSymbolExtractor for TreeSitterAtomicExtractor {
+    fn extract(&self, path: &str, source: &str) -> Vec<Symbol> {
+        // Tree-sitter parse failures fall back to an empty Vec —
+        // the attributor's HunkHeader path takes over for files that
+        // don't parse. We intentionally swallow the error here
+        // because the whole indexing pass shouldn't fail just because
+        // one file's syntax tree isn't recoverable.
+        extract_atomic_symbols(path, source, "").unwrap_or_default()
+    }
+}
 
 /// 500-token target budget for the AST sibling-merge chunker. Matches
 /// plan 3 §C-2; tuned to stay well under common embedder context
@@ -18,7 +36,14 @@ const CHUNK_MAX_TOKENS: usize = 500;
 /// chunker's output semantics change in a way that would invalidate
 /// previously-indexed `hunk` / `symbol` rows. Stored under the
 /// `chunker_version` component key.
-pub const CHUNKER_VERSION: &str = "1";
+///
+/// v2 (plan 11): a new atomic-symbol entry-point lands alongside the
+/// chunker (`extract_atomic_symbols`). The chunker output itself
+/// hasn't changed, but indexes built before v2 don't have the
+/// `hunk_symbol` rows that v0.7 retrieval expects — so we bump to
+/// trigger a `query-compatible, refresh recommended` verdict for
+/// pre-plan-11 indexes.
+pub const CHUNKER_VERSION: &str = "2";
 
 /// Returns `language -> parser_version` for every language this crate
 /// can index. Used by the indexer to record per-parser metadata so the
@@ -38,6 +63,28 @@ pub fn parser_versions() -> BTreeMap<String, String> {
 }
 
 pub fn extract_for_path(path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symbol>> {
+    let mut atoms = extract_atomic_symbols(path, source, blob_sha)?;
+    // The chunker requires source-byte-order traversal. Tree-sitter
+    // captures in `languages::rust::extract` are emitted in match order
+    // which is already source-aligned; `languages::python::extract` dedups
+    // through a HashMap whose iteration order is undefined, so we sort
+    // here unconditionally — cheap and language-agnostic.
+    atoms.sort_by_key(|s| s.span_start);
+    Ok(chunker::chunk_symbols(atoms, CHUNK_MAX_TOKENS, source))
+}
+
+/// Plan 11: extract pre-merge atomic symbols for `path` against
+/// `source`, source-byte-order sorted. Same per-language extractors
+/// as [`extract_for_path`], but the AST sibling-merge chunker is
+/// skipped — callers (the per-hunk symbol attributor in
+/// `ohara-core::hunk_attribution`) need the unmerged spans so a
+/// hunk that touches one method out of N in a class doesn't get
+/// attributed to the entire class.
+///
+/// Returns an empty Vec for unsupported file extensions; matches
+/// `extract_for_path`'s behaviour so unsupported files just don't get
+/// hunk-symbol attribution rather than erroring out the whole pass.
+pub fn extract_atomic_symbols(path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symbol>> {
     let ext = Path::new(path).extension().and_then(|e| e.to_str());
     let mut atoms = match ext {
         Some("rs") => languages::rust::extract(path, source, blob_sha)?,
@@ -46,13 +93,38 @@ pub fn extract_for_path(path: &str, source: &str, blob_sha: &str) -> Result<Vec<
         Some("kt") | Some("kts") => languages::kotlin::extract(path, source, blob_sha)?,
         _ => return Ok(vec![]),
     };
-    // The chunker requires source-byte-order traversal. Tree-sitter
-    // captures in `languages::rust::extract` are emitted in match order
-    // which is already source-aligned; `languages::python::extract` dedups
-    // through a HashMap whose iteration order is undefined, so we sort
-    // here unconditionally — cheap and language-agnostic.
     atoms.sort_by_key(|s| s.span_start);
-    Ok(chunker::chunk_symbols(atoms, CHUNK_MAX_TOKENS, source))
+    Ok(atoms)
+}
+
+/// Convert a `Symbol`'s byte range (`span_start..span_end`) to a
+/// 1-based line range `(start, end_inclusive)`. Used by the per-hunk
+/// attributor to intersect symbol spans against a hunk's post-image
+/// line ranges. `source` is the file body the spans were computed
+/// against.
+///
+/// The conversion walks the source once per symbol — acceptable on
+/// per-commit hot-paths because attributed files are bounded by the
+/// hunk count, not the project size.
+pub fn symbol_line_span(symbol: &Symbol, source: &str) -> (u32, u32) {
+    let bytes = source.as_bytes();
+    let start = symbol.span_start as usize;
+    let end = (symbol.span_end as usize).min(bytes.len());
+    let line_at = |pos: usize| -> u32 {
+        // Count newlines before `pos`; +1 for 1-based numbering.
+        let counted = bytes[..pos.min(bytes.len())]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count();
+        u32::try_from(counted + 1).unwrap_or(u32::MAX)
+    };
+    let line_start = line_at(start);
+    let line_end = if end == 0 {
+        line_start
+    } else {
+        line_at(end - 1)
+    };
+    (line_start, line_end.max(line_start))
 }
 
 /// Walks the working tree at HEAD-equivalent state on disk and extracts symbols
@@ -115,6 +187,44 @@ impl SymbolSource for GitSymbolSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_atomic_symbols_returns_pre_merge_atoms() {
+        // Plan 11 Task 3.1 Step 1: atomic extractor MUST return one
+        // symbol per top-level definition (not the merged super-chunk).
+        // Three small Rust functions sit well under the chunker's
+        // 500-token budget, so extract_for_path returns 1 merged chunk
+        // — extract_atomic_symbols must return 3.
+        let src = "fn alpha() {}\nfn beta() {}\nfn gamma() {}\n";
+        let atoms = extract_atomic_symbols("a.rs", src, "deadbeef").expect("atoms");
+        assert_eq!(
+            atoms.len(),
+            3,
+            "expected three atomic symbols (alpha/beta/gamma), got {atoms:?}"
+        );
+        let names: Vec<&str> = atoms.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn symbol_line_span_translates_byte_offsets_to_1_based_line_numbers() {
+        // Plan 11 Task 3.1 Step 1: the line-span helper backs the
+        // per-hunk attributor. Three single-line Rust functions; each
+        // symbol's byte range covers one source line.
+        let src = "fn alpha() {}\nfn beta() {}\nfn gamma() {}\n";
+        let atoms = extract_atomic_symbols("a.rs", src, "deadbeef").expect("atoms");
+        for (i, atom) in atoms.iter().enumerate() {
+            let (start, end) = symbol_line_span(atom, src);
+            let expected_line = u32::try_from(i + 1).unwrap();
+            assert_eq!(
+                (start, end),
+                (expected_line, expected_line),
+                "symbol {} ('{}') should sit on line {expected_line}",
+                i,
+                atom.name
+            );
+        }
+    }
 
     #[test]
     fn extract_for_path_routes_kt_and_kts_to_kotlin_module() {

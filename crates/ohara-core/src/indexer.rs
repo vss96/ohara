@@ -13,12 +13,46 @@ pub trait CommitSource: Send + Sync {
     async fn list_commits(&self, since: Option<&str>) -> Result<Vec<CommitMeta>>;
     /// Yield the per-file hunks of a single commit.
     async fn hunks_for_commit(&self, sha: &str) -> Result<Vec<Hunk>>;
+
+    /// Plan 11: post-image file content at `sha` for `path`. Returns
+    /// `Ok(None)` when the file doesn't exist at that commit (deleted,
+    /// renamed-away) so callers can fall back to header-only
+    /// attribution gracefully. Default implementation returns
+    /// `Ok(None)` so legacy fakes that don't care about per-hunk
+    /// symbol attribution don't have to wire it up.
+    async fn file_at_commit(&self, _sha: &str, _path: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// Source of HEAD symbols. Implemented by `ohara-parse` driver in a later task.
 #[async_trait::async_trait]
 pub trait SymbolSource: Send + Sync {
     async fn extract_head_symbols(&self) -> Result<Vec<Symbol>>;
+}
+
+/// Plan 11: per-file atomic-symbol extractor used during per-hunk
+/// symbol attribution. Implemented by `ohara-parse` (which calls
+/// `extract_atomic_symbols` for the language matching `file_path`'s
+/// extension). Synchronous — tree-sitter parsing is CPU-bound and
+/// the indexer's outer per-hunk loop is async.
+pub trait AtomicSymbolExtractor: Send + Sync {
+    /// Extract atomic (pre-merge) symbols for `path`'s post-image
+    /// `source`. An empty Vec means "no symbols recoverable" — the
+    /// attributor falls back to header-only attribution. Implementations
+    /// MUST NOT panic on parse errors; they should return an empty
+    /// Vec and let the attributor's HunkHeader path take over.
+    fn extract(&self, path: &str, source: &str) -> Vec<Symbol>;
+}
+
+/// No-op extractor for callers that don't want per-hunk attribution
+/// (test fakes, indexers that prefer the cheaper header-only path).
+pub struct NullAtomicSymbolExtractor;
+
+impl AtomicSymbolExtractor for NullAtomicSymbolExtractor {
+    fn extract(&self, _path: &str, _source: &str) -> Vec<Symbol> {
+        Vec::new()
+    }
 }
 
 /// Optional UI / observer hook for `Indexer::run` long-running passes.
@@ -62,6 +96,12 @@ pub struct Indexer {
     /// compatibility tracking; the CLI / MCP wire it from
     /// `RuntimeIndexMetadata::current(...)`.
     runtime_metadata: Option<RuntimeIndexMetadata>,
+    /// Plan 11: per-file atomic-symbol extractor used to derive
+    /// ExactSpan hunk-symbol attribution. Defaults to the
+    /// header-only `NullAtomicSymbolExtractor` so legacy callers and
+    /// test fakes don't have to wire tree-sitter just to run the
+    /// indexer.
+    symbol_extractor: Arc<dyn AtomicSymbolExtractor>,
 }
 
 impl Indexer {
@@ -73,6 +113,7 @@ impl Indexer {
             embed_batch: 32,
             progress: Arc::new(NullProgress),
             runtime_metadata: None,
+            symbol_extractor: Arc::new(NullAtomicSymbolExtractor),
         }
     }
 
@@ -96,6 +137,19 @@ impl Indexer {
     /// to find current-binary metadata in the index.
     pub fn with_runtime_metadata(mut self, meta: RuntimeIndexMetadata) -> Self {
         self.runtime_metadata = Some(meta);
+        self
+    }
+
+    /// Plan 11: attach a per-file atomic-symbol extractor so the
+    /// indexer can produce `ExactSpan` hunk-symbol attribution. When
+    /// unset, the indexer falls back to header-only attribution
+    /// (which still produces useful `HunkHeader`-confidence rows
+    /// when git's diff format includes the enclosing-function context).
+    pub fn with_atomic_symbol_extractor(
+        mut self,
+        extractor: Arc<dyn AtomicSymbolExtractor>,
+    ) -> Self {
+        self.symbol_extractor = extractor;
         self
     }
 
@@ -166,20 +220,57 @@ impl Indexer {
                     timings.total_added_lines += count_added_lines(&h.diff_text);
                 }
 
-                // Plan 11 Task 2.1 Step 3: build the semantic-text
-                // representation up front so the embedder + the new
-                // fts_hunk_semantic lane both see normalized,
-                // signal-dense text. Symbol attribution wires in via
-                // plan 11 Task 3.1; until then symbols stays empty
-                // and the builder skips the `symbols:` section.
+                // Plan 11 Task 3.1: per-hunk symbol attribution.
+                // Caller-side note: file_at_commit defaults to Ok(None)
+                // on the trait, so test fakes that don't override it
+                // produce HunkHeader-only attribution rather than
+                // erroring. The attribution callback is the single
+                // place that decides which symbols a hunk touched —
+                // the indexer just stores the result.
+                let mut hunk_attributions: Vec<Vec<crate::types::HunkSymbol>> =
+                    Vec::with_capacity(hunks.len());
+                for h in &hunks {
+                    let attribution = if let Some(source) = commit_source
+                        .file_at_commit(&cm.commit_sha, &h.file_path)
+                        .await?
+                    {
+                        // ExactSpan path: extract atomic symbols from
+                        // the post-image source and intersect their
+                        // line spans against the hunk's @@-headers.
+                        // The attributor falls back to HunkHeader for
+                        // symbols not covered by ExactSpan.
+                        let atoms = self.symbol_extractor.extract(&h.file_path, &source);
+                        let inputs = crate::hunk_attribution::AttributionInputs {
+                            diff_text: &h.diff_text,
+                            symbols: Some(&atoms),
+                            source: Some(&source),
+                        };
+                        crate::hunk_attribution::attribute_hunk(&inputs)
+                    } else {
+                        // Header-only path when the file isn't readable
+                        // (deleted, renamed-away, binary blob).
+                        let inputs = crate::hunk_attribution::AttributionInputs {
+                            diff_text: &h.diff_text,
+                            symbols: None,
+                            source: None,
+                        };
+                        crate::hunk_attribution::attribute_hunk(&inputs)
+                    };
+                    hunk_attributions.push(attribution);
+                }
+
+                // Plan 11 Task 2.1: build the semantic-text
+                // representation up front. Now also feeds the
+                // symbols list from the attribution step above.
                 // Step 4 fallback: when the builder's added_lines
                 // section is empty (deletion-only hunk, etc.), fall
                 // back to raw diff_text so the embedder still sees
                 // the change rather than an empty string.
                 let semantic_texts: Vec<String> = hunks
                     .iter()
-                    .map(|h| {
-                        let body = crate::hunk_text::build(h, &cm.message, &[]);
+                    .zip(hunk_attributions.iter())
+                    .map(|(h, syms)| {
+                        let body = crate::hunk_text::build(h, &cm.message, syms);
                         if body.contains("added_lines:") {
                             body
                         } else {
@@ -218,19 +309,19 @@ impl Indexer {
                     )
                     .await?;
 
-                // Plan 11 Task 2.1: persist both raw diff (display /
-                // provenance) and the semantic_text built above
-                // (search-time). Symbol attribution wires in at
-                // Task 3.1; until then `symbols` stays empty.
+                // Plan 11 Task 2.1 + 3.1: persist raw diff (display /
+                // provenance), semantic_text (search-time), and
+                // per-hunk symbol attribution computed above.
                 let records: Vec<HunkRecord> = hunks
                     .into_iter()
                     .zip(hunk_embs.iter().cloned())
                     .zip(semantic_texts.into_iter())
-                    .map(|((h, e), semantic_text)| HunkRecord {
+                    .zip(hunk_attributions.into_iter())
+                    .map(|(((h, e), semantic_text), symbols)| HunkRecord {
                         hunk: h,
                         diff_emb: e,
                         semantic_text,
-                        symbols: Vec::new(),
+                        symbols,
                     })
                     .collect();
                 self.storage.put_hunks(repo_id, &records).await?;

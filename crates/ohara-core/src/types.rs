@@ -73,7 +73,7 @@ pub enum Provenance {
     Exact,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum SymbolKind {
     Function,
     Method,

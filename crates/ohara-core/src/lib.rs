@@ -8,6 +8,7 @@ pub mod diff_text;
 pub mod embed;
 pub mod error;
 pub mod explain;
+pub mod hunk_attribution;
 pub mod hunk_text;
 pub mod index_metadata;
 pub mod indexer;
