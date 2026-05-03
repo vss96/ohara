@@ -113,6 +113,70 @@ pub(crate) fn load_vec_extension(c: &Connection) -> Result<()> {
 }
 
 #[cfg(test)]
+mod sql_trace_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::{Layer, Registry};
+
+    #[derive(Default, Clone)]
+    struct SqlEvents(Arc<Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> Layer<S> for SqlEvents {
+        fn on_event(&self, ev: &tracing::Event<'_>, _: Context<'_, S>) {
+            if ev.metadata().target() != "ohara_storage::sql" {
+                return;
+            }
+            struct V<'a>(&'a mut String);
+            impl<'a> Visit for V<'a> {
+                fn record_str(&mut self, f: &Field, v: &str) {
+                    if f.name() == "sql" {
+                        *self.0 = v.to_string();
+                    }
+                }
+                fn record_debug(&mut self, f: &Field, v: &dyn std::fmt::Debug) {
+                    if f.name() == "sql" {
+                        *self.0 = format!("{:?}", v);
+                    }
+                }
+            }
+            let mut sql = String::new();
+            ev.record(&mut V(&mut sql));
+            self.0.lock().unwrap().push(sql);
+        }
+    }
+
+    #[tokio::test]
+    async fn sql_trace_emits_events_when_target_is_enabled() {
+        let cap = SqlEvents::default();
+        let layer = cap.clone();
+        let subscriber = Registry::default().with(layer);
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.sqlite");
+        let pool = SqlitePoolBuilder::new(&db).build().await.unwrap();
+        let conn = pool.get().await.unwrap();
+        conn.interact(|c| {
+            c.execute_batch("CREATE TABLE probe (id INTEGER); SELECT 1;")
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        drop(_guard);
+
+        let events = cap.0.lock().unwrap();
+        assert!(
+            events.iter().any(|s| s.contains("CREATE TABLE probe")),
+            "expected SQL trace event for CREATE TABLE; got {:?}",
+            *events
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
