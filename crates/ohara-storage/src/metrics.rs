@@ -6,6 +6,14 @@
 //! mutators) are left uninstrumented because plan-14 is a
 //! query-perf substrate. Phase 2+ work that targets indexing
 //! latency will need to backfill the missing surfaces.
+//!
+//! **Snapshot consistency:** `StorageCounters::snapshot` reads each
+//! atomic field independently with `Relaxed` ordering. Under heavy
+//! concurrent read traffic the snapshot can be mildly inconsistent —
+//! e.g. `call_count` may have advanced past a `total_elapsed_us` read
+//! for the same call. This is acceptable for an operator-run perf
+//! harness (we're sampling, not auditing) but the snapshot is not
+//! "accounting-grade" and shouldn't be treated as such.
 
 use ohara_core::storage::{StorageMethodMetrics, StorageMetricsSnapshot};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
