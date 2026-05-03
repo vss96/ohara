@@ -130,7 +130,8 @@ impl RetrievalProfile {
         Self {
             name: "bug_fix_precedent".into(),
             recency_multiplier: 1.5,
-            explanation: "Bug-fix precedent — boosting recency so newer fixes surface first.".into(),
+            explanation: "Bug-fix precedent — boosting recency so newer fixes surface first."
+                .into(),
             ..Self::default_unknown()
         }
     }
@@ -141,7 +142,8 @@ impl RetrievalProfile {
         Self {
             name: "api_usage".into(),
             rerank_top_k: Some(40),
-            explanation: "API-usage query — widening the rerank pool to surface more call sites.".into(),
+            explanation: "API-usage query — widening the rerank pool to surface more call sites."
+                .into(),
             ..Self::default_unknown()
         }
     }
@@ -179,6 +181,201 @@ impl RetrievalProfile {
             QueryIntent::Unknown => Self::default_unknown(),
         }
     }
+}
+
+/// Classify `query` into a [`ParsedQuery`]. Pure / deterministic;
+/// no I/O, no LLM. The parser walks the query body once, accumulates
+/// matched rules, and picks the highest-priority intent that matched.
+///
+/// Order of intent checks (first match wins):
+/// 1. **Configuration** — `where (do|did) we configure`,
+///    `how is .* (loaded|configured)`, query contains `config` /
+///    `configuration` / `env`.
+/// 2. **BugFixPrecedent** — `how (did|do) we fix`, query contains
+///    `bug` / `crash` / `error` + `fix` / `fixed`.
+/// 3. **ApiUsage** — `how is .* (called|used)`, `usages of`,
+///    quoted symbol + `usage` / `caller`.
+/// 4. **ImplementationPattern** — `how (did|do) we`,
+///    `pattern for`, `like (the|our) existing`,
+///    `add .* like .* before`. Default for "how was X done before".
+/// 5. **Unknown** — fallthrough.
+///
+/// Confidence:
+/// - `High` when the matched rule is a verbatim phrase pattern.
+/// - `Medium` when only a topic keyword fired (e.g. `config` alone).
+/// - `Low` for `Unknown`.
+pub fn parse_query(query: &str) -> ParsedQuery {
+    let lower = query.to_lowercase();
+    let mut matched_rules: Vec<String> = Vec::new();
+
+    let language = extract_language_hint(&lower, &mut matched_rules);
+    let path_terms = extract_path_terms(query, &mut matched_rules);
+    let symbol_terms = extract_quoted_symbols(query, &mut matched_rules);
+    let since_unix = extract_since(&lower, &mut matched_rules);
+
+    let (intent, confidence) = classify_intent(&lower, &mut matched_rules);
+
+    ParsedQuery {
+        intent,
+        confidence,
+        language,
+        path_terms,
+        symbol_terms,
+        since_unix,
+        matched_rules,
+    }
+}
+
+fn extract_language_hint(lower: &str, rules: &mut Vec<String>) -> Option<String> {
+    // Recognise `in <lang>` / `<lang> code` / standalone language
+    // tokens. Bounded to the four languages the indexer parses.
+    for lang in ["rust", "python", "java", "kotlin"] {
+        if lower.contains(&format!(" {lang} "))
+            || lower.starts_with(&format!("{lang} "))
+            || lower.ends_with(&format!(" {lang}"))
+            || lower == lang
+            || lower.contains(&format!("in {lang}"))
+        {
+            rules.push(format!("language_hint:{lang}"));
+            return Some(lang.to_string());
+        }
+    }
+    None
+}
+
+fn extract_path_terms(query: &str, rules: &mut Vec<String>) -> Vec<String> {
+    // Slash-bearing identifiers — naive but effective. Splits the
+    // query on whitespace + punctuation and keeps anything containing
+    // `/` and at least one extension-like dot.
+    let mut out = Vec::new();
+    for word in query.split(|c: char| c.is_whitespace() || c == ',' || c == ';') {
+        let trimmed = word
+            .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '/' && c != '.' && c != '_');
+        if trimmed.contains('/') && trimmed.contains('.') {
+            out.push(trimmed.to_string());
+        }
+    }
+    if !out.is_empty() {
+        rules.push("path_terms".into());
+    }
+    out
+}
+
+fn extract_quoted_symbols(query: &str, rules: &mut Vec<String>) -> Vec<String> {
+    // Anything inside backticks, single-quotes, or double-quotes is
+    // treated as an identifier hint. Strings with whitespace are
+    // skipped — those are usually phrases, not symbol names.
+    let mut out = Vec::new();
+    let mut chars = query.chars().peekable();
+    while let Some(c) = chars.next() {
+        let opener = match c {
+            '`' | '\'' | '"' => c,
+            _ => continue,
+        };
+        let mut buf = String::new();
+        let mut closed = false;
+        for c in chars.by_ref() {
+            if c == opener {
+                closed = true;
+                break;
+            }
+            buf.push(c);
+        }
+        if closed && !buf.is_empty() && !buf.contains(char::is_whitespace) {
+            out.push(buf);
+        }
+    }
+    if !out.is_empty() {
+        rules.push("quoted_symbols".into());
+    }
+    out
+}
+
+fn extract_since(lower: &str, rules: &mut Vec<String>) -> Option<i64> {
+    // Recognises a small set of "last N days/weeks/months" phrases
+    // and converts them to a unix-second cutoff against the current
+    // time. More exotic forms ("since the v0.5 release") aren't
+    // handled — explicit since_unix on PatternQuery is the escape
+    // hatch.
+    let now = chrono::Utc::now().timestamp();
+    for phrase in [
+        ("last week", 7 * 86400),
+        ("last 7 days", 7 * 86400),
+        ("last 30 days", 30 * 86400),
+        ("last month", 30 * 86400),
+        ("last quarter", 90 * 86400),
+        ("last 90 days", 90 * 86400),
+        ("last 6 months", 180 * 86400),
+        ("last year", 365 * 86400),
+    ] {
+        if lower.contains(phrase.0) {
+            rules.push(format!("since:{}", phrase.0));
+            return Some(now - phrase.1);
+        }
+    }
+    None
+}
+
+fn classify_intent(lower: &str, rules: &mut Vec<String>) -> (QueryIntent, Confidence) {
+    // 1. Configuration.
+    if lower.contains("where do we configure")
+        || lower.contains("where did we configure")
+        || lower.contains("how is") && (lower.contains("loaded") || lower.contains("configured"))
+        || lower.contains("load configuration")
+    {
+        rules.push("intent:configuration:phrase".into());
+        return (QueryIntent::Configuration, Confidence::High);
+    }
+    if lower.contains("config") || lower.contains(" env ") || lower.contains("environment variable")
+    {
+        rules.push("intent:configuration:keyword".into());
+        return (QueryIntent::Configuration, Confidence::Medium);
+    }
+
+    // 2. BugFixPrecedent.
+    if lower.contains("how did we fix")
+        || lower.contains("how do we fix")
+        || lower.contains("regression for")
+    {
+        rules.push("intent:bug_fix:phrase".into());
+        return (QueryIntent::BugFixPrecedent, Confidence::High);
+    }
+    if (lower.contains(" bug") || lower.contains(" crash") || lower.contains(" error"))
+        && (lower.contains(" fix") || lower.contains("fixed"))
+    {
+        rules.push("intent:bug_fix:keyword".into());
+        return (QueryIntent::BugFixPrecedent, Confidence::Medium);
+    }
+
+    // 3. ApiUsage.
+    if lower.contains("how is")
+        && (lower.contains("called") || lower.contains("used") || lower.contains("invoked"))
+    {
+        rules.push("intent:api_usage:phrase".into());
+        return (QueryIntent::ApiUsage, Confidence::High);
+    }
+    if lower.contains("usages of") || lower.contains("callers of") || lower.contains("call sites") {
+        rules.push("intent:api_usage:phrase".into());
+        return (QueryIntent::ApiUsage, Confidence::High);
+    }
+
+    // 4. ImplementationPattern.
+    if lower.contains("how did we")
+        || lower.contains("how do we")
+        || lower.contains("pattern for")
+        || lower.contains("like the existing")
+        || lower.contains("like our existing")
+        || lower.contains("how was")
+            && (lower.contains("done before") || lower.contains("implemented"))
+        || lower.contains("add ") && lower.contains(" like ") && lower.contains("before")
+    {
+        rules.push("intent:implementation_pattern:phrase".into());
+        return (QueryIntent::ImplementationPattern, Confidence::High);
+    }
+
+    // 5. Fallthrough.
+    rules.push("intent:unknown:fallthrough".into());
+    (QueryIntent::Unknown, Confidence::Low)
 }
 
 #[cfg(test)]
@@ -243,6 +440,116 @@ mod tests {
         assert_eq!(
             RetrievalProfile::for_intent(QueryIntent::ImplementationPattern).name,
             "implementation_pattern"
+        );
+    }
+
+    #[test]
+    fn parse_query_classifies_implementation_pattern_phrasing() {
+        for query in [
+            "add retry like before",
+            "How did we add retry like the previous backoff?",
+            "is there a pattern for connection pooling",
+        ] {
+            let pq = parse_query(query);
+            assert!(
+                matches!(pq.intent, QueryIntent::ImplementationPattern),
+                "expected ImplementationPattern for {query:?}, got {:?}",
+                pq.intent
+            );
+        }
+    }
+
+    #[test]
+    fn parse_query_classifies_bug_fix_precedent() {
+        for query in [
+            "how did we fix the timeout bug",
+            "how do we fix the crash on resume",
+        ] {
+            let pq = parse_query(query);
+            assert!(
+                matches!(pq.intent, QueryIntent::BugFixPrecedent),
+                "expected BugFixPrecedent for {query:?}, got {:?}",
+                pq.intent
+            );
+        }
+    }
+
+    #[test]
+    fn parse_query_classifies_api_usage() {
+        for query in [
+            "how is `retry` called",
+            "show me usages of FastEmbedReranker",
+            "what are the callers of fetch",
+        ] {
+            let pq = parse_query(query);
+            assert!(
+                matches!(pq.intent, QueryIntent::ApiUsage),
+                "expected ApiUsage for {query:?}, got {:?}",
+                pq.intent
+            );
+        }
+    }
+
+    #[test]
+    fn parse_query_classifies_configuration() {
+        for query in [
+            "where did we configure coreml",
+            "how is the database url loaded",
+            "what's the env config for the indexer",
+        ] {
+            let pq = parse_query(query);
+            assert!(
+                matches!(pq.intent, QueryIntent::Configuration),
+                "expected Configuration for {query:?}, got {:?}",
+                pq.intent
+            );
+        }
+    }
+
+    #[test]
+    fn parse_query_unknown_for_unrecognised_text() {
+        let pq = parse_query("just some random text");
+        assert_eq!(pq.intent, QueryIntent::Unknown);
+        assert_eq!(pq.confidence, Confidence::Low);
+        assert!(pq.matched_rules.iter().any(|r| r.contains("fallthrough")));
+    }
+
+    #[test]
+    fn parse_query_extracts_explicit_filters() {
+        // Plan 12 Task 1.2 Step 2: language hint, path token, quoted
+        // symbol name, and a "last 30 days" timeframe all surface in
+        // ParsedQuery.
+        let pq =
+            parse_query("how is `retry_with_backoff` called in rust src/fetch.rs last 30 days");
+        assert_eq!(pq.language.as_deref(), Some("rust"));
+        assert!(pq.path_terms.iter().any(|p| p == "src/fetch.rs"));
+        assert!(pq.symbol_terms.iter().any(|s| s == "retry_with_backoff"));
+        assert!(pq.since_unix.is_some());
+        assert!(pq
+            .matched_rules
+            .iter()
+            .any(|r| r.starts_with("language_hint")));
+        assert!(pq.matched_rules.iter().any(|r| r == "path_terms"));
+        assert!(pq.matched_rules.iter().any(|r| r == "quoted_symbols"));
+        assert!(pq.matched_rules.iter().any(|r| r.starts_with("since:")));
+    }
+
+    #[test]
+    fn parse_query_high_confidence_for_phrase_match_medium_for_keyword_only() {
+        // Plan 12 Task 1.2 Step 3: confidence reflects the strength
+        // of the matching rule. Phrase patterns are High; topic
+        // keywords alone are Medium; fallthrough is Low.
+        assert_eq!(
+            parse_query("how did we fix the timeout").confidence,
+            Confidence::High
+        );
+        assert_eq!(
+            parse_query("there was a bug we fixed").confidence,
+            Confidence::Medium
+        );
+        assert_eq!(
+            parse_query("just some random text").confidence,
+            Confidence::Low
         );
     }
 
