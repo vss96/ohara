@@ -4,6 +4,13 @@ User-facing release notes. The full commit log lives on
 [GitHub](https://github.com/vss96/ohara/commits/main); this page is
 the highlights.
 
+## v0.7.1 — Release CI token scope
+
+No user-facing binary changes. Fixes GitHub Actions `GITHUB_TOKEN`
+permissions so `cargo-dist` can create a GitHub Release when the tagged
+commit touches `.github/workflows/**` (`workflows: write` alongside
+`contents: write`; see [cli/cli#9514](https://github.com/cli/cli/issues/9514)).
+
 ## v0.7.0 — Retrieval-quality eval, semantic-text + per-hunk symbol attribution, query intent, explain enrichment, index compatibility
 
 Four plans land together: a regression-tripwire eval harness
