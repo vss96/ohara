@@ -45,10 +45,33 @@ path = "coreml_leak_repro.rs"
 name = "context_engine_eval"
 path = "context_engine_eval.rs"
 
+[[test]]
+# Plan 14 Task E.1 — CLI cold-path perf harness. `#[ignore]`'d; opt
+# in via `cargo test -p ohara-perf-tests --release -- --ignored
+# cli_query_bench --nocapture`.
+name = "cli_query_bench"
+path = "cli_query_bench.rs"
+
+[[test]]
+# Plan 14 Task E.2 — MCP in-process perf harness. Drives
+# OharaService::find_pattern + explain_change directly without rmcp
+# framing so we measure server-side latency only.
+name = "mcp_query_bench"
+path = "mcp_query_bench.rs"
+
+[[test]]
+# Plan 14 Task E.3 — perf-run differ. Reads two JSON reports written
+# by cli_query_bench / mcp_query_bench (paths via env vars
+# OHARA_PERF_DIFF_BEFORE / OHARA_PERF_DIFF_AFTER) and prints a
+# side-by-side delta. Operators paste the output into PR descriptions.
+name = "perf_diff"
+path = "perf_diff.rs"
+
 [dev-dependencies]
 ohara-cli = { path = "../../crates/ohara-cli" }
 ohara-core = { path = "../../crates/ohara-core" }
 ohara-embed = { path = "../../crates/ohara-embed" }
+ohara-mcp = { path = "../../crates/ohara-mcp" }
 ohara-storage = { path = "../../crates/ohara-storage" }
 anyhow.workspace = true
 chrono.workspace = true
@@ -57,3 +80,4 @@ serde_json.workspace = true
 tempfile = "3"
 tokio = { workspace = true }
 tracing.workspace = true
+tracing-subscriber.workspace = true

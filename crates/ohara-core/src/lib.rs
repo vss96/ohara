@@ -13,6 +13,7 @@ pub mod hunk_text;
 pub mod index_metadata;
 pub mod indexer;
 pub mod paths;
+pub mod perf_trace;
 pub mod query;
 pub mod query_understanding;
 pub mod retriever;

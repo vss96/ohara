@@ -43,6 +43,7 @@ impl SqlitePoolBuilder {
                         apply_pragmas(c)?;
                         // Sanity-check the auto-extension actually registered on this connection.
                         load_vec_extension(c)?;
+                        install_sql_trace(c);
                         Ok::<_, anyhow::Error>(())
                     })
                     .await
@@ -55,6 +56,26 @@ impl SqlitePoolBuilder {
             .map_err(|e| anyhow::anyhow!("build pool: {e}"))?;
         Ok(pool)
     }
+}
+
+/// Install a per-connection trace callback that emits one
+/// `tracing::trace!` event per executed SQL statement on target
+/// `"ohara_storage::sql"`. The cost is gated by the subscriber's level
+/// filter — when no subscriber listens on this target the callback is
+/// effectively a no-op (one filter check per statement).
+///
+/// **Operational note:** rusqlite invokes the closure for every
+/// statement regardless of whether tracing later discards the event,
+/// so there is a constant per-statement cost (one virtual call + one
+/// level-filter check) even with no subscriber. For hot indexing
+/// loops this is in the noise, but if profiling ever points the
+/// finger at SQL-trace overhead, gate the install behind an env var
+/// (e.g. only register the callback when `RUST_LOG` mentions
+/// `ohara_storage::sql`).
+fn install_sql_trace(conn: &mut Connection) {
+    conn.trace(Some(|sql: &str| {
+        tracing::trace!(target: "ohara_storage::sql", sql);
+    }));
 }
 
 pub(crate) fn apply_pragmas(c: &Connection) -> Result<()> {
@@ -110,6 +131,105 @@ pub(crate) fn load_vec_extension(c: &Connection) -> Result<()> {
         .query_row("SELECT vec_version()", [], |r| r.get(0))
         .context("vec_version() not available; sqlite-vec auto-extension not registered")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod sql_trace_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::{Layer, Registry};
+
+    // --- global-subscriber capture infrastructure ---
+    //
+    // `interact` closures run in `spawn_blocking` threads that inherit the
+    // global subscriber (not any thread-local `set_default`).  We must use
+    // `set_global_default` so the callsite is registered with
+    // `Interest::always()` for every thread in the process.
+
+    type SqlSink = Mutex<Option<Arc<Mutex<Vec<String>>>>>;
+
+    fn sql_sink() -> &'static SqlSink {
+        static SINK: OnceLock<SqlSink> = OnceLock::new();
+        SINK.get_or_init(|| Mutex::new(None))
+    }
+
+    struct SqlTraceLayer;
+
+    impl<S: tracing::Subscriber> Layer<S> for SqlTraceLayer {
+        fn on_event(&self, ev: &tracing::Event<'_>, _: Context<'_, S>) {
+            if ev.metadata().target() != "ohara_storage::sql" {
+                return;
+            }
+            struct V<'a>(&'a mut String);
+            impl<'a> Visit for V<'a> {
+                fn record_str(&mut self, f: &Field, v: &str) {
+                    if f.name() == "sql" {
+                        *self.0 = v.to_string();
+                    }
+                }
+                fn record_debug(&mut self, f: &Field, v: &dyn std::fmt::Debug) {
+                    if f.name() == "sql" {
+                        *self.0 = format!("{:?}", v);
+                    }
+                }
+            }
+            let mut sql = String::new();
+            ev.record(&mut V(&mut sql));
+            if let Some(sink) = sql_sink().lock().unwrap().as_ref() {
+                sink.lock().unwrap().push(sql);
+            }
+        }
+    }
+
+    struct SqlGuard(#[allow(dead_code)] MutexGuard<'static, ()>);
+    impl Drop for SqlGuard {
+        fn drop(&mut self) {
+            *sql_sink().lock().unwrap() = None;
+        }
+    }
+
+    fn acquire_sql_collector() -> (Arc<Mutex<Vec<String>>>, SqlGuard) {
+        static INSTALLED: OnceLock<()> = OnceLock::new();
+        INSTALLED.get_or_init(|| {
+            tracing::subscriber::set_global_default(Registry::default().with(SqlTraceLayer))
+                .expect("global tracing subscriber set once");
+        });
+
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock_guard = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        *sql_sink().lock().unwrap() = Some(Arc::clone(&events));
+        (events, SqlGuard(lock_guard))
+    }
+
+    // ---
+
+    #[tokio::test]
+    async fn sql_trace_emits_events_when_target_is_enabled() {
+        let (events, _guard) = acquire_sql_collector();
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.sqlite");
+        let pool = SqlitePoolBuilder::new(&db).build().await.unwrap();
+        let conn = pool.get().await.unwrap();
+        conn.interact(|c| c.execute_batch("CREATE TABLE probe (id INTEGER); SELECT 1;"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let captured = events.lock().unwrap();
+        assert!(
+            captured.iter().any(|s| s.contains("CREATE TABLE probe")),
+            "expected SQL trace event for CREATE TABLE; got {:?}",
+            *captured
+        );
+    }
 }
 
 #[cfg(test)]

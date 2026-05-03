@@ -8,6 +8,7 @@
 
 use crate::diff_text::{truncate_diff, DIFF_EXCERPT_MAX_LINES};
 use crate::embed::RerankProvider;
+use crate::perf_trace::timed_phase;
 use crate::query::{reciprocal_rank_fusion, PatternHit, PatternQuery};
 use crate::storage::{HunkHit, HunkId};
 use crate::types::Provenance;
@@ -123,7 +124,7 @@ impl Retriever {
         // 1. Embed the query once for the vector lane. The BM25 lanes use
         //    the raw query string directly.
         let q_text = vec![query.query.clone()];
-        let mut q_embs = self.embedder.embed_batch(&q_text).await?;
+        let mut q_embs = timed_phase("embed_query", self.embedder.embed_batch(&q_text)).await?;
         let q_emb = q_embs
             .pop()
             .ok_or_else(|| crate::OhraError::Embedding("empty".into()))?;
@@ -139,33 +140,45 @@ impl Retriever {
         //    stay queryable. Plan 12 Task 2.1: lanes are gated by the
         //    profile's lane-mask flags; disabled lanes return empty.
         let (vec_res, fts_res, hist_sym_res, head_sym_res) = tokio::join!(
-            self.storage.knn_hunks(
-                repo_id,
-                &q_emb,
-                self.weights.lane_top_k,
-                language_filter,
-                query.since_unix.or(parsed.since_unix),
+            timed_phase(
+                "lane_knn",
+                self.storage.knn_hunks(
+                    repo_id,
+                    &q_emb,
+                    self.weights.lane_top_k,
+                    language_filter,
+                    query.since_unix.or(parsed.since_unix),
+                )
             ),
-            self.storage.bm25_hunks_by_text(
-                repo_id,
-                &query.query,
-                self.weights.lane_top_k,
-                language_filter,
-                query.since_unix.or(parsed.since_unix),
+            timed_phase(
+                "lane_fts_text",
+                self.storage.bm25_hunks_by_text(
+                    repo_id,
+                    &query.query,
+                    self.weights.lane_top_k,
+                    language_filter,
+                    query.since_unix.or(parsed.since_unix),
+                )
             ),
-            self.storage.bm25_hunks_by_historical_symbol(
-                repo_id,
-                &query.query,
-                self.weights.lane_top_k,
-                language_filter,
-                query.since_unix.or(parsed.since_unix),
+            timed_phase(
+                "lane_fts_sym_hist",
+                self.storage.bm25_hunks_by_historical_symbol(
+                    repo_id,
+                    &query.query,
+                    self.weights.lane_top_k,
+                    language_filter,
+                    query.since_unix.or(parsed.since_unix),
+                )
             ),
-            self.storage.bm25_hunks_by_symbol_name(
-                repo_id,
-                &query.query,
-                self.weights.lane_top_k,
-                language_filter,
-                query.since_unix.or(parsed.since_unix),
+            timed_phase(
+                "lane_fts_sym_head",
+                self.storage.bm25_hunks_by_symbol_name(
+                    repo_id,
+                    &query.query,
+                    self.weights.lane_top_k,
+                    language_filter,
+                    query.since_unix.or(parsed.since_unix),
+                )
             ),
         );
         let vec_hits = if profile.vec_lane_enabled {
@@ -221,8 +234,10 @@ impl Retriever {
         // 4. Reciprocal Rank Fusion (k = 60, Cormack 2009 default) →
         //    truncate to rerank_top_k before the expensive cross-encoder.
         //    Plan 12 Task 2.1: profile may widen the rerank pool.
-        let fused: Vec<HunkId> =
-            reciprocal_rank_fusion(&[ranking_vec, ranking_fts, ranking_sym], 60);
+        let fused: Vec<HunkId> = timed_phase("rrf", async {
+            reciprocal_rank_fusion(&[ranking_vec, ranking_fts, ranking_sym], 60)
+        })
+        .await;
         let rerank_top_k = profile.rerank_top_k.unwrap_or(self.weights.rerank_top_k);
         let trimmed: Vec<HunkId> = fused.into_iter().take(rerank_top_k).collect();
         let hits: Vec<HunkHit> = trimmed
@@ -238,7 +253,7 @@ impl Retriever {
         //    sort order is RRF, modulated by the recency multiplier.
         let candidates: Vec<&str> = hits.iter().map(|h| h.hunk.diff_text.as_str()).collect();
         let rerank_scores: Vec<f32> = match (&self.reranker, query.no_rerank) {
-            (Some(r), false) => r.rerank(&query.query, &candidates).await?,
+            (Some(r), false) => timed_phase("rerank", r.rerank(&query.query, &candidates)).await?,
             _ => vec![1.0_f32; candidates.len()],
         };
 
@@ -253,14 +268,19 @@ impl Retriever {
         //    names. Renaming will land in a later breaking release.
         //    Per-hit lookup is bounded by k (≤ 20) so sequential
         //    calls are cheap; batching is a future optimisation.
-        let mut symbols_by_hunk: std::collections::HashMap<HunkId, Vec<String>> =
-            std::collections::HashMap::new();
-        for h in &hits {
-            let attrs = self.storage.get_hunk_symbols(repo_id, h.hunk_id).await?;
-            if !attrs.is_empty() {
-                symbols_by_hunk.insert(h.hunk_id, attrs.into_iter().map(|a| a.name).collect());
-            }
-        }
+        let symbols_by_hunk: std::collections::HashMap<HunkId, Vec<String>> =
+            timed_phase("hydrate_symbols", async {
+                let mut acc: std::collections::HashMap<HunkId, Vec<String>> =
+                    std::collections::HashMap::new();
+                for h in &hits {
+                    let attrs = self.storage.get_hunk_symbols(repo_id, h.hunk_id).await?;
+                    if !attrs.is_empty() {
+                        acc.insert(h.hunk_id, attrs.into_iter().map(|a| a.name).collect());
+                    }
+                }
+                Ok::<_, crate::OhraError>(acc)
+            })
+            .await?;
 
         // 7. Recency multiplier as a tie-breaker on the rerank score, then
         //    final descending sort and truncate to caller's k.
@@ -728,5 +748,53 @@ mod tests {
             out[0].commit_sha, "new",
             "newer commit should outrank older when scores are tied"
         );
+    }
+
+    // ---- Phase-event capture infrastructure ---------------------------------
+    // Moved to crate::perf_trace::test_phase_capture to be shared with
+    // explain::tests and any other modules that need phase-event assertions.
+
+    #[test]
+    fn find_pattern_emits_expected_phase_events() {
+        let (seen, _guard) = crate::perf_trace::test_phase_capture::acquire_phase_collector();
+
+        let now = 1_700_000_000;
+        let knn = vec![fake_hit(1, "a", now, 0.9, "diff-a")];
+        let fts = vec![fake_hit(1, "a", now, 0.7, "diff-a")];
+        let storage = Arc::new(FakeStorage::new(knn, fts, vec![]));
+        let embedder = Arc::new(FakeEmbedder);
+        let r = Retriever::new(storage, embedder);
+        let q = PatternQuery {
+            query: "anything".into(),
+            k: 5,
+            language: None,
+            since_unix: None,
+            no_rerank: true,
+        };
+        let id = RepoId::from_parts("x", "/y");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let _ = r.find_pattern(&id, &q, now).await.unwrap();
+        });
+
+        let seen = seen.lock().unwrap();
+        for required in [
+            "embed_query",
+            "lane_knn",
+            "lane_fts_text",
+            "lane_fts_sym_hist",
+            "lane_fts_sym_head",
+            "rrf",
+            "hydrate_symbols",
+        ] {
+            assert!(
+                seen.contains(required),
+                "missing phase event {required}; seen = {:?}",
+                *seen
+            );
+        }
     }
 }

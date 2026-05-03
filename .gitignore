@@ -4,6 +4,7 @@
 
 # Build artifacts under fixtures (the repos themselves are scripted, not committed)
 /fixtures/*/repo
+fixtures/medium/repo/
 
 # Local index data
 .ohara/

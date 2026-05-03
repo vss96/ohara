@@ -11,6 +11,7 @@
 //! `ohara-git::Blamer`.
 
 use crate::diff_text::{truncate_diff, DIFF_EXCERPT_MAX_LINES};
+use crate::perf_trace::timed_phase;
 use crate::storage::Storage;
 use crate::types::{Provenance, RepoId};
 use crate::Result;
@@ -162,9 +163,11 @@ pub async fn explain_change(
     // 1. Blame the queried range. The Blamer is the file-length oracle:
     //    it can read the workdir checkout, so its returned `lines` are
     //    the authoritative clamped set.
-    let raw_blame = blamer
-        .blame_range(&query.file, query.line_start, query.line_end)
-        .await?;
+    let raw_blame = timed_phase(
+        "blame",
+        blamer.blame_range(&query.file, query.line_start, query.line_end),
+    )
+    .await?;
 
     // Derive the clamped (line_start, line_end) from the actual blame
     // output. Empty blame (file missing, range invalid) → echo back
@@ -194,63 +197,69 @@ pub async fn explain_change(
         }
     };
 
-    // 2. Resolve each unique commit SHA to its metadata. Skip unindexed
-    //    SHAs (Ok(None)) and remember how many lines they "owned" so we
-    //    can report them in `blame_coverage`.
-    let mut indexed: Vec<(crate::types::CommitMeta, Vec<u32>)> = Vec::new();
-    let mut skipped_shas: Vec<String> = Vec::new();
-    let mut lines_attributed_indexed: u32 = 0;
-    for r in raw_blame {
-        match storage.get_commit(repo_id, &r.commit_sha).await? {
-            Some(cm) => {
-                lines_attributed_indexed += r.lines.len() as u32;
-                indexed.push((cm, r.lines));
+    // 2 + 3. Resolve unique SHAs and build per-commit excerpts. Wrapped
+    //        as one timed phase because they share the loop over
+    //        raw_blame and produce the same Vec<ExplainHit>.
+    let (mut hits, lines_attributed_indexed, skipped_shas): (Vec<ExplainHit>, u32, Vec<String>) =
+        timed_phase("hydrate_explain", async move {
+            let mut indexed: Vec<(crate::types::CommitMeta, Vec<u32>)> = Vec::new();
+            let mut skipped_shas: Vec<String> = Vec::new();
+            let mut lines_attributed_indexed: u32 = 0;
+            for r in raw_blame {
+                match storage.get_commit(repo_id, &r.commit_sha).await? {
+                    Some(cm) => {
+                        lines_attributed_indexed += r.lines.len() as u32;
+                        indexed.push((cm, r.lines));
+                    }
+                    None => {
+                        tracing::debug!(
+                            sha = %r.commit_sha,
+                            "explain_change: skipping unindexed commit"
+                        );
+                        skipped_shas.push(r.commit_sha);
+                    }
+                }
             }
-            None => {
-                tracing::debug!(
-                    sha = %r.commit_sha,
-                    "explain_change: skipping unindexed commit"
-                );
-                skipped_shas.push(r.commit_sha);
-            }
-        }
-    }
 
-    // 3. Per-commit hunk excerpts. Each hit's diff_excerpt is the
-    //    concatenation of every hunk this commit produced for this
-    //    file, truncated.
-    let mut hits: Vec<ExplainHit> = Vec::with_capacity(indexed.len());
-    for (cm, lines) in indexed {
-        let (excerpt, truncated) = if query.include_diff {
-            let hunks = storage
-                .get_hunks_for_file_in_commit(repo_id, &cm.commit_sha, &query.file)
-                .await?;
-            let joined: String = hunks
-                .iter()
-                .map(|h| h.diff_text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            truncate_diff(&joined, DIFF_EXCERPT_MAX_LINES)
-        } else {
-            (String::new(), false)
-        };
-        // Bogus ts (out-of-range i64) falls back to "" — ExplainHit.commit_date
-        // is informational, not a contract, so an empty string is acceptable.
-        let date = DateTime::<Utc>::from_timestamp(cm.ts, 0)
-            .map(|d| d.to_rfc3339())
-            .unwrap_or_default();
-        hits.push(ExplainHit {
-            commit_sha: cm.commit_sha,
-            commit_message: cm.message,
-            commit_author: cm.author,
-            commit_date: date,
-            blame_lines: lines,
-            file_path: query.file.clone(),
-            diff_excerpt: excerpt,
-            diff_truncated: truncated,
-            provenance: Provenance::Exact,
-        });
-    }
+            // 3. Per-commit hunk excerpts. Each hit's diff_excerpt is the
+            //    concatenation of every hunk this commit produced for this
+            //    file, truncated.
+            let mut hits: Vec<ExplainHit> = Vec::with_capacity(indexed.len());
+            for (cm, lines) in indexed {
+                let (excerpt, truncated) = if query.include_diff {
+                    let hunks = storage
+                        .get_hunks_for_file_in_commit(repo_id, &cm.commit_sha, &query.file)
+                        .await?;
+                    let joined: String = hunks
+                        .iter()
+                        .map(|h| h.diff_text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    truncate_diff(&joined, DIFF_EXCERPT_MAX_LINES)
+                } else {
+                    (String::new(), false)
+                };
+                // Bogus ts (out-of-range i64) falls back to "" — ExplainHit.commit_date
+                // is informational, not a contract, so an empty string is acceptable.
+                let date = DateTime::<Utc>::from_timestamp(cm.ts, 0)
+                    .map(|d| d.to_rfc3339())
+                    .unwrap_or_default();
+                hits.push(ExplainHit {
+                    commit_sha: cm.commit_sha,
+                    commit_message: cm.message,
+                    commit_author: cm.author,
+                    commit_date: date,
+                    blame_lines: lines,
+                    file_path: query.file.clone(),
+                    diff_excerpt: excerpt,
+                    diff_truncated: truncated,
+                    provenance: Provenance::Exact,
+                });
+            }
+
+            Ok::<_, crate::OhraError>((hits, lines_attributed_indexed, skipped_shas))
+        })
+        .await?;
 
     // 4. Sort newest-first; cap to k.
     hits.sort_by(|a, b| {
@@ -957,5 +966,46 @@ mod tests {
         let id = RepoId::from_parts("first", "/r");
         let (_hits, meta) = explain_change(&storage, &blamer, &id, &q).await.unwrap();
         assert!(meta.related_commits.is_empty());
+    }
+
+    #[test]
+    fn explain_change_emits_blame_and_hydrate_phases() {
+        let (seen, _guard) = crate::perf_trace::test_phase_capture::acquire_phase_collector();
+
+        let mut storage = FakeStorageOrch::new();
+        storage.seed_commit(cm("abc", 1_000, "msg"));
+        storage.seed_hunk("abc", "src/a.rs", "+    a();\n");
+        let blamer = ScriptedBlamer {
+            out: vec![BlameRange {
+                commit_sha: "abc".into(),
+                lines: vec![1, 2, 3],
+            }],
+            last_args: Mutex::new(None),
+        };
+        let q = ExplainQuery {
+            file: "src/a.rs".into(),
+            line_start: 1,
+            line_end: 3,
+            k: 5,
+            include_diff: true,
+            include_related: false,
+        };
+        let id = RepoId::from_parts("seed", "/r");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let _ = explain_change(&storage, &blamer, &id, &q).await.unwrap();
+        });
+
+        let seen = seen.lock().unwrap();
+        for required in ["blame", "hydrate_explain"] {
+            assert!(
+                seen.contains(required),
+                "missing phase event {required}; seen = {:?}",
+                *seen
+            );
+        }
     }
 }

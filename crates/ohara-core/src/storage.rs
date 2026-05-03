@@ -12,6 +12,34 @@ pub type Vector = Vec<f32>;
 /// Fusion. Matches the `hunk.id` SQLite rowid type.
 pub type HunkId = i64;
 
+/// Per-method counters surfaced by [`Storage::metrics_snapshot`].
+/// Read-only snapshot — implementations atomically copy their internal
+/// counters into this shape so callers see a consistent view.
+#[derive(Debug, Default, Clone)]
+pub struct StorageMethodMetrics {
+    pub call_count: u64,
+    pub total_elapsed_us: u64,
+    pub rows_returned: u64,
+}
+
+/// Aggregated per-method snapshot for the perf harness. The default
+/// trait impl returns zeros; only `SqliteStorage` (Plan-14 Task B.2)
+/// will ship with real numbers. Test fakes that don't override
+/// `metrics_snapshot` appear silent in the harness — the right
+/// default for non-production storage backends.
+#[derive(Debug, Default, Clone)]
+pub struct StorageMetricsSnapshot {
+    pub knn_hunks: StorageMethodMetrics,
+    pub bm25_hunks_by_text: StorageMethodMetrics,
+    pub bm25_hunks_by_semantic_text: StorageMethodMetrics,
+    pub bm25_hunks_by_symbol_name: StorageMethodMetrics,
+    pub bm25_hunks_by_historical_symbol: StorageMethodMetrics,
+    pub get_hunk_symbols: StorageMethodMetrics,
+    pub get_neighboring_file_commits: StorageMethodMetrics,
+    pub get_index_status: StorageMethodMetrics,
+    pub get_index_metadata: StorageMethodMetrics,
+}
+
 #[derive(Debug, Clone)]
 pub struct HunkRecord {
     pub hunk: Hunk,
@@ -286,4 +314,12 @@ pub trait Storage: Send + Sync {
         repo_id: &RepoId,
         components: &[(String, String)],
     ) -> Result<()>;
+
+    /// Snapshot of per-method counters since process start. Default
+    /// returns zeros — only `SqliteStorage` ships with real numbers
+    /// (see Plan-14 Task B.2). Test fakes that don't override remain
+    /// silent in the harness.
+    fn metrics_snapshot(&self) -> StorageMetricsSnapshot {
+        StorageMetricsSnapshot::default()
+    }
 }

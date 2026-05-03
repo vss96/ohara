@@ -315,8 +315,8 @@ impl Indexer {
                 let records: Vec<HunkRecord> = hunks
                     .into_iter()
                     .zip(hunk_embs.iter().cloned())
-                    .zip(semantic_texts.into_iter())
-                    .zip(hunk_attributions.into_iter())
+                    .zip(semantic_texts)
+                    .zip(hunk_attributions)
                     .map(|(((h, e), semantic_text), symbols)| HunkRecord {
                         hunk: h,
                         diff_emb: e,

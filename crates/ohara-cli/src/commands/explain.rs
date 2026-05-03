@@ -8,6 +8,7 @@ use anyhow::{anyhow, Result};
 use clap::Args as ClapArgs;
 use ohara_core::count_lines;
 use ohara_core::explain::{explain_change, ExplainQuery};
+use ohara_core::perf_trace::timed_phase;
 use ohara_git::Blamer;
 use serde_json::json;
 use std::path::PathBuf;
@@ -36,8 +37,9 @@ pub struct Args {
 pub async fn run(args: Args) -> Result<()> {
     let (repo_id, canonical, _) = super::resolve_repo_id(&args.path)?;
     let db_path = super::index_db_path(&repo_id)?;
-    let storage = Arc::new(ohara_storage::SqliteStorage::open(&db_path).await?);
-    let blamer = Blamer::open(&canonical)?;
+    let storage =
+        Arc::new(timed_phase("storage_open", ohara_storage::SqliteStorage::open(&db_path)).await?);
+    let blamer = timed_phase("blamer_open", async { Blamer::open(&canonical) }).await?;
 
     let (line_start, line_end) = parse_lines(args.lines.as_deref(), &canonical, &args.file)?;
     let q = ExplainQuery {

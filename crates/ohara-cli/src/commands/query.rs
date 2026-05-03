@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
+use ohara_core::perf_trace::timed_phase;
 use ohara_core::query::PatternQuery;
 use ohara_core::Retriever;
 use std::path::PathBuf;
@@ -33,13 +34,17 @@ pub struct Args {
 pub async fn run(args: Args) -> Result<()> {
     let (repo_id, _, _) = super::resolve_repo_id(&args.path)?;
     let db_path = super::index_db_path(&repo_id)?;
-    let storage = Arc::new(ohara_storage::SqliteStorage::open(&db_path).await?);
+    let storage =
+        Arc::new(timed_phase("storage_open", ohara_storage::SqliteStorage::open(&db_path)).await?);
     let chosen_provider = resolve_provider(args.embed_provider);
     tracing::info!(provider = ?chosen_provider, "embedder");
     let embedder = Arc::new(
-        tokio::task::spawn_blocking(move || {
-            ohara_embed::FastEmbedProvider::with_provider(chosen_provider)
-        })
+        timed_phase(
+            "embed_load",
+            tokio::task::spawn_blocking(move || {
+                ohara_embed::FastEmbedProvider::with_provider(chosen_provider)
+            }),
+        )
         .await??,
     );
     // Plan 3: cross-encoder rerank by default. Skip the model download
@@ -49,9 +54,12 @@ pub async fn run(args: Args) -> Result<()> {
         Retriever::new(storage, embedder)
     } else {
         let reranker = Arc::new(
-            tokio::task::spawn_blocking(move || {
-                ohara_embed::FastEmbedReranker::with_provider(chosen_provider)
-            })
+            timed_phase(
+                "rerank_load",
+                tokio::task::spawn_blocking(move || {
+                    ohara_embed::FastEmbedReranker::with_provider(chosen_provider)
+                }),
+            )
             .await??,
         );
         Retriever::new(storage, embedder).with_reranker(reranker)
