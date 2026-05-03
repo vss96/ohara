@@ -99,9 +99,14 @@ impl Retriever {
             .pop()
             .ok_or_else(|| crate::OhraError::Embedding("empty".into()))?;
 
-        // 2. Gather all three lanes in parallel. Lane order is irrelevant
-        //    to RRF, but we keep (vec, fts_text, fts_sym) for readability.
-        let (vec_res, fts_res, sym_res) = tokio::join!(
+        // 2. Gather all four candidate lanes in parallel. The symbol
+        //    side has two: the v0.7 historical lane (`hunk_symbol`,
+        //    plan 11 Task 4.1) is the primary path; if it returns
+        //    nothing — because the index was built before plan 11 ran,
+        //    or no `(commit, file)` pair has attribution rows yet — we
+        //    fall back to the v0.3 file-level lane so old indexes
+        //    stay queryable.
+        let (vec_res, fts_res, hist_sym_res, head_sym_res) = tokio::join!(
             self.storage.knn_hunks(
                 repo_id,
                 &q_emb,
@@ -110,6 +115,13 @@ impl Retriever {
                 query.since_unix,
             ),
             self.storage.bm25_hunks_by_text(
+                repo_id,
+                &query.query,
+                self.weights.lane_top_k,
+                query.language.as_deref(),
+                query.since_unix,
+            ),
+            self.storage.bm25_hunks_by_historical_symbol(
                 repo_id,
                 &query.query,
                 self.weights.lane_top_k,
@@ -126,7 +138,18 @@ impl Retriever {
         );
         let vec_hits = vec_res?;
         let fts_hits = fts_res?;
-        let sym_hits = sym_res?;
+        let hist_sym_hits = hist_sym_res?;
+        let head_sym_hits = head_sym_res?;
+        // Plan 11 Task 4.1 Step 3: prefer historical attribution when
+        // the index has it, fall back to HEAD-symbol-name otherwise.
+        // Mutually exclusive — feeding both into RRF would give the
+        // same hunk a double-vote when historical attribution and
+        // file-level matching both surface it.
+        let sym_hits = if hist_sym_hits.is_empty() {
+            head_sym_hits
+        } else {
+            hist_sym_hits
+        };
 
         // 3. Build per-lane HunkId rankings + a hunk_id -> HunkHit lookup.
         //    Each lane keeps its hunk-hit's lane-specific `similarity` (used
