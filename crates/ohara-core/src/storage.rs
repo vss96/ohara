@@ -250,6 +250,24 @@ pub trait Storage: Send + Sync {
         file_path: &str,
     ) -> Result<Vec<Hunk>>;
 
+    /// Plan 12 Task 3.1: commits that touched `file_path` near
+    /// `anchor_sha`, with their per-commit touched-hunk count for
+    /// the file. `limit_before` is the cap on commits older than
+    /// the anchor (newest-first); `limit_after` is the cap on
+    /// commits newer than the anchor (oldest-first → chronological
+    /// after the anchor). The anchor itself is never returned.
+    /// Returns an empty Vec when the anchor isn't indexed (so the
+    /// orchestrator can fall back to "no contextual commits" rather
+    /// than error).
+    async fn get_neighboring_file_commits(
+        &self,
+        repo_id: &RepoId,
+        file_path: &str,
+        anchor_sha: &str,
+        limit_before: u8,
+        limit_after: u8,
+    ) -> Result<Vec<(u32, CommitMeta)>>;
+
     // --- Index metadata (plan 13) ---
 
     /// Read every `index_metadata` row for `repo_id` as a typed

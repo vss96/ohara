@@ -675,6 +675,16 @@ mod phase_timing_tests {
         ) -> Result<Vec<Hunk>> {
             Ok(vec![])
         }
+        async fn get_neighboring_file_commits(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: &str,
+            _: u8,
+            _: u8,
+        ) -> Result<Vec<(u32, CommitMeta)>> {
+            Ok(vec![])
+        }
         async fn get_index_metadata(
             &self,
             _: &RepoId,

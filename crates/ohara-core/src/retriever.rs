@@ -512,6 +512,16 @@ mod tests {
         ) -> crate::Result<Vec<crate::types::Hunk>> {
             unreachable!("retriever tests should not exercise get_hunks_for_file_in_commit")
         }
+        async fn get_neighboring_file_commits(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: &str,
+            _: u8,
+            _: u8,
+        ) -> crate::Result<Vec<(u32, crate::types::CommitMeta)>> {
+            Ok(Vec::new())
+        }
         async fn get_index_metadata(
             &self,
             _: &RepoId,

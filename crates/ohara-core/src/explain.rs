@@ -452,6 +452,16 @@ mod tests {
                 .cloned()
                 .unwrap_or_default())
         }
+        async fn get_neighboring_file_commits(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: &str,
+            _: u8,
+            _: u8,
+        ) -> Result<Vec<(u32, crate::types::CommitMeta)>> {
+            Ok(Vec::new())
+        }
         async fn get_index_metadata(
             &self,
             _: &RepoId,

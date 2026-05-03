@@ -247,6 +247,28 @@ impl Storage for SqliteStorage {
         .await
     }
 
+    async fn get_neighboring_file_commits(
+        &self,
+        _repo_id: &RepoId,
+        file_path: &str,
+        anchor_sha: &str,
+        limit_before: u8,
+        limit_after: u8,
+    ) -> CoreResult<Vec<(u32, CommitMeta)>> {
+        let path = file_path.to_string();
+        let sha = anchor_sha.to_string();
+        with_conn(&self.pool, move |c| {
+            crate::tables::explain::get_neighboring_file_commits(
+                c,
+                &path,
+                &sha,
+                limit_before,
+                limit_after,
+            )
+        })
+        .await
+    }
+
     async fn get_index_metadata(&self, repo_id: &RepoId) -> CoreResult<StoredIndexMetadata> {
         let id = repo_id.as_str().to_string();
         with_conn(&self.pool, move |c| {
@@ -1380,6 +1402,78 @@ mod tests {
         assert_eq!(got[0].attribution, AttributionKind::ExactSpan);
         assert_eq!(got[1].name, "alpha");
         assert_eq!(got[1].qualified_name.as_deref(), Some("net::alpha"));
+    }
+
+    #[tokio::test]
+    async fn get_neighboring_file_commits_returns_before_and_after_around_anchor() {
+        // Plan 12 Task 3.1 Step 2: anchored at the middle of 5
+        // commits, return 2 earlier and 2 later in deterministic
+        // timestamp/SHA order. The anchor itself is excluded.
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        let path = "src/foo.rs";
+        for (i, sha) in ["c1", "c2", "c3", "c4", "c5"].iter().enumerate() {
+            let cm = CommitMeta {
+                commit_sha: (*sha).into(),
+                parent_sha: None,
+                is_merge: false,
+                author: None,
+                ts: 1_700_000_000 + (i as i64) * 1000,
+                message: format!("commit {sha}"),
+            };
+            s.put_commit(
+                &id,
+                &CommitRecord {
+                    meta: cm,
+                    message_emb: vec![0.0; 384],
+                },
+            )
+            .await
+            .unwrap();
+            s.put_hunks(
+                &id,
+                &[HunkRecord::legacy(
+                    Hunk {
+                        commit_sha: (*sha).into(),
+                        file_path: path.into(),
+                        language: Some("rust".into()),
+                        change_kind: ChangeKind::Modified,
+                        diff_text: format!("+touch {sha}\n"),
+                    },
+                    vec![0.0_f32; 384],
+                )],
+            )
+            .await
+            .unwrap();
+        }
+
+        // Anchor on c3; expect c1+c2 (older, newest-first) then c4+c5
+        // (newer, oldest-first). Anchor (c3) excluded.
+        let neighbors = s
+            .get_neighboring_file_commits(&id, path, "c3", 2, 2)
+            .await
+            .unwrap();
+        let shas: Vec<&str> = neighbors
+            .iter()
+            .map(|(_, cm)| cm.commit_sha.as_str())
+            .collect();
+        assert_eq!(shas, vec!["c2", "c1", "c4", "c5"]);
+        // Each commit touched the file with exactly one hunk.
+        for (touched, _) in &neighbors {
+            assert_eq!(*touched, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn get_neighboring_file_commits_returns_empty_when_anchor_not_indexed() {
+        // Plan 12 Task 3.1: an unindexed anchor SHA can't be
+        // positioned on the timeline; return empty rather than
+        // panicking or treating it as anchor=epoch.
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        let neighbors = s
+            .get_neighboring_file_commits(&id, "src/foo.rs", "no-such-sha", 2, 2)
+            .await
+            .unwrap();
+        assert!(neighbors.is_empty());
     }
 
     #[tokio::test]
