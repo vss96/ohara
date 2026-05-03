@@ -6,14 +6,70 @@ use deadpool_sqlite::Pool;
 use ohara_core::{
     index_metadata::StoredIndexMetadata,
     query::IndexStatus,
-    storage::{CommitRecord, HunkHit, HunkId, HunkRecord, Storage},
+    storage::{
+        CommitRecord, HunkHit, HunkId, HunkRecord, Storage, StorageMethodMetrics,
+        StorageMetricsSnapshot,
+    },
     types::{CommitMeta, Hunk, HunkSymbol, RepoId, Symbol},
     Result as CoreResult,
 };
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+#[derive(Default)]
+struct MethodCounter {
+    call_count: AtomicU64,
+    total_elapsed_us: AtomicU64,
+    rows_returned: AtomicU64,
+}
+
+impl MethodCounter {
+    fn record(&self, elapsed_us: u64, rows: u64) {
+        self.call_count.fetch_add(1, Relaxed);
+        self.total_elapsed_us.fetch_add(elapsed_us, Relaxed);
+        self.rows_returned.fetch_add(rows, Relaxed);
+    }
+    fn snapshot(&self) -> StorageMethodMetrics {
+        StorageMethodMetrics {
+            call_count: self.call_count.load(Relaxed),
+            total_elapsed_us: self.total_elapsed_us.load(Relaxed),
+            rows_returned: self.rows_returned.load(Relaxed),
+        }
+    }
+}
+
+#[derive(Default)]
+struct StorageCounters {
+    knn_hunks: MethodCounter,
+    bm25_hunks_by_text: MethodCounter,
+    bm25_hunks_by_semantic_text: MethodCounter,
+    bm25_hunks_by_symbol_name: MethodCounter,
+    bm25_hunks_by_historical_symbol: MethodCounter,
+    get_hunk_symbols: MethodCounter,
+    get_neighboring_file_commits: MethodCounter,
+    get_index_status: MethodCounter,
+    get_index_metadata: MethodCounter,
+}
+
+impl StorageCounters {
+    fn snapshot(&self) -> StorageMetricsSnapshot {
+        StorageMetricsSnapshot {
+            knn_hunks: self.knn_hunks.snapshot(),
+            bm25_hunks_by_text: self.bm25_hunks_by_text.snapshot(),
+            bm25_hunks_by_semantic_text: self.bm25_hunks_by_semantic_text.snapshot(),
+            bm25_hunks_by_symbol_name: self.bm25_hunks_by_symbol_name.snapshot(),
+            bm25_hunks_by_historical_symbol: self.bm25_hunks_by_historical_symbol.snapshot(),
+            get_hunk_symbols: self.get_hunk_symbols.snapshot(),
+            get_neighboring_file_commits: self.get_neighboring_file_commits.snapshot(),
+            get_index_status: self.get_index_status.snapshot(),
+            get_index_metadata: self.get_index_metadata.snapshot(),
+        }
+    }
+}
 
 pub struct SqliteStorage {
     pool: Pool,
+    counters: StorageCounters,
 }
 
 impl SqliteStorage {
@@ -23,7 +79,10 @@ impl SqliteStorage {
         conn.interact(migrations::run)
             .await
             .map_err(|e| anyhow::anyhow!("interact: {e}"))??;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            counters: StorageCounters::default(),
+        })
     }
 
     pub fn pool(&self) -> &Pool {
@@ -45,6 +104,24 @@ where
         .map_err(|e| ohara_core::OhraError::Storage(format!("query: {e}")))
 }
 
+async fn timed_with_conn<F, T>(
+    pool: &deadpool_sqlite::Pool,
+    counter: &MethodCounter,
+    rows_of: impl Fn(&T) -> u64,
+    f: F,
+) -> ohara_core::Result<T>
+where
+    F: FnOnce(&mut rusqlite::Connection) -> anyhow::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let start = std::time::Instant::now();
+    let out = with_conn(pool, f).await?;
+    let elapsed_us = start.elapsed().as_micros() as u64;
+    let rows = rows_of(&out);
+    counter.record(elapsed_us, rows);
+    Ok(out)
+}
+
 #[async_trait::async_trait]
 impl Storage for SqliteStorage {
     async fn open_repo(
@@ -61,7 +138,13 @@ impl Storage for SqliteStorage {
 
     async fn get_index_status(&self, repo_id: &RepoId) -> CoreResult<IndexStatus> {
         let id = repo_id.as_str().to_string();
-        with_conn(&self.pool, move |c| repo::get_status(c, &id)).await
+        timed_with_conn(
+            &self.pool,
+            &self.counters.get_index_status,
+            |_: &IndexStatus| 1u64,
+            move |c| repo::get_status(c, &id),
+        )
+        .await
     }
 
     async fn set_last_indexed_commit(&self, repo_id: &RepoId, sha: &str) -> CoreResult<()> {
@@ -117,9 +200,12 @@ impl Storage for SqliteStorage {
     ) -> CoreResult<Vec<HunkHit>> {
         let qe = query_emb.to_vec();
         let lang = language.map(str::to_string);
-        with_conn(&self.pool, move |c| {
-            crate::tables::hunk::knn(c, &qe, k, lang.as_deref(), since_unix)
-        })
+        timed_with_conn(
+            &self.pool,
+            &self.counters.knn_hunks,
+            |v: &Vec<HunkHit>| v.len() as u64,
+            move |c| crate::tables::hunk::knn(c, &qe, k, lang.as_deref(), since_unix),
+        )
         .await
     }
 
@@ -133,9 +219,12 @@ impl Storage for SqliteStorage {
     ) -> CoreResult<Vec<HunkHit>> {
         let q = query.to_string();
         let lang = language.map(str::to_string);
-        with_conn(&self.pool, move |c| {
-            crate::tables::hunk::bm25_by_text(c, &q, k, lang.as_deref(), since_unix)
-        })
+        timed_with_conn(
+            &self.pool,
+            &self.counters.bm25_hunks_by_text,
+            |v: &Vec<HunkHit>| v.len() as u64,
+            move |c| crate::tables::hunk::bm25_by_text(c, &q, k, lang.as_deref(), since_unix),
+        )
         .await
     }
 
@@ -149,9 +238,14 @@ impl Storage for SqliteStorage {
     ) -> CoreResult<Vec<HunkHit>> {
         let q = query.to_string();
         let lang = language.map(str::to_string);
-        with_conn(&self.pool, move |c| {
-            crate::tables::hunk::bm25_by_semantic_text(c, &q, k, lang.as_deref(), since_unix)
-        })
+        timed_with_conn(
+            &self.pool,
+            &self.counters.bm25_hunks_by_semantic_text,
+            |v: &Vec<HunkHit>| v.len() as u64,
+            move |c| {
+                crate::tables::hunk::bm25_by_semantic_text(c, &q, k, lang.as_deref(), since_unix)
+            },
+        )
         .await
     }
 
@@ -165,9 +259,12 @@ impl Storage for SqliteStorage {
     ) -> CoreResult<Vec<HunkHit>> {
         let q = query.to_string();
         let lang = language.map(str::to_string);
-        with_conn(&self.pool, move |c| {
-            crate::tables::symbol::bm25_by_name(c, &q, k, lang.as_deref(), since_unix)
-        })
+        timed_with_conn(
+            &self.pool,
+            &self.counters.bm25_hunks_by_symbol_name,
+            |v: &Vec<HunkHit>| v.len() as u64,
+            move |c| crate::tables::symbol::bm25_by_name(c, &q, k, lang.as_deref(), since_unix),
+        )
         .await
     }
 
@@ -181,15 +278,20 @@ impl Storage for SqliteStorage {
     ) -> CoreResult<Vec<HunkHit>> {
         let q = query.to_string();
         let lang = language.map(str::to_string);
-        with_conn(&self.pool, move |c| {
-            crate::tables::hunk_symbol::bm25_by_historical_symbol(
-                c,
-                &q,
-                k,
-                lang.as_deref(),
-                since_unix,
-            )
-        })
+        timed_with_conn(
+            &self.pool,
+            &self.counters.bm25_hunks_by_historical_symbol,
+            |v: &Vec<HunkHit>| v.len() as u64,
+            move |c| {
+                crate::tables::hunk_symbol::bm25_by_historical_symbol(
+                    c,
+                    &q,
+                    k,
+                    lang.as_deref(),
+                    since_unix,
+                )
+            },
+        )
         .await
     }
 
@@ -198,9 +300,12 @@ impl Storage for SqliteStorage {
         _repo_id: &RepoId,
         hunk_id: HunkId,
     ) -> CoreResult<Vec<HunkSymbol>> {
-        with_conn(&self.pool, move |c| {
-            crate::tables::hunk_symbol::get_for_hunk(c, hunk_id)
-        })
+        timed_with_conn(
+            &self.pool,
+            &self.counters.get_hunk_symbols,
+            |v: &Vec<HunkSymbol>| v.len() as u64,
+            move |c| crate::tables::hunk_symbol::get_for_hunk(c, hunk_id),
+        )
         .await
     }
 
@@ -257,23 +362,31 @@ impl Storage for SqliteStorage {
     ) -> CoreResult<Vec<(u32, CommitMeta)>> {
         let path = file_path.to_string();
         let sha = anchor_sha.to_string();
-        with_conn(&self.pool, move |c| {
-            crate::tables::explain::get_neighboring_file_commits(
-                c,
-                &path,
-                &sha,
-                limit_before,
-                limit_after,
-            )
-        })
+        timed_with_conn(
+            &self.pool,
+            &self.counters.get_neighboring_file_commits,
+            |v: &Vec<(u32, CommitMeta)>| v.len() as u64,
+            move |c| {
+                crate::tables::explain::get_neighboring_file_commits(
+                    c,
+                    &path,
+                    &sha,
+                    limit_before,
+                    limit_after,
+                )
+            },
+        )
         .await
     }
 
     async fn get_index_metadata(&self, repo_id: &RepoId) -> CoreResult<StoredIndexMetadata> {
         let id = repo_id.as_str().to_string();
-        with_conn(&self.pool, move |c| {
-            crate::tables::index_metadata::get(c, &id)
-        })
+        timed_with_conn(
+            &self.pool,
+            &self.counters.get_index_metadata,
+            |m: &StoredIndexMetadata| m.components.len() as u64,
+            move |c| crate::tables::index_metadata::get(c, &id),
+        )
         .await
     }
 
@@ -288,6 +401,10 @@ impl Storage for SqliteStorage {
             crate::tables::index_metadata::put_many(c, &id, &comps)
         })
         .await
+    }
+
+    fn metrics_snapshot(&self) -> StorageMetricsSnapshot {
+        self.counters.snapshot()
     }
 }
 
