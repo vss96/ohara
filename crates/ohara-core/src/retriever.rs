@@ -193,7 +193,27 @@ impl Retriever {
             _ => vec![1.0_f32; candidates.len()],
         };
 
-        // 6. Recency multiplier as a tie-breaker on the rerank score, then
+        // 6. Plan 11 Task 4.2: enrich each surviving hit with its
+        //    per-hunk symbol attribution rows. The historical lane
+        //    (Task 3.2) writes hunk_symbol entries; we surface their
+        //    names so MCP clients can show "this commit touched
+        //    symbols X, Y, Z" without re-hitting the index. The
+        //    field name `related_head_symbols` predates plan 11 (it
+        //    used to mean "symbols defined in HEAD that share the
+        //    file"); under plan 11 it carries actual touched-symbol
+        //    names. Renaming will land in a later breaking release.
+        //    Per-hit lookup is bounded by k (≤ 20) so sequential
+        //    calls are cheap; batching is a future optimisation.
+        let mut symbols_by_hunk: std::collections::HashMap<HunkId, Vec<String>> =
+            std::collections::HashMap::new();
+        for h in &hits {
+            let attrs = self.storage.get_hunk_symbols(repo_id, h.hunk_id).await?;
+            if !attrs.is_empty() {
+                symbols_by_hunk.insert(h.hunk_id, attrs.into_iter().map(|a| a.name).collect());
+            }
+        }
+
+        // 7. Recency multiplier as a tie-breaker on the rerank score, then
         //    final descending sort and truncate to caller's k.
         let mut out: Vec<PatternHit> = hits
             .into_iter()
@@ -208,6 +228,8 @@ impl Retriever {
                     .map(|d| d.to_rfc3339())
                     .unwrap_or_default();
                 let (excerpt, truncated) = truncate_diff(&h.hunk.diff_text, DIFF_EXCERPT_MAX_LINES);
+                let related_head_symbols =
+                    symbols_by_hunk.get(&h.hunk_id).cloned().unwrap_or_default();
                 PatternHit {
                     commit_sha: h.commit.commit_sha,
                     commit_message: h.commit.message,
@@ -217,7 +239,7 @@ impl Retriever {
                     change_kind: format!("{:?}", h.hunk.change_kind).to_lowercase(),
                     diff_excerpt: excerpt,
                     diff_truncated: truncated,
-                    related_head_symbols: vec![],
+                    related_head_symbols,
                     similarity: h.similarity,
                     recency_weight: recency,
                     combined_score: combined,
