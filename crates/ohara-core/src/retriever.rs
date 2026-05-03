@@ -729,4 +729,89 @@ mod tests {
             "newer commit should outrank older when scores are tied"
         );
     }
+
+    #[test]
+    fn find_pattern_emits_expected_phase_events() {
+        use std::collections::BTreeSet;
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::Layer;
+
+        struct PhaseSet {
+            seen: Arc<Mutex<BTreeSet<String>>>,
+        }
+
+        struct PhaseVisitor<'a>(&'a mut Option<String>);
+
+        impl Visit for PhaseVisitor<'_> {
+            fn record_str(&mut self, field: &Field, value: &str) {
+                if field.name() == "phase" {
+                    *self.0 = Some(value.to_owned());
+                }
+            }
+            fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
+        }
+
+        impl<S: tracing::Subscriber> Layer<S> for PhaseSet {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if event.metadata().target() != "ohara::phase" {
+                    return;
+                }
+                let mut phase: Option<String> = None;
+                event.record(&mut PhaseVisitor(&mut phase));
+                if let Some(p) = phase {
+                    self.seen.lock().unwrap().insert(p);
+                }
+            }
+        }
+
+        let seen: Arc<Mutex<BTreeSet<String>>> = Arc::new(Mutex::new(BTreeSet::new()));
+        let layer = PhaseSet {
+            seen: Arc::clone(&seen),
+        };
+        let subscriber = tracing_subscriber::Registry::default().with(layer);
+
+        let now = 1_700_000_000;
+        let knn = vec![fake_hit(1, "a", now, 0.9, "diff-a")];
+        let fts = vec![fake_hit(1, "a", now, 0.7, "diff-a")];
+        let storage = Arc::new(FakeStorage::new(knn, fts, vec![]));
+        let embedder = Arc::new(FakeEmbedder);
+        let r = Retriever::new(storage, embedder);
+        let q = PatternQuery {
+            query: "anything".into(),
+            k: 5,
+            language: None,
+            since_unix: None,
+            no_rerank: true,
+        };
+        let id = RepoId::from_parts("x", "/y");
+
+        tracing::subscriber::with_default(subscriber, || {
+            futures::executor::block_on(async {
+                let _ = r.find_pattern(&id, &q, now).await.unwrap();
+            });
+        });
+
+        let seen = seen.lock().unwrap();
+        for required in [
+            "embed_query",
+            "lane_knn",
+            "lane_fts_text",
+            "lane_fts_sym_hist",
+            "lane_fts_sym_head",
+            "rrf",
+            "hydrate_symbols",
+        ] {
+            assert!(
+                seen.contains(required),
+                "missing phase event {required}; seen = {:?}",
+                *seen
+            );
+        }
+    }
 }
