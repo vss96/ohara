@@ -124,12 +124,24 @@ async fn mcp_query_bench_emits_run_report() {
     let fixture = ensure_medium_fixture();
     let root = workspace_root();
 
+    use std::sync::OnceLock;
     let acc = PhaseAcc::default();
     let sub = Registry::default().with(acc.clone());
-    // Set a global subscriber for the duration of this test binary.
-    // Other in-process tests in this directory don't conflict because
-    // each is its own test binary (#[ignore]'d, run individually).
-    tracing::subscriber::set_global_default(sub).expect("set_global_default for mcp_query_bench");
+    // Guard against double-init from transitive deps or future
+    // sibling tests in this binary. `set_global_default` panics on
+    // second call; OnceLock + `is_ok` lets us silently no-op if a
+    // dispatcher is already installed (we lose this test's events
+    // in that case, which is the right tradeoff vs panicking the
+    // whole binary).
+    //
+    // Caveat: if another test runs first and installs a different
+    // subscriber, `acc` won't receive events and `phases` in the
+    // report will be empty. That's a non-panicking failure mode —
+    // check the report for empty phases if phase numbers look wrong.
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let _ = tracing::subscriber::set_global_default(sub);
+    });
 
     let mut find_wall = PhaseStats::default();
     let mut explain_wall = PhaseStats::default();
