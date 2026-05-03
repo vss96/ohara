@@ -1,7 +1,5 @@
 use anyhow::Result;
-
-mod server;
-mod tools;
+use ohara_mcp::server;
 
 #[tokio::main]
 async fn main() -> Result<()> {

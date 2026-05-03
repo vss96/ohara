@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "ohara MCP server — exposes context lineage tools to Claude Code"
 
+[lib]
+name = "ohara_mcp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ohara-mcp"
 path = "src/main.rs"

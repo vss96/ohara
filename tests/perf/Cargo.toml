@@ -52,10 +52,18 @@ path = "context_engine_eval.rs"
 name = "cli_query_bench"
 path = "cli_query_bench.rs"
 
+[[test]]
+# Plan 14 Task E.2 — MCP in-process perf harness. Drives
+# OharaService::find_pattern + explain_change directly without rmcp
+# framing so we measure server-side latency only.
+name = "mcp_query_bench"
+path = "mcp_query_bench.rs"
+
 [dev-dependencies]
 ohara-cli = { path = "../../crates/ohara-cli" }
 ohara-core = { path = "../../crates/ohara-core" }
 ohara-embed = { path = "../../crates/ohara-embed" }
+ohara-mcp = { path = "../../crates/ohara-mcp" }
 ohara-storage = { path = "../../crates/ohara-storage" }
 anyhow.workspace = true
 chrono.workspace = true
@@ -64,3 +72,4 @@ serde_json.workspace = true
 tempfile = "3"
 tokio = { workspace = true }
 tracing.workspace = true
+tracing-subscriber.workspace = true

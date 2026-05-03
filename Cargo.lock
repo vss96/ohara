@@ -2165,6 +2165,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "futures",
  "hex",
  "serde",
  "serde_json",
@@ -2172,6 +2173,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2247,12 +2249,14 @@ dependencies = [
  "ohara-cli",
  "ohara-core",
  "ohara-embed",
+ "ohara-mcp",
  "ohara-storage",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2263,6 +2267,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "deadpool-sqlite",
+ "futures",
  "ohara-core",
  "refinery",
  "rusqlite",
@@ -2273,6 +2278,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
