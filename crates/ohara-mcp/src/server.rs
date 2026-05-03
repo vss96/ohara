@@ -3,6 +3,7 @@ use ohara_core::embed::RerankProvider;
 use ohara_core::index_metadata::{
     CompatibilityStatus, RuntimeIndexMetadata, SCHEMA_VERSION, SEMANTIC_TEXT_VERSION,
 };
+use ohara_core::perf_trace::timed_phase;
 use ohara_core::types::RepoId;
 use ohara_core::{EmbeddingProvider, Retriever, Storage};
 use ohara_git::Blamer;
@@ -29,20 +30,35 @@ impl OharaServer {
 
         let db_path = ohara_core::paths::index_db_path(&repo_id)?;
 
-        let storage: Arc<dyn Storage> =
-            Arc::new(ohara_storage::SqliteStorage::open(&db_path).await?);
-        let embedder: Arc<dyn EmbeddingProvider> =
-            Arc::new(tokio::task::spawn_blocking(ohara_embed::FastEmbedProvider::new).await??);
+        let storage: Arc<dyn Storage> = Arc::new(
+            timed_phase("storage_open", ohara_storage::SqliteStorage::open(&db_path)).await?,
+        );
+        let embedder: Arc<dyn EmbeddingProvider> = Arc::new(
+            timed_phase(
+                "embed_load",
+                tokio::task::spawn_blocking(ohara_embed::FastEmbedProvider::new),
+            )
+            .await??,
+        );
         // Plan 3: attach the cross-encoder reranker by default. Per-call
         // opt-out is the MCP `no_rerank: true` flag, plumbed through
         // `PatternQuery`. First boot downloads ~110 MB for bge-reranker-base.
-        let reranker: Arc<dyn RerankProvider> =
-            Arc::new(tokio::task::spawn_blocking(ohara_embed::FastEmbedReranker::new).await??);
+        let reranker: Arc<dyn RerankProvider> = Arc::new(
+            timed_phase(
+                "rerank_load",
+                tokio::task::spawn_blocking(ohara_embed::FastEmbedReranker::new),
+            )
+            .await??,
+        );
         let retriever = Retriever::new(storage.clone(), embedder.clone()).with_reranker(reranker);
 
         // Plan 5: blame source for `explain_change`. Reads from the same
         // workdir; no model download or async work needed.
-        let blamer = Arc::new(Blamer::open(&canonical).context("open blamer")?);
+        let blamer = Arc::new(
+            timed_phase("blamer_open", async { Blamer::open(&canonical) })
+                .await
+                .context("open blamer")?,
+        );
 
         Ok(Self {
             repo_id,
