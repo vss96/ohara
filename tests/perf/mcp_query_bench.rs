@@ -13,10 +13,9 @@
 //!     --ignored mcp_query_bench --nocapture
 //! ```
 
+use ohara_perf_tests::{current_git_sha, ensure_medium_fixture, workspace_root};
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tracing::field::{Field, Visit};
@@ -54,34 +53,6 @@ struct McpRunReport {
     find_pattern_wall_ms: PhaseStats,
     explain_change_wall_ms: PhaseStats,
     phases: BTreeMap<String, PhaseStats>,
-}
-
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace root")
-        .to_path_buf()
-}
-
-fn ensure_medium_fixture() -> PathBuf {
-    let root = workspace_root();
-    let script = root.join("fixtures/build_medium.sh");
-    let status = Command::new("bash")
-        .arg(&script)
-        .status()
-        .expect("run build_medium.sh");
-    assert!(status.success(), "build_medium.sh failed");
-    root.join("fixtures/medium/repo")
-}
-
-fn current_git_sha(root: &std::path::Path) -> String {
-    let out = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(root)
-        .output()
-        .expect("git rev-parse");
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 #[derive(Default, Clone)]
