@@ -6,7 +6,7 @@
 //! to the model via `tokio::sync::Mutex` (see field comments for
 //! rationale).
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use fastembed::{
     EmbeddingModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding, TextRerank,
 };
@@ -98,7 +98,7 @@ fn execution_providers_for(
                 Ok(vec![CoreMLExecutionProvider::default().build()])
             }
             #[cfg(not(all(feature = "coreml", target_os = "macos")))]
-            Err(anyhow!(
+            Err(anyhow::anyhow!(
                 "embed-provider=coreml is not enabled in this build. \
                  Rebuild with `cargo build --release --features ohara-embed/coreml` \
                  (Apple Silicon only — pulls in CoreML.framework at link time)."
@@ -111,7 +111,7 @@ fn execution_providers_for(
                 Ok(vec![CUDAExecutionProvider::default().build()])
             }
             #[cfg(not(feature = "cuda"))]
-            Err(anyhow!(
+            Err(anyhow::anyhow!(
                 "embed-provider=cuda is not enabled in this build. \
                  Rebuild with `cargo build --release --features ohara-embed/cuda` \
                  (Linux x86_64 with NVIDIA GPU + CUDA toolkit at link time)."
