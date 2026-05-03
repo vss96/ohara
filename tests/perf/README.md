@@ -174,3 +174,47 @@ When Plan 6 Phase 2 ships an optimization, follow this loop:
 The 10% `REGRESSION_TOLERANCE` already in the test absorbs CI noise;
 don't pad the new constant beyond that or future regressions hide
 behind it.
+
+## Plan 14 — phase tracing + CLI/MCP harness binaries
+
+Three new operator-run binaries land alongside the existing context-engine
+eval and QuestDB baseline:
+
+| File | Purpose |
+|---|---|
+| `cli_query_bench.rs` | Spawns `ohara query --trace-perf --no-rerank --embed-provider cpu` 5 times against `fixtures/medium/repo` (ripgrep 14.1.1), parses per-phase stderr, writes a JSON report to `target/perf/runs/<git-sha>-<utc>-cli-query.json`. |
+| `mcp_query_bench.rs` | Constructs `OharaServer` in-process, drives `find_pattern` + `explain_change` for 10 iterations each, captures per-phase events via a local subscriber, writes a `*-mcp.json` report. |
+| `perf_diff.rs` | Reads two JSON reports via `OHARA_PERF_DIFF_BEFORE`/`OHARA_PERF_DIFF_AFTER` env vars and prints a per-phase tabular delta to stderr. |
+
+### Running
+
+```bash
+fixtures/build_medium.sh
+cargo build --release -p ohara-cli
+cargo run --release -p ohara-cli -- index fixtures/medium/repo  # first run only — slow
+cargo test -p ohara-perf-tests --release -- --ignored cli_query_bench --nocapture
+cargo test -p ohara-perf-tests --release -- --ignored mcp_query_bench --nocapture
+```
+
+PR descriptions for any work that claims a CLI/MCP latency win must paste
+the `perf_diff` output. Numbers are not CI-gated — operator discipline is.
+
+### `--trace-perf`
+
+The CLI gained a global `--trace-perf` flag that installs an aggregator
+on the `ohara::phase` tracing target. End-of-process stderr summary:
+
+```text
+[phase] storage_open      8ms   n=1
+[phase] embed_load     1820ms   n=1
+[phase] embed_query      12ms   n=1
+[phase] lane_knn         24ms   n=1   hits=87
+[phase] lane_fts_text    18ms   n=1   hits=87
+[phase] rerank          780ms   n=1
+[phase] hydrate_symbols  45ms   n=1
+[phase] total          7042ms
+```
+
+Equivalent MCP per-phase data is captured by `mcp_query_bench` directly via
+an in-process tracing subscriber (no need for `--trace-perf` since the
+harness owns the subscriber).
