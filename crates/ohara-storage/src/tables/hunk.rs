@@ -84,6 +84,12 @@ pub fn put_many(c: &mut Connection, records: &[HunkRecord]) -> Result<()> {
             "INSERT INTO fts_hunk_semantic (hunk_id, content) VALUES (?1, ?2)",
             params![hunk_id, semantic_for_fts],
         )?;
+        // Plan 11: persist per-hunk symbol attribution. The hunk
+        // delete above (DELETE FROM hunk WHERE commit_sha = ?1)
+        // cascades to hunk_symbol via the ON DELETE CASCADE on the
+        // foreign key, so re-indexing the same commit doesn't leak
+        // stale rows.
+        crate::tables::hunk_symbol::put_for_hunk(&tx, hunk_id, &r.symbols)?;
     }
     tx.commit()?;
     Ok(())

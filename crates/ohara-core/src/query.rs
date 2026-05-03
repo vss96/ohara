@@ -248,6 +248,23 @@ mod tests {
         ) -> crate::Result<Vec<HunkHit>> {
             unreachable!("compute_index_status should not exercise bm25_hunks_by_symbol_name")
         }
+        async fn bm25_hunks_by_historical_symbol(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> crate::Result<Vec<HunkHit>> {
+            unreachable!("compute_index_status should not exercise bm25_hunks_by_historical_symbol")
+        }
+        async fn get_hunk_symbols(
+            &self,
+            _: &RepoId,
+            _: crate::storage::HunkId,
+        ) -> crate::Result<Vec<crate::types::HunkSymbol>> {
+            unreachable!("compute_index_status should not exercise get_hunk_symbols")
+        }
         async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
             Ok(false)
         }

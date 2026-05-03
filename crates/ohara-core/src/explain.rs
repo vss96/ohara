@@ -413,6 +413,23 @@ mod tests {
         ) -> Result<Vec<HunkHit>> {
             unreachable!()
         }
+        async fn bm25_hunks_by_historical_symbol(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<Vec<HunkHit>> {
+            unreachable!()
+        }
+        async fn get_hunk_symbols(
+            &self,
+            _: &RepoId,
+            _: crate::storage::HunkId,
+        ) -> Result<Vec<crate::types::HunkSymbol>> {
+            unreachable!()
+        }
         async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> {
             Ok(false)
         }

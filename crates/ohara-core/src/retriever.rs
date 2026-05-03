@@ -377,6 +377,27 @@ mod tests {
             self.calls.lock().unwrap().push("fts_sym");
             Ok(self.fts_sym.clone())
         }
+        async fn bm25_hunks_by_historical_symbol(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> crate::Result<Vec<HunkHit>> {
+            // Plan 11 Task 4.1 will exercise this lane in retriever
+            // tests; default empty for now so the existing fixture
+            // doesn't change behavior.
+            self.calls.lock().unwrap().push("fts_hist_sym");
+            Ok(Vec::new())
+        }
+        async fn get_hunk_symbols(
+            &self,
+            _: &RepoId,
+            _: crate::storage::HunkId,
+        ) -> crate::Result<Vec<crate::types::HunkSymbol>> {
+            Ok(Vec::new())
+        }
         async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
             Ok(false)
         }

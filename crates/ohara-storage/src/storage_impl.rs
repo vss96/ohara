@@ -6,8 +6,8 @@ use deadpool_sqlite::Pool;
 use ohara_core::{
     index_metadata::StoredIndexMetadata,
     query::IndexStatus,
-    storage::{CommitRecord, HunkHit, HunkRecord, Storage},
-    types::{CommitMeta, Hunk, RepoId, Symbol},
+    storage::{CommitRecord, HunkHit, HunkId, HunkRecord, Storage},
+    types::{CommitMeta, Hunk, HunkSymbol, RepoId, Symbol},
     Result as CoreResult,
 };
 use std::path::Path;
@@ -167,6 +167,39 @@ impl Storage for SqliteStorage {
         let lang = language.map(str::to_string);
         with_conn(&self.pool, move |c| {
             crate::tables::symbol::bm25_by_name(c, &q, k, lang.as_deref(), since_unix)
+        })
+        .await
+    }
+
+    async fn bm25_hunks_by_historical_symbol(
+        &self,
+        _repo_id: &RepoId,
+        query: &str,
+        k: u8,
+        language: Option<&str>,
+        since_unix: Option<i64>,
+    ) -> CoreResult<Vec<HunkHit>> {
+        let q = query.to_string();
+        let lang = language.map(str::to_string);
+        with_conn(&self.pool, move |c| {
+            crate::tables::hunk_symbol::bm25_by_historical_symbol(
+                c,
+                &q,
+                k,
+                lang.as_deref(),
+                since_unix,
+            )
+        })
+        .await
+    }
+
+    async fn get_hunk_symbols(
+        &self,
+        _repo_id: &RepoId,
+        hunk_id: HunkId,
+    ) -> CoreResult<Vec<HunkSymbol>> {
+        with_conn(&self.pool, move |c| {
+            crate::tables::hunk_symbol::get_for_hunk(c, hunk_id)
         })
         .await
     }
@@ -1201,6 +1234,152 @@ mod tests {
             !hits.is_empty(),
             "semantic lane must surface the retry hunk via the added_lines body"
         );
+    }
+
+    #[tokio::test]
+    async fn bm25_hunks_by_historical_symbol_returns_only_hunks_touching_named_symbol() {
+        // Plan 11 Task 3.2: a file containing two symbols whose hunks
+        // get attributed differently. The historical lane MUST return
+        // only the hunk attributed to the queried symbol — that's the
+        // problem the file-level lane couldn't solve.
+        use ohara_core::types::{AttributionKind, HunkSymbol, SymbolKind};
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        let cm = CommitMeta {
+            commit_sha: "c1".into(),
+            parent_sha: None,
+            is_merge: false,
+            author: None,
+            ts: 1_700_000_000,
+            message: "two symbols, two hunks".into(),
+        };
+        s.put_commit(
+            &id,
+            &CommitRecord {
+                meta: cm,
+                message_emb: vec![0.0; 384],
+            },
+        )
+        .await
+        .unwrap();
+        let attribute = |name: &str| {
+            vec![HunkSymbol {
+                kind: SymbolKind::Function,
+                name: name.into(),
+                qualified_name: None,
+                attribution: AttributionKind::ExactSpan,
+            }]
+        };
+        let recs = vec![
+            HunkRecord {
+                hunk: Hunk {
+                    commit_sha: "c1".into(),
+                    file_path: "src/auth.rs".into(),
+                    language: Some("rust".into()),
+                    change_kind: ChangeKind::Modified,
+                    diff_text: "+    retry();\n".into(),
+                },
+                diff_emb: vec![0.0_f32; 384],
+                semantic_text: "added_lines:\nretry()".into(),
+                symbols: attribute("retry_policy"),
+            },
+            HunkRecord {
+                hunk: Hunk {
+                    commit_sha: "c1".into(),
+                    file_path: "src/auth.rs".into(),
+                    language: Some("rust".into()),
+                    change_kind: ChangeKind::Modified,
+                    diff_text: "+    log();\n".into(),
+                },
+                diff_emb: vec![0.0_f32; 384],
+                semantic_text: "added_lines:\nlog()".into(),
+                symbols: attribute("login"),
+            },
+        ];
+        s.put_hunks(&id, &recs).await.unwrap();
+
+        let hits = s
+            .bm25_hunks_by_historical_symbol(&id, "retry_policy", 5, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "historical lane must return ONLY the hunk attributed to the queried symbol, \
+             not every hunk in the file containing it"
+        );
+        // The match must be the retry_policy hunk, not the login hunk.
+        assert!(hits[0].hunk.diff_text.contains("retry"));
+    }
+
+    #[tokio::test]
+    async fn get_hunk_symbols_round_trips_attribution_data() {
+        // Plan 11 Task 3.2: get_for_hunk returns the persisted
+        // HunkSymbol rows in stable order (exact-span first, then
+        // alphabetical by symbol name).
+        use ohara_core::types::{AttributionKind, HunkSymbol, SymbolKind};
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        let cm = CommitMeta {
+            commit_sha: "c1".into(),
+            parent_sha: None,
+            is_merge: false,
+            author: None,
+            ts: 1_700_000_000,
+            message: "m".into(),
+        };
+        s.put_commit(
+            &id,
+            &CommitRecord {
+                meta: cm,
+                message_emb: vec![0.0; 384],
+            },
+        )
+        .await
+        .unwrap();
+        let symbols = vec![
+            HunkSymbol {
+                kind: SymbolKind::Function,
+                name: "alpha".into(),
+                qualified_name: Some("net::alpha".into()),
+                attribution: AttributionKind::HunkHeader,
+            },
+            HunkSymbol {
+                kind: SymbolKind::Function,
+                name: "bravo".into(),
+                qualified_name: None,
+                attribution: AttributionKind::ExactSpan,
+            },
+        ];
+        let rec = HunkRecord {
+            hunk: Hunk {
+                commit_sha: "c1".into(),
+                file_path: "src/x.rs".into(),
+                language: Some("rust".into()),
+                change_kind: ChangeKind::Added,
+                diff_text: "+x\n".into(),
+            },
+            diff_emb: vec![0.0_f32; 384],
+            semantic_text: "+x".into(),
+            symbols,
+        };
+        s.put_hunks(&id, &[rec]).await.unwrap();
+
+        // Get the hunk_id back.
+        let pool = s.pool().clone();
+        let hunk_id: i64 = pool
+            .get()
+            .await
+            .unwrap()
+            .interact(|c| c.query_row("SELECT id FROM hunk LIMIT 1", [], |r| r.get(0)))
+            .await
+            .unwrap()
+            .unwrap();
+        let got = s.get_hunk_symbols(&id, hunk_id).await.unwrap();
+        assert_eq!(got.len(), 2);
+        // exact_span first.
+        assert_eq!(got[0].name, "bravo");
+        assert_eq!(got[0].attribution, AttributionKind::ExactSpan);
+        assert_eq!(got[1].name, "alpha");
+        assert_eq!(got[1].qualified_name.as_deref(), Some("net::alpha"));
     }
 
     #[tokio::test]

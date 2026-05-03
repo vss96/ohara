@@ -197,6 +197,30 @@ pub trait Storage: Send + Sync {
         since_unix: Option<i64>,
     ) -> Result<Vec<HunkHit>>;
 
+    /// Plan 11: hunks attributed to a symbol whose name matches
+    /// `query` via the per-hunk `hunk_symbol` table. Returns hunks
+    /// that *actually* touched the named symbol — not every hunk in a
+    /// file that happens to contain it. Higher-confidence
+    /// (`exact_span`) attributions are surfaced first; the
+    /// `similarity` field reflects attribution confidence
+    /// (1.0 ExactSpan, 0.6 HunkHeader). Returns an empty Vec for
+    /// indexes built before plan 11 — callers fall back to
+    /// `bm25_hunks_by_symbol_name` (the file-level lane).
+    async fn bm25_hunks_by_historical_symbol(
+        &self,
+        repo_id: &RepoId,
+        query: &str,
+        k: u8,
+        language: Option<&str>,
+        since_unix: Option<i64>,
+    ) -> Result<Vec<HunkHit>>;
+
+    /// Plan 11: per-hunk symbol attribution rows for `hunk_id`. Used
+    /// by the retriever (Task 4.2) to populate
+    /// `PatternHit.related_head_symbols`. Returns an empty Vec when
+    /// the hunk has no attribution rows (legacy index).
+    async fn get_hunk_symbols(&self, repo_id: &RepoId, hunk_id: HunkId) -> Result<Vec<HunkSymbol>>;
+
     // --- Blob cache ---
 
     /// Has a blob with this `(blob_sha, embedding_model)` been embedded

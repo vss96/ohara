@@ -641,6 +641,23 @@ mod phase_timing_tests {
         ) -> Result<Vec<crate::HunkHit>> {
             Ok(vec![])
         }
+        async fn bm25_hunks_by_historical_symbol(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<Vec<crate::HunkHit>> {
+            Ok(vec![])
+        }
+        async fn get_hunk_symbols(
+            &self,
+            _: &RepoId,
+            _: crate::storage::HunkId,
+        ) -> Result<Vec<crate::types::HunkSymbol>> {
+            Ok(vec![])
+        }
         async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> {
             Ok(false)
         }
