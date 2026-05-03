@@ -20,7 +20,6 @@ name: Release
 # or a PAT (403 Resource not accessible by integration). See cli/cli#9514.
 permissions:
   contents: write
-  workflows: write
 
 # This task will run whenever you push a git tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
@@ -227,6 +226,12 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
+    # Job-scoped: workflow-level `workflows: write` prevented tag-triggered runs from
+    # registering (workflow showed as path-only; pushes to main spawned empty failures).
+    permissions:
+      actions: read
+      contents: write
+      workflows: write
     outputs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
