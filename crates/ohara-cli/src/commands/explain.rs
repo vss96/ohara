@@ -46,6 +46,10 @@ pub async fn run(args: Args) -> Result<()> {
         line_end,
         k: args.k.clamp(1, 20),
         include_diff: !args.no_diff,
+        // Plan 12 Task 3.2 default: CLI users get the enrichment so
+        // 'why does this code look this way' answers include nearby
+        // context too.
+        include_related: true,
     };
     let (hits, meta) = explain_change(storage.as_ref(), &blamer, &repo_id, &q).await?;
     let body = json!({ "hits": hits, "_meta": meta });

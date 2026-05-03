@@ -186,6 +186,11 @@ impl OharaService {
             line_end,
             k: input.k.clamp(1, 20),
             include_diff: input.include_diff,
+            // Plan 12 Task 3.2: cap MCP responses to keep payload
+            // size predictable. Clients that want enrichment can opt
+            // in via the schema bump (separate task); CLI defaults to
+            // include_related=true.
+            include_related: false,
         };
         let (hits, explain_meta) = ohara_core::explain::explain_change(
             self.server.storage.as_ref(),

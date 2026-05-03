@@ -65,6 +65,7 @@ async fn explain_e2e_returns_retry_commit_for_retry_lines() {
         line_end: 6,
         k: 5,
         include_diff: true,
+        include_related: false,
     };
     let (hits, meta) = ohara_core::explain::explain_change(storage.as_ref(), &blamer, &repo_id, &q)
         .await

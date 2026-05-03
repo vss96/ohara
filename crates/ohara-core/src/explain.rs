@@ -59,6 +59,17 @@ pub struct ExplainQuery {
     /// caller (e.g. the MCP layer) can render a tighter response. The
     /// orchestrator still computes `blame_lines` either way.
     pub include_diff: bool,
+    /// Plan 12 Task 3.2: when true, the orchestrator attaches
+    /// contextual commits that touched the same file around each
+    /// blame anchor (see `ExplainMeta::related_commits`). Default
+    /// true — clients that don't want the extra payload can flip
+    /// this off.
+    #[serde(default = "default_true")]
+    pub include_related: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// One commit's contribution, enriched for display. Recency order
@@ -83,6 +94,24 @@ pub struct ExplainHit {
 /// `k` clamp matches the spec: 1..=20, default 5 enforced at the caller.
 const K_MAX: u8 = 20;
 
+/// One contextual commit added by the plan-12 explain enrichment.
+/// Distinct from `ExplainHit` (which carries blame-exact provenance)
+/// because related commits are file-scope context, NOT line-level
+/// proof. Clients should display them as "what nearby changes shaped
+/// this area" rather than "which commits introduced these lines".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelatedCommit {
+    pub commit_sha: String,
+    pub commit_message: String,
+    pub commit_author: Option<String>,
+    pub commit_date: String,
+    /// Number of hunks this commit produced for the queried file.
+    pub touched_hunks: u32,
+    /// Always `Provenance::Inferred` — file-scoped neighbour, not
+    /// line-level blame evidence.
+    pub provenance: Provenance,
+}
+
 /// Diagnostic envelope returned alongside hits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExplainMeta {
@@ -99,6 +128,19 @@ pub struct ExplainMeta {
     /// "file was renamed; pre-rename history not reached", or
     /// "file does not exist in HEAD").
     pub limitation: Option<String>,
+    /// Plan 12 Task 3.2: contextual commits that touched the same
+    /// file near the blame anchors. NOT line-level proof — clients
+    /// should display these as "what nearby changes shaped this
+    /// area", not "which commits introduced these lines". Empty
+    /// when `ExplainQuery.include_related` is false or no
+    /// neighbouring commits exist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_commits: Vec<RelatedCommit>,
+    /// Plan 12 Task 3.2: free-form note when the enrichment was
+    /// constrained (e.g. "anchor not indexed; no neighbours
+    /// returned").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrichment_limitation: Option<String>,
 }
 
 /// Run an `explain_change` query end-to-end.
@@ -234,13 +276,84 @@ pub async fn explain_change(
         clamped_end,
     );
 
+    // 6. Plan 12 Task 3.2: contextual neighbours per blame anchor.
+    //    Skip when caller opts out OR when no anchors survived (the
+    //    enrichment_limitation explains the empty result). Cap at
+    //    a small per-anchor window (2 before / 2 after) to keep
+    //    responses bounded.
+    let (related_commits, enrichment_limitation) = if !query.include_related {
+        (Vec::new(), None)
+    } else if hits.is_empty() {
+        (
+            Vec::new(),
+            Some("no indexed blame anchors — no contextual neighbours available".into()),
+        )
+    } else {
+        collect_related_commits(storage, repo_id, &query.file, &hits).await?
+    };
+
     let meta = ExplainMeta {
         lines_queried: (clamped_start, clamped_end),
         commits_unique: hits.len(),
         blame_coverage,
         limitation,
+        related_commits,
+        enrichment_limitation,
     };
     Ok((hits, meta))
+}
+
+/// Plan 12 Task 3.2: collect contextual neighbours for each blame
+/// anchor. Per-anchor limits (2 before / 2 after) and an overall
+/// dedup-by-sha keep the response payload bounded even when several
+/// anchors share neighbours. Returns `(related, enrichment_limitation)`.
+async fn collect_related_commits(
+    storage: &dyn Storage,
+    repo_id: &RepoId,
+    file: &str,
+    hits: &[ExplainHit],
+) -> Result<(Vec<RelatedCommit>, Option<String>)> {
+    use std::collections::BTreeSet;
+    const NEIGHBOURS_BEFORE: u8 = 2;
+    const NEIGHBOURS_AFTER: u8 = 2;
+
+    // Skip duplicates: a neighbour-of-anchor-X may also be the anchor
+    // for hit Y. The anchor SHAs should never appear as related commits.
+    let anchor_shas: BTreeSet<&str> = hits.iter().map(|h| h.commit_sha.as_str()).collect();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut out: Vec<RelatedCommit> = Vec::new();
+
+    for hit in hits {
+        let neighbours = storage
+            .get_neighboring_file_commits(
+                repo_id,
+                file,
+                &hit.commit_sha,
+                NEIGHBOURS_BEFORE,
+                NEIGHBOURS_AFTER,
+            )
+            .await?;
+        for (touched, cm) in neighbours {
+            if anchor_shas.contains(cm.commit_sha.as_str()) {
+                continue;
+            }
+            if !seen.insert(cm.commit_sha.clone()) {
+                continue;
+            }
+            let date = DateTime::<Utc>::from_timestamp(cm.ts, 0)
+                .map(|d| d.to_rfc3339())
+                .unwrap_or_default();
+            out.push(RelatedCommit {
+                commit_sha: cm.commit_sha,
+                commit_message: cm.message,
+                commit_author: cm.author,
+                commit_date: date,
+                touched_hunks: touched,
+                provenance: Provenance::Inferred,
+            });
+        }
+    }
+    Ok((out, None))
 }
 
 fn build_limitation(
@@ -320,6 +433,9 @@ mod tests {
         commits: HashMap<String, CommitMeta>,
         hunks: HashMap<(String, String), Vec<Hunk>>,
         get_commit_calls: Mutex<Vec<String>>,
+        /// Plan 12 Task 3.2: per-(file_path, anchor_sha) neighbour
+        /// list returned verbatim by `get_neighboring_file_commits`.
+        neighbours: HashMap<(String, String), Vec<(u32, CommitMeta)>>,
     }
 
     impl FakeStorageOrch {
@@ -328,6 +444,7 @@ mod tests {
                 commits: HashMap::new(),
                 hunks: HashMap::new(),
                 get_commit_calls: Mutex::new(Vec::new()),
+                neighbours: HashMap::new(),
             }
         }
         fn seed_commit(&mut self, cm: CommitMeta) {
@@ -344,6 +461,15 @@ mod tests {
                     change_kind: ChangeKind::Modified,
                     diff_text: diff_text.into(),
                 });
+        }
+        fn seed_neighbours(
+            &mut self,
+            file: &str,
+            anchor: &str,
+            neighbours: Vec<(u32, CommitMeta)>,
+        ) {
+            self.neighbours
+                .insert((file.to_string(), anchor.to_string()), neighbours);
         }
     }
 
@@ -455,12 +581,16 @@ mod tests {
         async fn get_neighboring_file_commits(
             &self,
             _: &RepoId,
-            _: &str,
-            _: &str,
+            file: &str,
+            anchor: &str,
             _: u8,
             _: u8,
         ) -> Result<Vec<(u32, crate::types::CommitMeta)>> {
-            Ok(Vec::new())
+            Ok(self
+                .neighbours
+                .get(&(file.to_string(), anchor.to_string()))
+                .cloned()
+                .unwrap_or_default())
         }
         async fn get_index_metadata(
             &self,
@@ -535,6 +665,7 @@ mod tests {
             line_end: 4,
             k: 5,
             include_diff: true,
+            include_related: false,
         };
         let id = RepoId::from_parts("first", "/r");
         let (hits, meta) = explain_change(&storage, &blamer, &id, &q).await.unwrap();
@@ -571,6 +702,7 @@ mod tests {
             line_end: 999,
             k: 5,
             include_diff: true,
+            include_related: false,
         };
         let id = RepoId::from_parts("first", "/r");
         let (hits, meta) = explain_change(&storage, &blamer, &id, &q).await.unwrap();
@@ -609,6 +741,7 @@ mod tests {
             line_end: 4,
             k: 5,
             include_diff: true,
+            include_related: false,
         };
         let id = RepoId::from_parts("first", "/r");
         let (hits, meta) = explain_change(&storage, &blamer, &id, &q).await.unwrap();
@@ -644,6 +777,7 @@ mod tests {
             line_end: 4,
             k: 5,
             include_diff: true,
+            include_related: false,
         };
         let id = RepoId::from_parts("first", "/r");
         let (_hits, meta) = explain_change(&storage, &blamer, &id, &q).await.unwrap();
@@ -678,6 +812,7 @@ mod tests {
             line_end: 1,
             k: 5,
             include_diff: true,
+            include_related: false,
         };
         let id = RepoId::from_parts("first", "/r");
         let (hits, _meta) = explain_change(&storage, &blamer, &id, &q).await.unwrap();
@@ -689,5 +824,138 @@ mod tests {
             s.contains("\"provenance\":\"EXACT\""),
             "expected EXACT, got: {s}"
         );
+    }
+
+    #[tokio::test]
+    async fn explain_change_attaches_related_commits_when_include_related_is_true() {
+        // Plan 12 Task 3.2: include_related=true causes the
+        // orchestrator to call get_neighboring_file_commits per
+        // anchor. The related commits land in ExplainMeta with
+        // Provenance::Inferred (NOT Exact); blame hits keep
+        // Provenance::Exact.
+        let mut storage = FakeStorageOrch::new();
+        let anchor_sha = "anchor";
+        storage.seed_commit(CommitMeta {
+            commit_sha: anchor_sha.into(),
+            parent_sha: None,
+            is_merge: false,
+            author: Some("alice".into()),
+            ts: 1_700_001_000,
+            message: "anchor change".into(),
+        });
+        storage.seed_hunk(anchor_sha, "src/a.rs", "@@ -1,1 +1,1 @@\n+changed");
+        storage.seed_neighbours(
+            "src/a.rs",
+            anchor_sha,
+            vec![
+                (
+                    1,
+                    CommitMeta {
+                        commit_sha: "older".into(),
+                        parent_sha: None,
+                        is_merge: false,
+                        author: Some("bob".into()),
+                        ts: 1_700_000_000,
+                        message: "older context".into(),
+                    },
+                ),
+                (
+                    2,
+                    CommitMeta {
+                        commit_sha: "newer".into(),
+                        parent_sha: None,
+                        is_merge: false,
+                        author: Some("carol".into()),
+                        ts: 1_700_002_000,
+                        message: "newer follow-up".into(),
+                    },
+                ),
+            ],
+        );
+        let blamer = ScriptedBlamer {
+            out: vec![BlameRange {
+                commit_sha: anchor_sha.into(),
+                lines: vec![1],
+            }],
+            last_args: Mutex::new(None),
+        };
+        let q = ExplainQuery {
+            file: "src/a.rs".into(),
+            line_start: 1,
+            line_end: 1,
+            k: 5,
+            include_diff: false,
+            include_related: true,
+        };
+        let id = RepoId::from_parts("first", "/r");
+        let (hits, meta) = explain_change(&storage, &blamer, &id, &q).await.unwrap();
+
+        // Blame hit stays Exact.
+        assert_eq!(hits.len(), 1);
+        assert!(matches!(hits[0].provenance, Provenance::Exact));
+
+        // Related commits exist + are labelled Inferred.
+        assert_eq!(meta.related_commits.len(), 2);
+        for r in &meta.related_commits {
+            assert!(matches!(r.provenance, Provenance::Inferred));
+        }
+        let related_shas: Vec<&str> = meta
+            .related_commits
+            .iter()
+            .map(|r| r.commit_sha.as_str())
+            .collect();
+        assert!(related_shas.contains(&"older"));
+        assert!(related_shas.contains(&"newer"));
+        // Anchor should never appear in the related list.
+        assert!(!related_shas.contains(&"anchor"));
+        // touched_hunks round-trips.
+        assert_eq!(meta.related_commits[0].touched_hunks, 1);
+        assert!(meta.enrichment_limitation.is_none());
+    }
+
+    #[tokio::test]
+    async fn explain_change_omits_related_commits_when_include_related_false() {
+        let mut storage = FakeStorageOrch::new();
+        storage.seed_commit(CommitMeta {
+            commit_sha: "anchor".into(),
+            parent_sha: None,
+            is_merge: false,
+            author: None,
+            ts: 1,
+            message: "m".into(),
+        });
+        storage.seed_neighbours(
+            "src/a.rs",
+            "anchor",
+            vec![(
+                1,
+                CommitMeta {
+                    commit_sha: "would-not-appear".into(),
+                    parent_sha: None,
+                    is_merge: false,
+                    author: None,
+                    ts: 1,
+                    message: "x".into(),
+                },
+            )],
+        );
+        let blamer = ScriptedBlamer {
+            out: vec![BlameRange {
+                commit_sha: "anchor".into(),
+                lines: vec![1],
+            }],
+            last_args: Mutex::new(None),
+        };
+        let q = ExplainQuery {
+            file: "src/a.rs".into(),
+            line_start: 1,
+            line_end: 1,
+            k: 5,
+            include_diff: false,
+            include_related: false,
+        };
+        let id = RepoId::from_parts("first", "/r");
+        let (_hits, meta) = explain_change(&storage, &blamer, &id, &q).await.unwrap();
+        assert!(meta.related_commits.is_empty());
     }
 }
