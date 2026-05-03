@@ -1495,3 +1495,32 @@ mod tests {
         assert!(hits.is_empty(), "no FTS match should yield empty Vec");
     }
 }
+
+#[cfg(test)]
+mod metrics_tests {
+    use super::*;
+    use ohara_core::storage::Storage;
+    use ohara_core::types::RepoId;
+
+    #[tokio::test]
+    async fn knn_call_increments_counters() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = SqliteStorage::open(dir.path().join("idx.sqlite"))
+            .await
+            .unwrap();
+        let repo_id = RepoId::from_parts("seed", "/p");
+        s.open_repo(&repo_id, "/p", "seed").await.unwrap();
+
+        let before = s.metrics_snapshot().knn_hunks.call_count;
+        // KNN against an empty index returns Ok(vec![]); we don't care
+        // about the result, only the counter side-effect.
+        let _ = s
+            .knn_hunks(&repo_id, &vec![0.0_f32; 384], 5, None, None)
+            .await;
+        let after = s.metrics_snapshot().knn_hunks.call_count;
+        assert_eq!(after, before + 1, "knn_hunks counter should increment by 1");
+
+        let elapsed = s.metrics_snapshot().knn_hunks.total_elapsed_us;
+        assert!(elapsed > 0, "elapsed_us should be non-zero after a call");
+    }
+}
