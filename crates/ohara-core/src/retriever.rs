@@ -750,8 +750,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn find_pattern_emits_expected_phase_events() {
+    #[tokio::test]
+    async fn find_pattern_emits_expected_phase_events() {
         use std::collections::BTreeSet;
         use std::sync::{Arc, Mutex};
         use tracing::field::{Field, Visit};
