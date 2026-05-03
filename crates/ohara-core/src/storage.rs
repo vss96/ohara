@@ -168,6 +168,23 @@ pub trait Storage: Send + Sync {
         since_unix: Option<i64>,
     ) -> Result<Vec<HunkHit>>;
 
+    /// Plan 11: BM25-ranked hunks whose normalized `semantic_text`
+    /// matches `query` via FTS5. Same shape and filters as
+    /// `bm25_hunks_by_text`; targets `fts_hunk_semantic` instead of
+    /// `fts_hunk_text`. Returns an empty Vec on a fresh-from-migration
+    /// index whose hunks haven't been re-indexed since v0.7
+    /// (semantic_text gets backfilled = diff_text by V4, so the lane
+    /// should still return useful results, just without the
+    /// section-structured representation).
+    async fn bm25_hunks_by_semantic_text(
+        &self,
+        repo_id: &RepoId,
+        query: &str,
+        k: u8,
+        language: Option<&str>,
+        since_unix: Option<i64>,
+    ) -> Result<Vec<HunkHit>>;
+
     /// BM25-ranked hunks whose touched files contain a symbol whose name
     /// (or a sibling-merged name from the AST chunker) matches `query`.
     /// Ordered best-first.

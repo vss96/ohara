@@ -353,6 +353,19 @@ mod tests {
             self.calls.lock().unwrap().push("fts_text");
             Ok(self.fts_text.clone())
         }
+        async fn bm25_hunks_by_semantic_text(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> crate::Result<Vec<HunkHit>> {
+            // Plan 11: keep retriever tests focused on the existing
+            // three lanes until Task 4.1 wires the semantic lane in.
+            self.calls.lock().unwrap().push("fts_semantic");
+            Ok(Vec::new())
+        }
         async fn bm25_hunks_by_symbol_name(
             &self,
             _: &RepoId,

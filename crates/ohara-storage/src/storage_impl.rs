@@ -139,6 +139,22 @@ impl Storage for SqliteStorage {
         .await
     }
 
+    async fn bm25_hunks_by_semantic_text(
+        &self,
+        _repo_id: &RepoId,
+        query: &str,
+        k: u8,
+        language: Option<&str>,
+        since_unix: Option<i64>,
+    ) -> CoreResult<Vec<HunkHit>> {
+        let q = query.to_string();
+        let lang = language.map(str::to_string);
+        with_conn(&self.pool, move |c| {
+            crate::tables::hunk::bm25_by_semantic_text(c, &q, k, lang.as_deref(), since_unix)
+        })
+        .await
+    }
+
     async fn bm25_hunks_by_symbol_name(
         &self,
         _repo_id: &RepoId,
@@ -1093,6 +1109,98 @@ mod tests {
         assert!(s.commit_exists("alpha").await.unwrap());
         assert!(s.commit_exists("beta").await.unwrap());
         assert!(!s.commit_exists("gamma-never-put").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn bm25_hunks_by_semantic_text_finds_section_keywords_not_present_in_diff() {
+        // Plan 11 Task 2.2: the semantic-text lane should match
+        // structural keywords that the builder injects (file:,
+        // change:, language:) which a raw-diff lane couldn't find
+        // because they're not in the diff body itself.
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        // Manually construct a HunkRecord with a section-formatted
+        // semantic_text — bypasses the indexer wiring so the storage
+        // contract is exercised in isolation.
+        let cm = CommitMeta {
+            commit_sha: "c1".into(),
+            parent_sha: None,
+            is_merge: false,
+            author: None,
+            ts: 1_700_000_000,
+            message: "fetch: add retry".into(),
+        };
+        s.put_commit(
+            &id,
+            &CommitRecord {
+                meta: cm,
+                message_emb: vec![0.0; 384],
+            },
+        )
+        .await
+        .unwrap();
+        let rec = HunkRecord {
+            hunk: Hunk {
+                commit_sha: "c1".into(),
+                file_path: "src/fetch.rs".into(),
+                language: Some("rust".into()),
+                change_kind: ChangeKind::Added,
+                diff_text: "+fn fetch() {}".into(),
+            },
+            diff_emb: vec![0.0_f32; 384],
+            semantic_text: "commit: fetch: add retry\n\
+                            file: src/fetch.rs\n\
+                            language: rust\n\
+                            change: added\n\
+                            added_lines:\nfn fetch() {}"
+                .into(),
+            symbols: Vec::new(),
+        };
+        s.put_hunks(&id, &[rec]).await.unwrap();
+
+        // Query for "language" — present in semantic_text but not in
+        // diff_text. Plain BM25-by-diff-text would miss it.
+        let semantic_hits = s
+            .bm25_hunks_by_semantic_text(&id, "language", 5, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            semantic_hits.len(),
+            1,
+            "semantic lane must match the structural keyword"
+        );
+        let diff_hits = s
+            .bm25_hunks_by_text(&id, "language", 5, None, None)
+            .await
+            .unwrap();
+        assert!(
+            diff_hits.is_empty(),
+            "raw-diff lane must NOT match — confirms the lanes are independent"
+        );
+    }
+
+    #[tokio::test]
+    async fn bm25_hunks_by_semantic_text_still_matches_diff_body_via_added_lines() {
+        // Plan 11 Task 2.2 paired test: the semantic-text representation
+        // still includes the added-line bodies (via `added_lines:`), so
+        // a query that hits the diff body should hit the semantic lane
+        // too. Pins that no BM25 vocabulary regressed.
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        seed_hunks_with_texts(
+            &s,
+            &id,
+            "c2",
+            1_700_000_000,
+            &[("a", "+fn retry_with_backoff() {}", Some("rust"))],
+        )
+        .await;
+        let hits = s
+            .bm25_hunks_by_semantic_text(&id, "retry", 5, None, None)
+            .await
+            .unwrap();
+        assert!(
+            !hits.is_empty(),
+            "semantic lane must surface the retry hunk via the added_lines body"
+        );
     }
 
     #[tokio::test]

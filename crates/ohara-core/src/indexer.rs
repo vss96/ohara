@@ -530,6 +530,16 @@ mod phase_timing_tests {
         ) -> Result<Vec<crate::HunkHit>> {
             Ok(vec![])
         }
+        async fn bm25_hunks_by_semantic_text(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<Vec<crate::HunkHit>> {
+            Ok(vec![])
+        }
         async fn bm25_hunks_by_symbol_name(
             &self,
             _: &RepoId,

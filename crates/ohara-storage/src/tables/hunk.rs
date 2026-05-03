@@ -178,6 +178,100 @@ pub fn knn(
     Ok(out)
 }
 
+/// Plan 11: BM25 over `fts_hunk_semantic`, joined the same way as
+/// [`bm25_by_text`]. Targets the normalized hunk-text representation
+/// (commit/file/language/symbols/change/added_lines sections) instead
+/// of the raw `diff_text`. The two lanes coexist — the retriever
+/// fuses them via RRF; the raw-diff lane stays available until the
+/// plan-10 evals show the semantic lane is strictly better.
+pub fn bm25_by_semantic_text(
+    c: &Connection,
+    query: &str,
+    k: u8,
+    language: Option<&str>,
+    since_unix: Option<i64>,
+) -> Result<Vec<HunkHit>> {
+    let lang_filter = language.map(|_| "AND fp.language = :lang").unwrap_or("");
+    let ts_filter = since_unix.map(|_| "AND cr.ts >= :ts").unwrap_or("");
+
+    let sql = format!(
+        "SELECT h.id, h.commit_sha, fp.path, fp.language, h.change_kind, h.diff_text,
+                cr.parent_sha, cr.is_merge, cr.author, cr.ts, cr.message,
+                bm25(fts_hunk_semantic) AS rank_score
+         FROM fts_hunk_semantic f
+         JOIN hunk h ON h.id = f.hunk_id
+         JOIN file_path fp ON fp.id = h.file_path_id
+         JOIN commit_record cr ON cr.sha = h.commit_sha
+         WHERE fts_hunk_semantic MATCH :query
+           {ts_filter} {lang_filter}
+         ORDER BY rank_score ASC
+         LIMIT :k"
+    );
+
+    let mut binds: Vec<(&str, Box<dyn rusqlite::ToSql>)> = Vec::new();
+    binds.push((":query", Box::new(query.to_string())));
+    binds.push((":k", Box::new(k as i64)));
+    if let Some(lang) = language {
+        binds.push((":lang", Box::new(lang.to_string())));
+    }
+    if let Some(ts) = since_unix {
+        binds.push((":ts", Box::new(ts)));
+    }
+
+    let mut stmt = c.prepare(&sql)?;
+    let bind_refs: Vec<(&str, &dyn rusqlite::ToSql)> = binds
+        .iter()
+        .map(|(k, v)| (*k, v.as_ref() as &dyn rusqlite::ToSql))
+        .collect();
+
+    let rows = stmt.query_map(bind_refs.as_slice(), |row| {
+        let hunk_id: i64 = row.get(0)?;
+        let commit_sha: String = row.get(1)?;
+        let file_path: String = row.get(2)?;
+        let language: Option<String> = row.get(3)?;
+        let change_kind_s: String = row.get(4)?;
+        let diff_text: String = row.get(5)?;
+        let parent_sha: Option<String> = row.get(6)?;
+        let is_merge: i64 = row.get(7)?;
+        let author: Option<String> = row.get(8)?;
+        let ts: i64 = row.get(9)?;
+        let message: String = row.get(10)?;
+        let rank_score: f64 = row.get(11)?;
+
+        let change_kind = str_to_change_kind(&change_kind_s).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, e.into())
+        })?;
+        let hunk = Hunk {
+            commit_sha: commit_sha.clone(),
+            file_path,
+            language,
+            change_kind,
+            diff_text,
+        };
+        let commit = CommitMeta {
+            commit_sha,
+            parent_sha,
+            is_merge: is_merge != 0,
+            author,
+            ts,
+            message,
+        };
+        let similarity = 1.0 / (1.0 + (-rank_score) as f32);
+        Ok(HunkHit {
+            hunk_id,
+            hunk,
+            commit,
+            similarity,
+        })
+    })?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 /// BM25 over `fts_hunk_text`, joined to the hunk's file + commit so we
 /// return the same `HunkHit` shape as `knn`. Ordered best-first.
 pub fn bm25_by_text(
