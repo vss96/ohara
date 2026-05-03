@@ -120,10 +120,14 @@ impl OharaService {
             no_rerank: input.no_rerank,
         };
         let now = chrono::Utc::now().timestamp();
-        let hits = self
+        // Plan 12 Task 2.1 Step 4: capture the profile alongside
+        // hits so MCP clients see _meta.query_profile (name +
+        // explanation). Internal weights stay out of the response
+        // shape per Task 1.1's serialisation contract.
+        let (hits, profile) = self
             .server
             .retriever
-            .find_pattern(&self.server.repo_id, &q, now)
+            .find_pattern_with_profile(&self.server.repo_id, &q, now)
             .await
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
         let meta = self
@@ -132,7 +136,18 @@ impl OharaService {
             .await
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
 
-        let body = json!({ "hits": hits, "_meta": meta });
+        let body = json!({
+            "hits": hits,
+            "_meta": {
+                "index_status": meta.index_status,
+                "hint": meta.hint,
+                "compatibility": meta.compatibility,
+                "query_profile": {
+                    "name": profile.name,
+                    "explanation": profile.explanation,
+                },
+            }
+        });
         Ok(CallToolResult::success(vec![Content::text(
             body.to_string(),
         )]))

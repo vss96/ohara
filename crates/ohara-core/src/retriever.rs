@@ -91,6 +91,35 @@ impl Retriever {
         query: &PatternQuery,
         now_unix: i64,
     ) -> crate::Result<Vec<PatternHit>> {
+        // Existing entry-point — discards the profile metadata. CLI
+        // and MCP callers prefer `find_pattern_with_profile`.
+        self.find_pattern_with_profile(repo_id, query, now_unix)
+            .await
+            .map(|(hits, _profile)| hits)
+    }
+
+    /// Plan 12 Task 2.1: same as [`find_pattern`] but also returns
+    /// the [`RetrievalProfile`] picked from
+    /// `query_understanding::parse_query`. Lets callers surface the
+    /// profile in their response metadata (`_meta.query_profile`)
+    /// without re-running the parser.
+    pub async fn find_pattern_with_profile(
+        &self,
+        repo_id: &crate::types::RepoId,
+        query: &PatternQuery,
+        now_unix: i64,
+    ) -> crate::Result<(
+        Vec<PatternHit>,
+        crate::query_understanding::RetrievalProfile,
+    )> {
+        // Plan 12 Task 2.1: classify the query, pick a profile,
+        // resolve the language hint (caller-set wins over parsed),
+        // and run retrieval with the profile's lane mask + recency
+        // multiplier + optional rerank-pool override.
+        let parsed = crate::query_understanding::parse_query(&query.query);
+        let profile = crate::query_understanding::RetrievalProfile::for_intent(parsed.intent);
+        let effective_language = query.language.clone().or_else(|| parsed.language.clone());
+
         // 1. Embed the query once for the vector lane. The BM25 lanes use
         //    the raw query string directly.
         let q_text = vec![query.query.clone()];
@@ -99,47 +128,65 @@ impl Retriever {
             .pop()
             .ok_or_else(|| crate::OhraError::Embedding("empty".into()))?;
 
+        let language_filter = effective_language.as_deref();
+
         // 2. Gather all four candidate lanes in parallel. The symbol
         //    side has two: the v0.7 historical lane (`hunk_symbol`,
         //    plan 11 Task 4.1) is the primary path; if it returns
         //    nothing — because the index was built before plan 11 ran,
         //    or no `(commit, file)` pair has attribution rows yet — we
         //    fall back to the v0.3 file-level lane so old indexes
-        //    stay queryable.
+        //    stay queryable. Plan 12 Task 2.1: lanes are gated by the
+        //    profile's lane-mask flags; disabled lanes return empty.
         let (vec_res, fts_res, hist_sym_res, head_sym_res) = tokio::join!(
             self.storage.knn_hunks(
                 repo_id,
                 &q_emb,
                 self.weights.lane_top_k,
-                query.language.as_deref(),
-                query.since_unix,
+                language_filter,
+                query.since_unix.or(parsed.since_unix),
             ),
             self.storage.bm25_hunks_by_text(
                 repo_id,
                 &query.query,
                 self.weights.lane_top_k,
-                query.language.as_deref(),
-                query.since_unix,
+                language_filter,
+                query.since_unix.or(parsed.since_unix),
             ),
             self.storage.bm25_hunks_by_historical_symbol(
                 repo_id,
                 &query.query,
                 self.weights.lane_top_k,
-                query.language.as_deref(),
-                query.since_unix,
+                language_filter,
+                query.since_unix.or(parsed.since_unix),
             ),
             self.storage.bm25_hunks_by_symbol_name(
                 repo_id,
                 &query.query,
                 self.weights.lane_top_k,
-                query.language.as_deref(),
-                query.since_unix,
+                language_filter,
+                query.since_unix.or(parsed.since_unix),
             ),
         );
-        let vec_hits = vec_res?;
-        let fts_hits = fts_res?;
-        let hist_sym_hits = hist_sym_res?;
-        let head_sym_hits = head_sym_res?;
+        let vec_hits = if profile.vec_lane_enabled {
+            vec_res?
+        } else {
+            Vec::new()
+        };
+        let fts_hits = if profile.text_lane_enabled {
+            fts_res?
+        } else {
+            Vec::new()
+        };
+        let (hist_sym_hits, head_sym_hits) = if profile.symbol_lane_enabled {
+            (hist_sym_res?, head_sym_res?)
+        } else {
+            // Drain the futures' results to avoid leaking errors;
+            // ignore the contents because the profile disabled the lane.
+            let _ = hist_sym_res?;
+            let _ = head_sym_res?;
+            (Vec::new(), Vec::new())
+        };
         // Plan 11 Task 4.1 Step 3: prefer historical attribution when
         // the index has it, fall back to HEAD-symbol-name otherwise.
         // Mutually exclusive — feeding both into RRF would give the
@@ -173,15 +220,17 @@ impl Retriever {
 
         // 4. Reciprocal Rank Fusion (k = 60, Cormack 2009 default) →
         //    truncate to rerank_top_k before the expensive cross-encoder.
+        //    Plan 12 Task 2.1: profile may widen the rerank pool.
         let fused: Vec<HunkId> =
             reciprocal_rank_fusion(&[ranking_vec, ranking_fts, ranking_sym], 60);
-        let trimmed: Vec<HunkId> = fused.into_iter().take(self.weights.rerank_top_k).collect();
+        let rerank_top_k = profile.rerank_top_k.unwrap_or(self.weights.rerank_top_k);
+        let trimmed: Vec<HunkId> = fused.into_iter().take(rerank_top_k).collect();
         let hits: Vec<HunkHit> = trimmed
             .iter()
             .filter_map(|id| by_id.get(id).cloned())
             .collect();
         if hits.is_empty() {
-            return Ok(vec![]);
+            return Ok((vec![], profile));
         }
 
         // 5. Optional cross-encoder rerank. In degraded mode (no
@@ -215,13 +264,16 @@ impl Retriever {
 
         // 7. Recency multiplier as a tie-breaker on the rerank score, then
         //    final descending sort and truncate to caller's k.
+        //    Plan 12 Task 2.1: profile.recency_multiplier nudges the
+        //    base recency_weight (e.g. 1.5x for bug-fix queries).
+        let effective_recency_weight = self.weights.recency_weight * profile.recency_multiplier;
         let mut out: Vec<PatternHit> = hits
             .into_iter()
             .zip(rerank_scores)
             .map(|(h, s)| {
                 let age_days = ((now_unix - h.commit.ts).max(0) as f32) / 86400.0;
                 let recency = (-age_days / self.weights.recency_half_life_days).exp();
-                let combined = s * (1.0 + self.weights.recency_weight * recency);
+                let combined = s * (1.0 + effective_recency_weight * recency);
                 // Bogus ts (out-of-range i64) falls back to "" — PatternHit.commit_date
                 // is informational, not a contract, so an empty string is acceptable.
                 let date = DateTime::<Utc>::from_timestamp(h.commit.ts, 0)
@@ -253,7 +305,7 @@ impl Retriever {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         out.truncate(query.k.clamp(1, 20) as usize);
-        Ok(out)
+        Ok((out, profile))
     }
 }
 
