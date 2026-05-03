@@ -1,4 +1,5 @@
 use crate::codec::pool::SqlitePoolBuilder;
+use crate::metrics::{timed_with_conn, StorageCounters};
 use crate::migrations;
 use crate::tables::repo;
 use anyhow::Result;
@@ -6,70 +7,15 @@ use deadpool_sqlite::Pool;
 use ohara_core::{
     index_metadata::StoredIndexMetadata,
     query::IndexStatus,
-    storage::{
-        CommitRecord, HunkHit, HunkId, HunkRecord, Storage, StorageMethodMetrics,
-        StorageMetricsSnapshot,
-    },
+    storage::{CommitRecord, HunkHit, HunkId, HunkRecord, Storage, StorageMetricsSnapshot},
     types::{CommitMeta, Hunk, HunkSymbol, RepoId, Symbol},
     Result as CoreResult,
 };
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-
-#[derive(Default)]
-struct MethodCounter {
-    call_count: AtomicU64,
-    total_elapsed_us: AtomicU64,
-    rows_returned: AtomicU64,
-}
-
-impl MethodCounter {
-    fn record(&self, elapsed_us: u64, rows: u64) {
-        self.call_count.fetch_add(1, Relaxed);
-        self.total_elapsed_us.fetch_add(elapsed_us, Relaxed);
-        self.rows_returned.fetch_add(rows, Relaxed);
-    }
-    fn snapshot(&self) -> StorageMethodMetrics {
-        StorageMethodMetrics {
-            call_count: self.call_count.load(Relaxed),
-            total_elapsed_us: self.total_elapsed_us.load(Relaxed),
-            rows_returned: self.rows_returned.load(Relaxed),
-        }
-    }
-}
-
-#[derive(Default)]
-struct StorageCounters {
-    knn_hunks: MethodCounter,
-    bm25_hunks_by_text: MethodCounter,
-    bm25_hunks_by_semantic_text: MethodCounter,
-    bm25_hunks_by_symbol_name: MethodCounter,
-    bm25_hunks_by_historical_symbol: MethodCounter,
-    get_hunk_symbols: MethodCounter,
-    get_neighboring_file_commits: MethodCounter,
-    get_index_status: MethodCounter,
-    get_index_metadata: MethodCounter,
-}
-
-impl StorageCounters {
-    fn snapshot(&self) -> StorageMetricsSnapshot {
-        StorageMetricsSnapshot {
-            knn_hunks: self.knn_hunks.snapshot(),
-            bm25_hunks_by_text: self.bm25_hunks_by_text.snapshot(),
-            bm25_hunks_by_semantic_text: self.bm25_hunks_by_semantic_text.snapshot(),
-            bm25_hunks_by_symbol_name: self.bm25_hunks_by_symbol_name.snapshot(),
-            bm25_hunks_by_historical_symbol: self.bm25_hunks_by_historical_symbol.snapshot(),
-            get_hunk_symbols: self.get_hunk_symbols.snapshot(),
-            get_neighboring_file_commits: self.get_neighboring_file_commits.snapshot(),
-            get_index_status: self.get_index_status.snapshot(),
-            get_index_metadata: self.get_index_metadata.snapshot(),
-        }
-    }
-}
 
 pub struct SqliteStorage {
     pool: Pool,
-    counters: StorageCounters,
+    pub(crate) counters: StorageCounters,
 }
 
 impl SqliteStorage {
@@ -90,7 +36,7 @@ impl SqliteStorage {
     }
 }
 
-async fn with_conn<F, T>(pool: &deadpool_sqlite::Pool, f: F) -> ohara_core::Result<T>
+pub(crate) async fn with_conn<F, T>(pool: &deadpool_sqlite::Pool, f: F) -> ohara_core::Result<T>
 where
     F: FnOnce(&mut rusqlite::Connection) -> anyhow::Result<T> + Send + 'static,
     T: Send + 'static,
@@ -102,24 +48,6 @@ where
         .await
         .map_err(|e| ohara_core::OhraError::Storage(format!("interact: {e}")))?
         .map_err(|e| ohara_core::OhraError::Storage(format!("query: {e}")))
-}
-
-async fn timed_with_conn<F, T>(
-    pool: &deadpool_sqlite::Pool,
-    counter: &MethodCounter,
-    rows_of: impl Fn(&T) -> u64,
-    f: F,
-) -> ohara_core::Result<T>
-where
-    F: FnOnce(&mut rusqlite::Connection) -> anyhow::Result<T> + Send + 'static,
-    T: Send + 'static,
-{
-    let start = std::time::Instant::now();
-    let out = with_conn(pool, f).await?;
-    let elapsed_us = start.elapsed().as_micros() as u64;
-    let rows = rows_of(&out);
-    counter.record(elapsed_us, rows);
-    Ok(out)
 }
 
 #[async_trait::async_trait]
