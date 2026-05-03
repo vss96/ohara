@@ -59,6 +59,14 @@ path = "cli_query_bench.rs"
 name = "mcp_query_bench"
 path = "mcp_query_bench.rs"
 
+[[test]]
+# Plan 14 Task E.3 — perf-run differ. Reads two JSON reports written
+# by cli_query_bench / mcp_query_bench (paths via env vars
+# OHARA_PERF_DIFF_BEFORE / OHARA_PERF_DIFF_AFTER) and prints a
+# side-by-side delta. Operators paste the output into PR descriptions.
+name = "perf_diff"
+path = "perf_diff.rs"
+
 [dev-dependencies]
 ohara-cli = { path = "../../crates/ohara-cli" }
 ohara-core = { path = "../../crates/ohara-core" }
