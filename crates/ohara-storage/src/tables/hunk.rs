@@ -6,6 +6,28 @@ use rusqlite::{params, Connection};
 use crate::codec::row_codec::{change_kind_to_str, str_to_change_kind, upsert_file_path};
 use crate::codec::vec_codec::vec_to_bytes;
 
+/// FTS5 treats characters like `` ` ``, `:`, `(`, `)`, `*`, `^`, `"`,
+/// `+`, `-`, etc. as syntax. A user query containing any of them
+/// (e.g. `how is \`login\` called`) raises "fts5: syntax error" at
+/// query time. Strip everything that isn't a word character, collapse
+/// whitespace, and trim — preserves identifier-style search terms
+/// without erroring on natural-language phrasing. Shared with the
+/// symbol-name BM25 lane via `pub(crate)`.
+pub(crate) fn sanitize_fts5_query(query: &str) -> String {
+    let mut out = String::with_capacity(query.len());
+    let mut last_was_space = true;
+    for c in query.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            out.push(c);
+            last_was_space = false;
+        } else if !last_was_space {
+            out.push(' ');
+            last_was_space = true;
+        }
+    }
+    out.trim().to_string()
+}
+
 pub fn put_many(c: &mut Connection, records: &[HunkRecord]) -> Result<()> {
     if records.is_empty() {
         return Ok(());
@@ -215,7 +237,7 @@ pub fn bm25_by_semantic_text(
     );
 
     let mut binds: Vec<(&str, Box<dyn rusqlite::ToSql>)> = Vec::new();
-    binds.push((":query", Box::new(query.to_string())));
+    binds.push((":query", Box::new(sanitize_fts5_query(query))));
     binds.push((":k", Box::new(k as i64)));
     if let Some(lang) = language {
         binds.push((":lang", Box::new(lang.to_string())));
@@ -307,7 +329,7 @@ pub fn bm25_by_text(
     );
 
     let mut binds: Vec<(&str, Box<dyn rusqlite::ToSql>)> = Vec::new();
-    binds.push((":query", Box::new(query.to_string())));
+    binds.push((":query", Box::new(sanitize_fts5_query(query))));
     binds.push((":k", Box::new(k as i64)));
     if let Some(lang) = language {
         binds.push((":lang", Box::new(lang.to_string())));

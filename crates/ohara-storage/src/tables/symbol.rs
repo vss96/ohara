@@ -129,7 +129,10 @@ pub fn bm25_by_name(
     );
 
     let mut binds: Vec<(&str, Box<dyn rusqlite::ToSql>)> = Vec::new();
-    binds.push((":query", Box::new(query.to_string())));
+    binds.push((
+        ":query",
+        Box::new(crate::tables::hunk::sanitize_fts5_query(query)),
+    ));
     if let Some(lang) = language {
         binds.push((":lang", Box::new(lang.to_string())));
     }

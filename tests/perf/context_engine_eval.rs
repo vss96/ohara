@@ -56,6 +56,12 @@ struct GoldenCase {
     /// printed alongside actual paths when a case fails.
     #[allow(dead_code)]
     expected_paths: Vec<String>,
+    /// Plan 12 Task 2.2: optional profile-name expectation. Mismatches
+    /// are reported as informational warnings, NOT counted as failed
+    /// cases — the eval harness's hard contracts are the recall + MRR
+    /// thresholds, not the parser's intent classification.
+    #[serde(default)]
+    expected_profile: Option<String>,
     #[allow(dead_code)]
     notes: String,
 }
@@ -85,6 +91,9 @@ struct CaseResult {
     /// 1-based rank of the first expected SHA in `hits`, or `None` if
     /// no expected SHA appeared in the top-K.
     first_hit_rank: Option<usize>,
+    /// Plan 12 Task 2.2: actual profile name picked by the parser
+    /// for this case's query.
+    actual_profile: String,
 }
 
 /// Maps `expected_commit_labels` -> exact commit message in the fixture.
@@ -373,8 +382,8 @@ async fn context_engine_eval_passes_thresholds() -> Result<()> {
             no_rerank: false,
         };
         let start = Instant::now();
-        let hits = retriever
-            .find_pattern(&repo_id, &q, now_unix)
+        let (hits, profile) = retriever
+            .find_pattern_with_profile(&repo_id, &q, now_unix)
             .await
             .with_context(|| format!("find_pattern for case {}", case.id))?;
         let elapsed_ms = start.elapsed().as_millis();
@@ -391,7 +400,32 @@ async fn context_engine_eval_passes_thresholds() -> Result<()> {
             hits,
             elapsed_ms,
             first_hit_rank,
+            actual_profile: profile.name,
         });
+    }
+
+    // Plan 12 Task 2.2: report profile mismatches as informational
+    // warnings — never as failed cases. The eval's hard contracts
+    // remain the recall + MRR + latency thresholds below; the profile
+    // expectation is here so PRs that change the parser's
+    // intent-classification surface a visible diff.
+    let mut profile_mismatches: Vec<(String, String, String)> = Vec::new();
+    for (case, result) in cases.iter().zip(results.iter()) {
+        if let Some(expected) = &case.expected_profile {
+            if expected != &result.actual_profile {
+                profile_mismatches.push((
+                    case.id.clone(),
+                    expected.clone(),
+                    result.actual_profile.clone(),
+                ));
+            }
+        }
+    }
+    if !profile_mismatches.is_empty() {
+        eprintln!("\nperf::context_engine_eval profile_mismatches (informational):");
+        for (id, expected, actual) in &profile_mismatches {
+            eprintln!("  {id}: expected={expected} actual={actual}");
+        }
     }
 
     let summary = summarise(&results);
