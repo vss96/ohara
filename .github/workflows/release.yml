@@ -15,9 +15,9 @@
 # title/body based on your changelogs.
 
 name: Release
-# `contents: write` alone is insufficient for `gh release create --target` when the
-# target commit modifies `.github/workflows/**`; GitHub then requires `workflows: write`
-# or a PAT (403 Resource not accessible by integration). See cli/cli#9514.
+# When the release commit touches `.github/workflows/**`, `gh release create --target`
+# may need more than `GITHUB_TOKEN`'s default scopes (403; cli/cli#9514). Optional repo
+# secret `RELEASE_TOKEN` (PAT with Contents + Workflows write) overrides for that step only.
 permissions:
   contents: write
 
@@ -226,12 +226,6 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
-    # Job-scoped: workflow-level `workflows: write` prevented tag-triggered runs from
-    # registering (workflow showed as path-only; pushes to main spawned empty failures).
-    permissions:
-      actions: read
-      contents: write
-      workflows: write
     outputs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
@@ -278,6 +272,7 @@ jobs:
           rm -f artifacts/*-dist-manifest.json
       - name: Create GitHub Release
         env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
           ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
           ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
