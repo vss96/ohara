@@ -4,6 +4,135 @@ User-facing release notes. The full commit log lives on
 [GitHub](https://github.com/vss96/ohara/commits/main); this page is
 the highlights.
 
+## v0.7.0 — Retrieval-quality eval, semantic-text + per-hunk symbol attribution, query intent, explain enrichment, index compatibility
+
+Four plans land together: a regression-tripwire eval harness
+(plan 10), historical per-hunk symbol attribution + a normalized
+semantic-text representation (plan 11), rule-based query
+understanding + contextual `explain_change` enrichment (plan 12),
+and an index-metadata + rebuild-safety layer that keeps old
+indexes from silently producing wrong results (plan 13).
+
+### Retrieval
+
+- **Per-hunk symbol attribution.** A new `hunk_symbol` table
+  records which symbols inside a file each hunk actually touched.
+  `bm25_hunks_by_historical_symbol` is the new primary symbol
+  retrieval lane; the v0.3 file-level lane is kept as fallback for
+  pre-v0.7 indexes. Two confidence kinds: `ExactSpan` (a parsed
+  symbol's line span intersects the hunk's `@@` post-image range,
+  derived from the post-image source via the new `extract_atomic_symbols`
+  parser entry-point) and `HunkHeader` (git's `@@` line includes
+  an enclosing function/class). Solves the file-level lane's
+  wrong-hunk problem: a query for `retry_policy` no longer returns
+  every hunk in a file containing it, only the hunk that actually
+  touched `retry_policy`. `PatternHit.related_head_symbols` now
+  carries the touched-symbol names instead of staying empty.
+- **Semantic hunk text.** A new `hunk.semantic_text` column stores
+  a normalized representation (commit / file / language / symbols
+  / change / added_lines sections) that the embedder + a new
+  `bm25_hunks_by_semantic_text` lane (`fts_hunk_semantic`) see in
+  place of raw `diff_text`. The raw diff stays put for display
+  and provenance. Backfill: existing hunks get
+  `semantic_text = diff_text` so the new lane returns useful
+  results immediately on a v0.6 index, and a fresh index pass
+  populates real semantic text.
+- **Query understanding.** A new rule-based parser
+  (`ohara_core::query_understanding::parse_query`) classifies
+  free-form queries into one of `ImplementationPattern`,
+  `BugFixPrecedent`, `ApiUsage`, `Configuration`, or `Unknown`,
+  and extracts explicit filters (language hints, path tokens,
+  quoted symbol names, simple `last N days/weeks/months`
+  timeframes). `find_pattern_with_profile` returns the picked
+  `RetrievalProfile` alongside hits so MCP responses surface
+  `_meta.query_profile` (name + explanation). Profile behaviour
+  is conservative: bug-fix bumps recency 1.5x, API-usage widens
+  the rerank pool, configuration disables the symbol lane,
+  unknown intent uses today's defaults byte-identically.
+- **FTS5 query sanitizer (bug fix).** Any user query containing
+  backticks, parens, `*`, `^`, `+`, `-`, etc. previously crashed
+  with `fts5: syntax error`. The BM25 lanes now strip non-word
+  characters before passing the query to FTS5.
+
+### `explain_change` enrichment
+
+- **Two questions in one tool.** `hits[]` still carries
+  blame-exact attribution (`provenance = "EXACT"`) for "which
+  commits introduced these lines". A new
+  `_meta.explain.related_commits[]` carries file-scope contextual
+  neighbours (`provenance = "INFERRED"`) for "what nearby changes
+  shaped this area". Capped at 2 commits before + 2 commits after
+  each blame anchor, deduped across anchors. Backed by the new
+  `Storage::get_neighboring_file_commits`. CLI defaults
+  `include_related = true`; MCP defaults `false` to keep the
+  response payload predictable.
+
+### Index compatibility (plan 13)
+
+- **`index_metadata` table.** Every successful index pass now
+  records the embedder model + dimension, reranker model, AST
+  chunker version, semantic-text version, schema version, and
+  per-language parser versions it ran with. The runtime compares
+  the recorded values against what the current binary expects
+  and produces one of `Compatible`, `QueryCompatibleNeedsRefresh`,
+  `NeedsRebuild`, or `Unknown`.
+- **Surfaces.** `ohara status` prints a `compatibility:` line
+  with an actionable next-step command (no embedder load — status
+  stays cheap). MCP `_meta.compatibility` carries the structured
+  verdict; `find_pattern` refuses to run on `NeedsRebuild`
+  (returns a structured `invalid_params` error naming the rebuild
+  command) because KNN against a stale-vector index would
+  silently produce wrong results. `explain_change` continues
+  under every verdict because blame doesn't depend on
+  embedder/chunker/parser state.
+- **`ohara index --rebuild --yes`.** Destructive recovery flag
+  for `NeedsRebuild` verdicts. Refuses without `--yes`; verifies
+  the DB path is under `OHARA_HOME` before deletion; removes the
+  main DB plus its `-wal` / `-shm` sidecars, then runs the
+  normal index pipeline against the fresh DB.
+
+### Eval harness (plan 10)
+
+- **`#[ignore]`'d retrieval-quality runner** under
+  [`tests/perf/context_engine_eval.rs`](https://github.com/vss96/ohara/blob/main/tests/perf/context_engine_eval.rs).
+  Indexes a deterministic synthetic fixture and runs every case
+  in `tests/perf/fixtures/context_engine_eval/golden.jsonl`
+  through the same `Retriever::find_pattern` path the CLI / MCP
+  use. Emits a one-line JSON summary on stderr (cases,
+  recall_at_1, recall_at_5, mrr, ndcg_lite, p50_ms, p95_ms,
+  failed_ids) so PR descriptions can paste it verbatim.
+  Hard contracts: `recall_at_5 == 1.0`, `mrr >= 0.80`, no
+  individual query over 2 s. Profile-mismatch warnings are
+  informational, not gating. CONTRIBUTING.md §14 codifies the
+  PR rule: any change to retrieval ranking, chunking, hunk
+  text, symbol attribution, or query parsing must run the
+  harness and paste the JSON summary.
+- Initial pass on the in-repo fixture: 8 cases,
+  `recall_at_1=0.875`, `recall_at_5=1.0`, `mrr=0.9375`,
+  `nDCG-lite=0.95`, `p95=1245ms`.
+
+### Schema migrations
+
+- **V3 (`index_metadata`).** Per-component compatibility tracking.
+- **V4 (`hunk.semantic_text` + `hunk_symbol` + `fts_hunk_semantic`).**
+  Backfill makes both new tables immediately queryable on a
+  pre-v0.7 index; richer attribution and proper semantic text
+  populate after a fresh `ohara index --force` (or any subsequent
+  index pass).
+
+### Upgrading
+
+A pre-v0.7 index still works against v0.7 binaries — `ohara status`
+will print `compatibility: query-compatible, refresh recommended`
+because the chunker version bumped from `1` to `2`. Run
+`ohara index --force` to repopulate the derived rows. Indexes
+built before the v0.6.x embedder changes (different model or
+dimension) report `compatibility: needs rebuild`; use
+`ohara index --rebuild --yes` to drop and rebuild from scratch.
+
+The full per-plan breakdown lives in
+[`docs/superpowers/plans/`](https://github.com/vss96/ohara/tree/main/docs/superpowers/plans).
+
 ## v0.6.3 — Skip already-indexed commits on resume
 
 Resume on a merge-heavy history no longer re-embeds commits that are
