@@ -45,6 +45,13 @@ path = "coreml_leak_repro.rs"
 name = "context_engine_eval"
 path = "context_engine_eval.rs"
 
+[[test]]
+# Plan 14 Task E.1 — CLI cold-path perf harness. `#[ignore]`'d; opt
+# in via `cargo test -p ohara-perf-tests --release -- --ignored
+# cli_query_bench --nocapture`.
+name = "cli_query_bench"
+path = "cli_query_bench.rs"
+
 [dev-dependencies]
 ohara-cli = { path = "../../crates/ohara-cli" }
 ohara-core = { path = "../../crates/ohara-core" }
