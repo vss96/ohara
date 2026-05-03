@@ -63,6 +63,15 @@ impl SqlitePoolBuilder {
 /// `"ohara_storage::sql"`. The cost is gated by the subscriber's level
 /// filter — when no subscriber listens on this target the callback is
 /// effectively a no-op (one filter check per statement).
+///
+/// **Operational note:** rusqlite invokes the closure for every
+/// statement regardless of whether tracing later discards the event,
+/// so there is a constant per-statement cost (one virtual call + one
+/// level-filter check) even with no subscriber. For hot indexing
+/// loops this is in the noise, but if profiling ever points the
+/// finger at SQL-trace overhead, gate the install behind an env var
+/// (e.g. only register the callback when `RUST_LOG` mentions
+/// `ohara_storage::sql`).
 fn install_sql_trace(conn: &mut Connection) {
     conn.trace(Some(|sql: &str| {
         tracing::trace!(target: "ohara_storage::sql", sql);
