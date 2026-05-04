@@ -117,28 +117,25 @@ impl Registry {
 
     /// Return only records whose PID is still alive and whose last health
     /// check is within the past 5 minutes.  Stale records are pruned from
-    /// the registry file in the same operation.
+    /// the registry file atomically under a single file lock to avoid
+    /// overwriting concurrent `register()` calls.
     pub fn list_alive(&self) -> Result<Vec<DaemonRecord>> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let mut out = Vec::new();
-        for d in self.list()? {
-            if !pid_alive(d.pid) {
-                continue;
-            }
-            if now.saturating_sub(d.last_health_unix) > 5 * 60 {
-                continue;
-            }
-            out.push(d);
-        }
-        let snap = out.clone();
+        let now = now_unix();
+        let mut alive = Vec::new();
         self.mutate(|f| {
-            f.daemons = snap;
+            f.daemons.retain(|d| {
+                if !pid_alive(d.pid) {
+                    return false;
+                }
+                if now.saturating_sub(d.last_health_unix) > 5 * 60 {
+                    return false;
+                }
+                true
+            });
+            alive = f.daemons.clone();
             Ok(())
         })?;
-        Ok(out)
+        Ok(alive)
     }
 
     /// Update `last_health_unix` for the daemon with the given PID to the
@@ -148,10 +145,7 @@ impl Registry {
     /// as the heartbeat task may race against daemon registration at startup,
     /// and that is intentional.
     pub fn touch_health(&self, pid: u32) -> Result<()> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = now_unix();
         self.mutate(|f| {
             for d in f.daemons.iter_mut() {
                 if d.pid == pid {
@@ -231,6 +225,13 @@ impl Registry {
 
 // ── OS helpers ────────────────────────────────────────────────────────────────
 
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Return `true` if `pid` is a running process visible to this user.
 ///
 /// Uses `kill(pid, 0)` — the POSIX "are you there?" signal — which returns 0
@@ -296,13 +297,6 @@ mod tests {
         let records = reg.list().unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].pid, 2002);
-    }
-
-    fn now_unix() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
     }
 
     #[test]
