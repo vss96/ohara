@@ -29,6 +29,11 @@ pub struct ServeArgs {
     /// Set to 0 to disable the idle-exit watchdog (debug only).
     #[arg(long, default_value_t = 1800)]
     pub idle_timeout: u64,
+    /// Path to the daemon registry JSON file. When provided, the daemon
+    /// updates its `last_health_unix` timestamp every 30 seconds so the
+    /// registry stays current.
+    #[arg(long)]
+    pub registry_path: Option<PathBuf>,
 }
 
 pub async fn run(args: ServeArgs) -> Result<()> {
@@ -64,6 +69,22 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         readiness_file = ?args.readiness_file,
         "ohara serve ready"
     );
+
+    if let Some(reg_path) = args.registry_path.clone() {
+        let pid = std::process::id();
+        let watchdog_stop = stop.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                if watchdog_stop.is_cancelled() {
+                    break;
+                }
+                if let Ok(reg) = ohara_engine::registry::Registry::open(&reg_path) {
+                    let _ = reg.touch_health(pid);
+                }
+            }
+        });
+    }
 
     if args.idle_timeout > 0 {
         let idle = Duration::from_secs(args.idle_timeout);

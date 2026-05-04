@@ -133,6 +133,27 @@ impl Registry {
         Ok(out)
     }
 
+    /// Update `last_health_unix` for the daemon with the given PID to the
+    /// current Unix timestamp.
+    ///
+    /// This is a silent no-op when no record with `pid` exists — callers such
+    /// as the heartbeat task may race against daemon registration at startup,
+    /// and that is intentional.
+    pub fn touch_health(&self, pid: u32) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.mutate(|f| {
+            for d in f.daemons.iter_mut() {
+                if d.pid == pid {
+                    d.last_health_unix = now;
+                }
+            }
+            Ok(())
+        })
+    }
+
     /// Return the first alive, non-busy daemon that matches `ohara_version`,
     /// or `None` if no compatible daemon is registered.
     pub fn pick_compatible(&self, ohara_version: &str) -> Result<Option<DaemonRecord>> {
