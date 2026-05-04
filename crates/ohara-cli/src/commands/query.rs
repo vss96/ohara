@@ -3,7 +3,10 @@ use clap::Args as ClapArgs;
 use ohara_core::perf_trace::timed_phase;
 use ohara_core::query::PatternQuery;
 use ohara_core::Retriever;
-use std::path::PathBuf;
+use ohara_engine::client::{find_or_spawn_daemon, registry_path, try_daemon_call};
+use ohara_engine::ipc::{Request, RequestMethod};
+use ohara_engine::FindPatternResult;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::provider::{resolve_provider, ProviderArg};
@@ -31,10 +34,19 @@ pub struct Args {
     pub embed_provider: ProviderArg,
 }
 
-pub async fn run(args: Args) -> Result<()> {
-    let (repo_id, _, _) = super::resolve_repo_id(&args.path)?;
+/// Run the retrieval engine in-process (standalone path).
+///
+/// Constructs storage, embedder, and optionally a reranker, then calls
+/// [`Retriever::find_pattern_with_profile`]. Used both as the direct standalone
+/// path and as the fallback when the daemon is unavailable or disabled.
+async fn run_standalone(
+    canonical: &Path,
+    q: PatternQuery,
+    args: &Args,
+) -> Result<FindPatternResult> {
+    let (repo_id, _, _) = super::resolve_repo_id(canonical)?;
     let db_path = super::index_db_path(&repo_id)?;
-    let storage =
+    let storage: Arc<dyn ohara_core::Storage> =
         Arc::new(timed_phase("storage_open", ohara_storage::SqliteStorage::open(&db_path)).await?);
     let chosen_provider = resolve_provider(args.embed_provider);
     tracing::info!(provider = ?chosen_provider, "embedder");
@@ -47,11 +59,8 @@ pub async fn run(args: Args) -> Result<()> {
         )
         .await??,
     );
-    // Plan 3: cross-encoder rerank by default. Skip the model download
-    // (and runtime cost) only when the caller explicitly passes
-    // --no-rerank.
-    let retriever = if args.no_rerank {
-        Retriever::new(storage, embedder)
+    let retriever = if q.no_rerank {
+        Retriever::new(storage.clone(), embedder)
     } else {
         let reranker = Arc::new(
             timed_phase(
@@ -62,17 +71,71 @@ pub async fn run(args: Args) -> Result<()> {
             )
             .await??,
         );
-        Retriever::new(storage, embedder).with_reranker(reranker)
+        Retriever::new(storage.clone(), embedder).with_reranker(reranker)
     };
-    let q = PatternQuery {
-        query: args.query,
+    let now = chrono::Utc::now().timestamp();
+    let (hits, _profile) = retriever
+        .find_pattern_with_profile(&repo_id, &q, now)
+        .await?;
+    let behind = ohara_git::GitCommitsBehind::open(canonical)
+        .map_err(|e| anyhow::anyhow!("commits_behind: {e}"))?;
+    let index_status = ohara_core::query::compute_index_status(storage.as_ref(), &repo_id, &behind)
+        .await
+        .map_err(|e| anyhow::anyhow!("index_status: {e}"))?;
+    let meta = ohara_core::query::ResponseMeta {
+        index_status,
+        hint: None,
+        compatibility: None,
+    };
+    Ok(FindPatternResult { hits, meta })
+}
+
+pub async fn run(args: Args, no_daemon: bool) -> Result<()> {
+    let canonical = std::fs::canonicalize(&args.path)
+        .map_err(|e| anyhow::anyhow!("canonicalize {}: {e}", args.path.display()))?;
+
+    let pattern_query = PatternQuery {
+        query: args.query.clone(),
         k: args.k,
-        language: args.language,
+        language: args.language.clone(),
         since_unix: None,
         no_rerank: args.no_rerank,
     };
-    let now = chrono::Utc::now().timestamp();
-    let hits = retriever.find_pattern(&repo_id, &q, now).await?;
-    println!("{}", serde_json::to_string_pretty(&hits)?);
+
+    let req = Request {
+        id: 1,
+        repo_path: Some(canonical.to_string_lossy().to_string()),
+        method: RequestMethod::FindPattern(pattern_query.clone()),
+    };
+
+    let registry = registry_path().map_err(|e| anyhow::anyhow!("registry_path: {e}"))?;
+    let current_exe = std::env::current_exe().map_err(|e| anyhow::anyhow!("current_exe: {e}"))?;
+
+    let daemon_resp = try_daemon_call(
+        move || {
+            find_or_spawn_daemon(
+                &current_exe,
+                env!("CARGO_PKG_VERSION"),
+                option_env!("OHARA_GIT_SHA").unwrap_or("unknown"),
+                &registry,
+                no_daemon,
+            )
+        },
+        req,
+    )
+    .await;
+
+    let result: FindPatternResult = match daemon_resp {
+        Some(resp) if resp.error.is_none() => {
+            let value = resp
+                .result
+                .ok_or_else(|| anyhow::anyhow!("daemon response missing result"))?;
+            serde_json::from_value(value)
+                .map_err(|e| anyhow::anyhow!("decode FindPatternResult: {e}"))?
+        }
+        _ => run_standalone(&canonical, pattern_query, &args).await?,
+    };
+
+    println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }

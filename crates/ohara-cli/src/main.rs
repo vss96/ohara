@@ -22,6 +22,11 @@ struct Cli {
     /// and `ohara-storage`. Off by default.
     #[arg(long, global = true)]
     trace_perf: bool,
+
+    /// Skip the background daemon and run the retrieval engine in-process.
+    /// Useful for debugging or when the daemon is unavailable.
+    #[arg(long, global = true)]
+    no_daemon: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -51,10 +56,11 @@ async fn main() -> Result<()> {
         None
     };
     init_tracing(perf_acc.clone());
+    let no_daemon = cli.no_daemon;
     let outcome = match cli.command {
         Cmd::Init(a) => commands::init::run(a).await,
         Cmd::Index(a) => commands::index::run(a).await.map(|_| ()),
-        Cmd::Query(a) => commands::query::run(a).await,
+        Cmd::Query(a) => commands::query::run(a, no_daemon).await,
         Cmd::Status(a) => commands::status::run(a).await,
         Cmd::Explain(a) => commands::explain::run(a).await,
         Cmd::Update(a) => commands::update::run(a).await,
