@@ -1,3 +1,66 @@
+//! Plan 20 — BM25-by-text retrieval lane.
+
+use super::{LaneId, RetrievalLane};
+use crate::query::PatternQuery;
+use crate::query_understanding::RetrievalProfile;
+use crate::storage::{HunkHit, Storage};
+use crate::types::RepoId;
+use async_trait::async_trait;
+use std::sync::Arc;
+
+pub struct Bm25TextLane {
+    storage: Arc<dyn Storage>,
+}
+
+impl Bm25TextLane {
+    pub fn new(storage: Arc<dyn Storage>) -> Self {
+        Self { storage }
+    }
+
+    pub async fn search_with_profile(
+        &self,
+        query: &PatternQuery,
+        repo_id: &RepoId,
+        k: usize,
+        profile: &RetrievalProfile,
+    ) -> crate::Result<Vec<HunkHit>> {
+        if !profile.is_lane_enabled(LaneId::Bm25Text) {
+            return Ok(vec![]);
+        }
+        let since_unix = query
+            .since_unix
+            .or_else(|| crate::query_understanding::parse_query(&query.query).since_unix);
+        self.storage
+            .bm25_hunks_by_text(
+                repo_id,
+                &query.query,
+                u8::try_from(k).unwrap_or(u8::MAX),
+                query.language.as_deref(),
+                since_unix,
+            )
+            .await
+    }
+}
+
+#[async_trait]
+impl RetrievalLane for Bm25TextLane {
+    fn id(&self) -> LaneId {
+        LaneId::Bm25Text
+    }
+
+    async fn search(
+        &self,
+        query: &PatternQuery,
+        repo_id: &RepoId,
+        k: usize,
+    ) -> crate::Result<Vec<HunkHit>> {
+        let profile = crate::query_understanding::RetrievalProfile::for_intent(
+            crate::query_understanding::parse_query(&query.query).intent,
+        );
+        self.search_with_profile(query, repo_id, k, &profile).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
