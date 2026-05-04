@@ -8,9 +8,7 @@ use crate::error::EngineError;
 use crate::handle::RepoHandle;
 use ohara_core::embed::RerankProvider;
 use ohara_core::explain::ExplainQuery;
-use ohara_core::index_metadata::{
-    CompatibilityStatus, RuntimeIndexMetadata, SCHEMA_VERSION, SEMANTIC_TEXT_VERSION,
-};
+use ohara_core::index_metadata::{CompatibilityStatus, RuntimeIndexMetadata};
 use ohara_core::query::{PatternQuery, ResponseMeta};
 use ohara_core::types::RepoId;
 use ohara_core::EmbeddingProvider;
@@ -290,59 +288,17 @@ impl RetrievalEngine {
 
 /// Build the [`RuntimeIndexMetadata`] expected by the current binary.
 ///
-/// Uses the constants from `ohara-embed` (model id, dimension, reranker id)
-/// and `ohara-parse` (chunker version, parser versions). Mirrored in
-/// `ohara_mcp::server::current_runtime_metadata` — the duplicate is intentional
-/// until Phase G.1 rewires MCP to use this engine version.
+/// Passes the embed/parse constants into the canonical
+/// `ohara_core::index_metadata::runtime_metadata_from` helper so the
+/// construction logic lives in one place.
 fn current_runtime_metadata() -> RuntimeIndexMetadata {
-    RuntimeIndexMetadata {
-        schema_version: SCHEMA_VERSION.to_string(),
-        embedding_model: ohara_embed::DEFAULT_MODEL_ID.to_string(),
-        embedding_dimension: ohara_embed::DEFAULT_DIM as u32,
-        reranker_model: ohara_embed::DEFAULT_RERANKER_ID.to_string(),
-        chunker_version: ohara_parse::CHUNKER_VERSION.to_string(),
-        semantic_text_version: SEMANTIC_TEXT_VERSION.to_string(),
-        parser_versions: ohara_parse::parser_versions(),
-    }
-}
-
-/// Compose a hint string from freshness state and the compatibility verdict.
-///
-/// Mirrored from `ohara_mcp::server::compose_hint` — the duplicate is intentional
-/// until Phase G.1 rewires MCP to use this engine version.
-fn compose_hint(
-    st: &ohara_core::query::IndexStatus,
-    compatibility: &CompatibilityStatus,
-) -> Option<String> {
-    let freshness_hint = if st.last_indexed_commit.is_none() {
-        Some("Index not built. Run `ohara index` in this repo.".to_string())
-    } else if st.commits_behind_head > 50 {
-        Some(format!(
-            "Index is {} commits behind HEAD. Run `ohara index`.",
-            st.commits_behind_head
-        ))
-    } else {
-        None
-    };
-    let compat_hint = match compatibility {
-        CompatibilityStatus::Compatible => None,
-        CompatibilityStatus::QueryCompatibleNeedsRefresh { reason } => Some(format!(
-            "Index is query-compatible but stale ({reason}). Run `ohara index --force` to refresh."
-        )),
-        CompatibilityStatus::NeedsRebuild { reason } => Some(format!(
-            "Index needs rebuild ({reason}). Run `ohara index --rebuild` — find_pattern will refuse to run until then."
-        )),
-        CompatibilityStatus::Unknown { missing_components } => Some(format!(
-            "Index has no recorded metadata for {}. Run `ohara index --force` to record current versions.",
-            missing_components.join(", ")
-        )),
-    };
-    match (freshness_hint, compat_hint) {
-        (None, None) => None,
-        (Some(f), None) => Some(f),
-        (None, Some(c)) => Some(c),
-        (Some(f), Some(c)) => Some(format!("{f} {c}")),
-    }
+    ohara_core::index_metadata::runtime_metadata_from(
+        ohara_embed::DEFAULT_MODEL_ID,
+        ohara_embed::DEFAULT_DIM as u32,
+        ohara_embed::DEFAULT_RERANKER_ID,
+        ohara_parse::CHUNKER_VERSION,
+        ohara_parse::parser_versions(),
+    )
 }
 
 /// Compute a fresh [`ResponseMeta`] for `handle` by querying storage for
@@ -363,7 +319,7 @@ async fn compose_response_meta(handle: &RepoHandle) -> crate::Result<ResponseMet
         .await
         .map_err(EngineError::from)?;
     let compatibility = CompatibilityStatus::assess(&runtime, &stored);
-    let hint = compose_hint(&st, &compatibility);
+    let hint = ohara_core::index_metadata::compose_hint(&st, &compatibility);
     Ok(ResponseMeta {
         index_status: st,
         hint,

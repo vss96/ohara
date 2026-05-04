@@ -15,6 +15,7 @@
 //! an `ohara index --force` repopulates them without re-embedding the
 //! whole history.
 
+use crate::query::IndexStatus;
 use crate::EmbeddingProvider;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -222,6 +223,80 @@ impl CompatibilityStatus {
     }
 }
 
+/// Build a [`RuntimeIndexMetadata`] from caller-supplied constant strings.
+///
+/// `ohara-core` MUST NOT depend on `ohara-embed` or `ohara-parse`, so it
+/// cannot read the real constants itself. Callers in `ohara-engine` and
+/// `ohara-mcp` pass those constants in and receive the fully-constructed
+/// struct back. This removes the duplicated construction logic from both
+/// crates while keeping the dependency rule intact.
+///
+/// # Parameters
+/// * `embedding_model` — stable model id (e.g. `"bge-small-en-v1.5"`).
+/// * `embedding_dimension` — vector dimension (e.g. `384`).
+/// * `reranker_model` — stable reranker model id (e.g. `"bge-reranker-base"`).
+/// * `chunker_version` — `ohara_parse::CHUNKER_VERSION`.
+/// * `parser_versions` — `ohara_parse::parser_versions()`.
+pub fn runtime_metadata_from(
+    embedding_model: impl Into<String>,
+    embedding_dimension: u32,
+    reranker_model: impl Into<String>,
+    chunker_version: impl Into<String>,
+    parser_versions: BTreeMap<String, String>,
+) -> RuntimeIndexMetadata {
+    RuntimeIndexMetadata {
+        schema_version: SCHEMA_VERSION.to_string(),
+        embedding_model: embedding_model.into(),
+        embedding_dimension,
+        reranker_model: reranker_model.into(),
+        chunker_version: chunker_version.into(),
+        semantic_text_version: SEMANTIC_TEXT_VERSION.to_string(),
+        parser_versions,
+    }
+}
+
+/// Compose a single hint string from the freshness state and the
+/// compatibility verdict.
+///
+/// Returns `None` when the index is fresh and fully compatible.
+/// Returns `Some(hint)` describing what is wrong and what command fixes it.
+/// When both freshness and compatibility issues exist the two hint strings
+/// are joined with a space so the caller gets a single actionable message.
+///
+/// This function is the single canonical implementation; `ohara-engine` and
+/// `ohara-mcp` both call it via `ohara_core::index_metadata::compose_hint`.
+pub fn compose_hint(st: &IndexStatus, compatibility: &CompatibilityStatus) -> Option<String> {
+    let freshness_hint = if st.last_indexed_commit.is_none() {
+        Some("Index not built. Run `ohara index` in this repo.".to_string())
+    } else if st.commits_behind_head > 50 {
+        Some(format!(
+            "Index is {} commits behind HEAD. Run `ohara index`.",
+            st.commits_behind_head
+        ))
+    } else {
+        None
+    };
+    let compat_hint = match compatibility {
+        CompatibilityStatus::Compatible => None,
+        CompatibilityStatus::QueryCompatibleNeedsRefresh { reason } => Some(format!(
+            "Index is query-compatible but stale ({reason}). Run `ohara index --force` to refresh."
+        )),
+        CompatibilityStatus::NeedsRebuild { reason } => Some(format!(
+            "Index needs rebuild ({reason}). Run `ohara index --rebuild` — find_pattern will refuse to run until then."
+        )),
+        CompatibilityStatus::Unknown { missing_components } => Some(format!(
+            "Index has no recorded metadata for {}. Run `ohara index --force` to record current versions.",
+            missing_components.join(", ")
+        )),
+    };
+    match (freshness_hint, compat_hint) {
+        (None, None) => None,
+        (Some(f), None) => Some(f),
+        (None, Some(c)) => Some(c),
+        (Some(f), Some(c)) => Some(format!("{f} {c}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,5 +445,96 @@ mod tests {
         let s = CompatibilityStatus::NeedsRebuild { reason: "x".into() };
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("\"status\":\"needs_rebuild\""), "got {json}");
+    }
+
+    // ---- compose_hint tests (moved from ohara-mcp::server::tests) -----------
+
+    fn fresh_status() -> IndexStatus {
+        IndexStatus {
+            last_indexed_commit: Some("abc".into()),
+            commits_behind_head: 0,
+            indexed_at: Some("2026-05-03T00:00:00Z".into()),
+        }
+    }
+
+    #[test]
+    fn compose_hint_compatible_fresh_index_returns_none() {
+        assert!(compose_hint(&fresh_status(), &CompatibilityStatus::Compatible).is_none());
+    }
+
+    #[test]
+    fn compose_hint_needs_rebuild_mentions_rebuild_command_and_refusal() {
+        let h = compose_hint(
+            &fresh_status(),
+            &CompatibilityStatus::NeedsRebuild {
+                reason: "embedding_dimension mismatch".into(),
+            },
+        )
+        .expect("rebuild verdict must produce a hint");
+        assert!(
+            h.contains("ohara index --rebuild") && h.contains("refuse"),
+            "rebuild hint must point at the command and warn about refusal: {h}"
+        );
+    }
+
+    #[test]
+    fn compose_hint_refresh_recommends_force_not_rebuild() {
+        let h = compose_hint(
+            &fresh_status(),
+            &CompatibilityStatus::QueryCompatibleNeedsRefresh {
+                reason: "chunker_version mismatch".into(),
+            },
+        )
+        .expect("refresh verdict must produce a hint");
+        assert!(
+            h.contains("ohara index --force") && !h.contains("--rebuild"),
+            "refresh hint must point at --force, not --rebuild: {h}"
+        );
+    }
+
+    #[test]
+    fn compose_hint_combines_freshness_and_compat_hints() {
+        let stale = IndexStatus {
+            last_indexed_commit: Some("abc".into()),
+            commits_behind_head: 100,
+            indexed_at: None,
+        };
+        let h = compose_hint(
+            &stale,
+            &CompatibilityStatus::QueryCompatibleNeedsRefresh {
+                reason: "chunker_version mismatch".into(),
+            },
+        )
+        .expect("two hints must compose into one");
+        assert!(h.contains("100 commits behind") && h.contains("query-compatible"));
+    }
+
+    // ---- runtime_metadata_from tests ----------------------------------------
+
+    struct StubEmbedder;
+    impl crate::EmbeddingProvider for StubEmbedder {
+        fn dimension(&self) -> usize {
+            384
+        }
+        fn model_id(&self) -> &str {
+            "stub-model"
+        }
+        async fn embed_batch(&self, texts: &[String]) -> crate::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
+        }
+    }
+
+    #[test]
+    fn runtime_metadata_from_populates_all_fields() {
+        let mut parsers = BTreeMap::new();
+        parsers.insert("rust".to_string(), "1".to_string());
+        let embedder = StubEmbedder;
+        let meta = runtime_metadata_from(&embedder, "bge-reranker-base", "2", parsers.clone());
+        assert_eq!(meta.embedding_model, "stub-model");
+        assert_eq!(meta.embedding_dimension, 384);
+        assert_eq!(meta.reranker_model, "bge-reranker-base");
+        assert_eq!(meta.chunker_version, "2");
+        assert_eq!(meta.parser_versions, parsers);
+        assert_eq!(meta.schema_version, SCHEMA_VERSION);
     }
 }
