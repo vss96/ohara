@@ -45,6 +45,16 @@ pub trait CommitSource: Send + Sync {
 #[async_trait::async_trait]
 pub trait SymbolSource: Send + Sync {
     async fn extract_head_symbols(&self) -> Result<Vec<Symbol>>;
+
+    /// Per-file HEAD symbol lookup for the attribute stage.
+    ///
+    /// Default implementation returns an empty Vec — callers fall back
+    /// to no symbol attribution. Implementations backed by a pre-built
+    /// symbol index can override this for fast per-file lookup without
+    /// re-parsing the whole tree.
+    async fn head_symbols_for_path(&self, _path: &str) -> Result<Vec<Symbol>> {
+        Ok(vec![])
+    }
 }
 
 /// Plan 11: per-file atomic-symbol extractor used during per-hunk
