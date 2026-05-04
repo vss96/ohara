@@ -188,6 +188,52 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn explain_change_returns_one_blame_range_for_single_commit_repo() {
+        let ohara_home = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        {
+            let _g = env_lock();
+            std::env::set_var("OHARA_HOME", ohara_home.path());
+        }
+        build_test_repo(tmp.path());
+
+        // Index the repo so storage has the commit metadata the explain
+        // orchestrator needs to hydrate blame ranges into ExplainHits.
+        {
+            let walker = ohara_git::GitWalker::open(tmp.path()).unwrap();
+            let first = walker.first_commit_sha().unwrap();
+            let repo_id =
+                ohara_core::types::RepoId::from_parts(&first, &tmp.path().to_string_lossy());
+            let db_path = ohara_core::paths::index_db_path(&repo_id).unwrap();
+            let storage: Arc<dyn ohara_core::Storage> = Arc::new(
+                ohara_storage::SqliteStorage::open(&db_path)
+                    .await
+                    .unwrap(),
+            );
+            let commit_src = ohara_git::GitCommitSource::open(tmp.path()).unwrap();
+            let symbol_src = ohara_parse::GitSymbolSource::open(tmp.path()).unwrap();
+            let indexer = ohara_core::Indexer::new(storage, Arc::new(DummyEmbedder));
+            indexer.run(&repo_id, &commit_src, &symbol_src).await.unwrap();
+        }
+
+        let engine = make_test_engine();
+        let q = ohara_core::explain::ExplainQuery {
+            file: "a.rs".into(),
+            line_start: 1,
+            line_end: 1,
+            k: 5,
+            include_diff: false,
+            include_related: false,
+        };
+        let out = engine
+            .explain_change(tmp.path(), q)
+            .await
+            .expect("explain");
+        // Single-commit repo: line 1 of a.rs blames to the only commit.
+        assert_eq!(out.hits.len(), 1, "expected exactly one blame hit");
+    }
+
+    #[tokio::test]
     async fn find_pattern_returns_empty_hits_on_empty_index() {
         let ohara_home = tempfile::tempdir().unwrap();
         let tmp = tempfile::tempdir().unwrap();
