@@ -57,6 +57,24 @@ As of v0.6 the per-language extractors live under
 `crates/ohara-parse/src/languages/` (one module per language) — same
 behavior, tighter directory tree.
 
+## Grammar and parser versions
+
+Plan-18 (v0.7) modernized the tree-sitter stack: the workspace tracks
+`tree-sitter` 0.25, the rust/python/java grammars were bumped to their
+current upstream releases (rust 0.21 → 0.24, python 0.21 → 0.25, java
+0.21 → 0.23), and the kotlin grammar was swapped from the abandoned
+`fwcd/tree-sitter-kotlin` to the more-recently-maintained
+[`tree-sitter-grammars/tree-sitter-kotlin-ng`](https://github.com/tree-sitter-grammars/tree-sitter-kotlin-ng)
+fork.
+
+All four `parser_versions` bumped from `"1"` to `"2"` in lockstep, so
+indexes built before v0.7 receive a `query_compatible_needs_refresh`
+verdict per plan-13 (`docs/superpowers/plans/2026-05-02-ohara-plan-13-index-metadata-and-rebuild-safety.md`):
+queries still work, but the symbol/hunk derived rows can be
+out-of-date. Recovery is `ohara index --force`, which re-walks HEAD
+symbols and rewrites derived rows without touching the embedding
+vectors (model + dimension are unchanged).
+
 ## Future languages
 
 Tracked on the [Roadmap](../roadmap.md). New languages are mostly a
