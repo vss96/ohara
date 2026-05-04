@@ -67,6 +67,9 @@ path = "mcp_query_bench.rs"
 name = "perf_diff"
 path = "perf_diff.rs"
 
+[dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 ohara-cli = { path = "../../crates/ohara-cli" }
 ohara-core = { path = "../../crates/ohara-core" }

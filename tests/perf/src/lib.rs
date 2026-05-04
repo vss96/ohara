@@ -48,6 +48,58 @@ pub fn current_git_sha(root: &Path) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+/// Process-lifetime peak resident-set size in bytes.
+///
+/// macOS: `getrusage(RUSAGE_SELF)` returns `ru_maxrss` in *bytes*
+/// (per the Darwin man page; Linux returns kilobytes — we normalise
+/// to bytes below). Linux: read `VmHWM` from `/proc/self/status`,
+/// which is the high-water-mark RSS in kilobytes. Both APIs are
+/// monotonic across the process lifetime, which is exactly what
+/// the indexing harness wants ("how much did we use at peak?").
+pub fn peak_rss_bytes() -> std::io::Result<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: getrusage with RUSAGE_SELF and a stack-allocated
+        // rusage is always sound.
+        let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(ru.ru_maxrss as u64)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let s = std::fs::read_to_string("/proc/self/status")?;
+        for line in s.lines() {
+            if let Some(rest) = line.strip_prefix("VmHWM:") {
+                let kb: u64 = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|t| t.parse().ok())
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("could not parse VmHWM line: {line}"),
+                        )
+                    })?;
+                return Ok(kb * 1024);
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "VmHWM not found in /proc/self/status",
+        ))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "peak_rss_bytes only implemented for macOS and Linux",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod peak_rss_tests {
     use super::peak_rss_bytes;
