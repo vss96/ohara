@@ -1,3 +1,4 @@
+pub mod coordinator;
 pub mod stages;
 
 use crate::index_metadata::RuntimeIndexMetadata;
