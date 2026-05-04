@@ -1,3 +1,67 @@
+//! Plan 20 — recency multiplier refiner.
+//!
+//! Applies the half-life exp-decay recency factor to each hit's
+//! `similarity` score and re-sorts. This is the same formula used
+//! in the pre-plan-20 inline `find_pattern_with_profile`:
+//!
+//! ```text
+//! final = similarity * (1.0 + recency_weight * exp(-age_days / half_life_days))
+//! ```
+//!
+//! The `profile.recency_multiplier` nudge (plan 12) is applied by the
+//! coordinator before constructing this refiner: it multiplies
+//! `RankingWeights::recency_weight` by `profile.recency_multiplier`
+//! and passes the result in `RankingWeights::recency_weight`.
+
+use super::ScoreRefiner;
+use crate::retriever::RankingWeights;
+use crate::storage::HunkHit;
+use async_trait::async_trait;
+
+pub struct RecencyRefiner {
+    weights: RankingWeights,
+    now_unix: i64,
+}
+
+impl RecencyRefiner {
+    /// Construct with weights and the current Unix timestamp.
+    /// The coordinator passes `now_unix` from the outer call so all
+    /// hits in one pipeline run are ranked against the same instant.
+    pub fn new(weights: RankingWeights, now_unix: i64) -> Self {
+        Self { weights, now_unix }
+    }
+}
+
+#[async_trait]
+impl ScoreRefiner for RecencyRefiner {
+    async fn refine(
+        &self,
+        _query_text: &str,
+        hits: Vec<HunkHit>,
+    ) -> crate::Result<Vec<HunkHit>> {
+        if hits.is_empty() {
+            return Ok(hits);
+        }
+        let mut scored: Vec<(HunkHit, f32)> = hits
+            .into_iter()
+            .map(|h| {
+                let age_days =
+                    ((self.now_unix - h.commit.ts).max(0) as f32) / 86_400.0;
+                let recency =
+                    (-age_days / self.weights.recency_half_life_days).exp();
+                let combined = h.similarity
+                    * (1.0 + self.weights.recency_weight * recency);
+                (h, combined)
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(scored.into_iter().map(|(h, _)| h).collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
