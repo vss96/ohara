@@ -10,7 +10,7 @@
 //! `git2::Repository::blame_file`, with the real implementation living in
 //! `ohara-git::Blamer`.
 
-pub(crate) mod hydrator;
+pub mod hydrator;
 
 use crate::perf_trace::timed_phase;
 use crate::storage::Storage;
