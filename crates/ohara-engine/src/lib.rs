@@ -9,6 +9,7 @@ mod engine;
 mod error;
 mod handle;
 pub mod ipc;
+pub mod registry;
 pub mod server;
 
 pub use cache::EmbeddingCache;
