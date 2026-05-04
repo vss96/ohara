@@ -25,6 +25,8 @@ pub fn extract(file_path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symb
         let mut method_range: Option<(usize, usize)> = None;
         let mut func_name: Option<String> = None;
         let mut func_range: Option<(usize, usize)> = None;
+        let mut arrow_name: Option<String> = None;
+        let mut arrow_range: Option<(usize, usize)> = None;
 
         for cap in m.captures {
             let cap_name = query.capture_names()[cap.index as usize];
@@ -33,9 +35,11 @@ pub fn extract(file_path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symb
                 "func_name" => func_name = Some(n.utf8_text(source.as_bytes())?.to_string()),
                 "method_name" => method_name = Some(n.utf8_text(source.as_bytes())?.to_string()),
                 "class_name" => class_name = Some(n.utf8_text(source.as_bytes())?.to_string()),
+                "arrow_name" => arrow_name = Some(n.utf8_text(source.as_bytes())?.to_string()),
                 "def_function" => func_range = Some((n.start_byte(), n.end_byte())),
                 "def_method" => method_range = Some((n.start_byte(), n.end_byte())),
                 "def_class" => class_range = Some((n.start_byte(), n.end_byte())),
+                "def_arrow" => arrow_range = Some((n.start_byte(), n.end_byte())),
                 _ => {}
             }
         }
@@ -63,6 +67,17 @@ pub fn extract(file_path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symb
             ));
         }
         if let (Some(name), Some((s, e))) = (func_name, func_range) {
+            out.push(make_symbol(
+                file_path,
+                blob_sha,
+                SymbolKind::Function,
+                name,
+                s,
+                e,
+                source,
+            ));
+        }
+        if let (Some(name), Some((s, e))) = (arrow_name, arrow_range) {
             out.push(make_symbol(
                 file_path,
                 blob_sha,
