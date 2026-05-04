@@ -3,6 +3,43 @@
 use super::hunk_chunk::HunkRecord;
 use crate::types::Symbol;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::indexer::stages::hunk_chunk::HunkRecord;
+    use crate::types::Hunk;
+
+    fn make_record(text: &str) -> HunkRecord {
+        HunkRecord {
+            commit_sha: "abc".into(),
+            file_path: "f.rs".into(),
+            diff_text: "+x\n".into(),
+            semantic_text: text.into(),
+            source_hunk: Hunk::default(),
+        }
+    }
+
+    #[test]
+    fn uses_attributed_override_when_present() {
+        let h = AttributedHunk {
+            record: make_record("base"),
+            symbols: None,
+            attributed_semantic_text: Some("override".into()),
+        };
+        assert_eq!(h.effective_semantic_text(), "override");
+    }
+
+    #[test]
+    fn falls_back_to_record_text_when_no_override() {
+        let h = AttributedHunk {
+            record: make_record("base"),
+            symbols: None,
+            attributed_semantic_text: None,
+        };
+        assert_eq!(h.effective_semantic_text(), "base");
+    }
+}
+
 /// A `HunkRecord` extended with optional semantic attribution produced
 /// by the attribute stage (tree-sitter atomic-symbol extraction).
 #[derive(Debug, Clone)]
