@@ -10,7 +10,9 @@ ohara-core = { path = "../ohara-core" }
 ohara-storage = { path = "../ohara-storage" }
 ohara-embed = { path = "../ohara-embed" }
 ohara-git = { path = "../ohara-git" }
+blake3.workspace = true
 chrono.workspace = true
+lru.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
