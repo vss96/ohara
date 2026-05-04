@@ -13,13 +13,13 @@
 use anyhow::{Context, Result};
 use ohara_core::types::{Symbol, SymbolKind};
 use std::collections::HashMap;
-use tree_sitter::{Parser, Query, QueryCursor};
+use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
 
 const QUERY_SRC: &str = include_str!("../../queries/kotlin.scm");
 
 pub fn extract(file_path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symbol>> {
     let mut parser = Parser::new();
-    let language = tree_sitter_kotlin::language();
+    let language: tree_sitter::Language = tree_sitter_kotlin_ng::LANGUAGE.into();
     parser
         .set_language(&language)
         .context("set kotlin language")?;
@@ -29,7 +29,8 @@ pub fn extract(file_path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symb
 
     let mut out: Vec<Symbol> = Vec::new();
 
-    for m in cursor.matches(&query, tree.root_node(), source.as_bytes()) {
+    let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    while let Some(m) = matches.next() {
         let mut name: Option<String> = None;
         let mut kind: Option<SymbolKind> = None;
         let mut node_range: Option<(usize, usize)> = None;
@@ -105,9 +106,8 @@ class FooService {
 fun topAnno() {}
 ";
         let mut parser = tree_sitter::Parser::new();
-        parser
-            .set_language(&tree_sitter_kotlin::language())
-            .unwrap();
+        let language: tree_sitter::Language = tree_sitter_kotlin_ng::LANGUAGE.into();
+        parser.set_language(&language).unwrap();
         let tree = parser.parse(src, None).unwrap();
         fn walk(n: tree_sitter::Node, src: &str, depth: usize) {
             let text = &src[n.start_byte()..n.end_byte()];
