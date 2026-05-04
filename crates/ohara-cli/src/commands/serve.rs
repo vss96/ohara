@@ -55,10 +55,26 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let listener_engine = engine.clone();
     let listener_stop = stop.clone();
     let socket = args.socket.clone();
-    let listener =
+    let mut listener =
         tokio::spawn(async move { serve_unix(listener_engine, &socket, listener_stop).await });
 
-    wait_for_socket(&args.socket, Duration::from_secs(10)).await?;
+    // Race: surface a bind/startup error immediately rather than timing out.
+    let ready = wait_for_socket(&args.socket, Duration::from_secs(10));
+    tokio::select! {
+        biased; // prefer listener errors over the readiness poll
+        res = &mut listener => {
+            match res {
+                Ok(Ok(())) => {
+                    return Err(anyhow::anyhow!("listener exited before socket was ready"))
+                }
+                Ok(Err(e)) => {
+                    return Err(anyhow::anyhow!("serve_unix failed at startup: {e}"))
+                }
+                Err(e) => return Err(anyhow::anyhow!("listener task join: {e}")),
+            }
+        }
+        res = ready => res?,
+    }
 
     std::fs::write(&args.pid_file, std::process::id().to_string()).context("write pid file")?;
     std::fs::write(&args.readiness_file, "ready").context("write readiness file")?;
