@@ -1,5 +1,15 @@
 # ohara plan-14 — perf harness and tracing (Phase 1)
 
+> **Status: implementation complete (2026-05-04, shipped in v0.7.2 via PR #3, commit 18b2bea).**
+> All six phases land: `timed_phase` helper + retriever/explain/MCP-boot
+> wiring (Phase A); `Storage::metrics_snapshot` + `AtomicU64` per-method
+> counters + opt-in `install_sql_trace` (Phase B); `--trace-perf`
+> aggregating subscriber on the CLI (Phase C); `fixtures/build_medium.sh`
+> ripgrep clone (Phase D); `cli_query_bench` / `mcp_query_bench` /
+> `perf_diff` operator harnesses (Phase E); `tests/perf/README.md`
+> updated (Phase F). The follow-on plan-15 (memory-efficient indexing)
+> uses this measurement substrate to capture before/after numbers.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task.
@@ -43,7 +53,7 @@ by what Phase 1's harness reveals.
 - Create: `crates/ohara-core/src/perf_trace.rs`
 - Modify: `crates/ohara-core/src/lib.rs`
 
-- [ ] **Step 1: Write the failing test.**
+- [x] **Step 1: Write the failing test.**
 
 Append to `crates/ohara-core/src/perf_trace.rs` (created in Step 2):
 
@@ -118,7 +128,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails.**
+- [x] **Step 2: Run the test to verify it fails.**
 
 ```bash
 cargo test -p ohara-core --lib perf_trace::tests::timed_phase_emits_one_event_with_phase_and_elapsed_ms
@@ -127,7 +137,7 @@ cargo test -p ohara-core --lib perf_trace::tests::timed_phase_emits_one_event_wi
 Expected: FAIL with "could not find `perf_trace` in the crate root" or
 "`timed_phase` is not defined".
 
-- [ ] **Step 3: Implement the helper.**
+- [x] **Step 3: Implement the helper.**
 
 Replace the contents of `crates/ohara-core/src/perf_trace.rs` with:
 
@@ -179,7 +189,7 @@ pub async fn timed_phase_with_count<T, F: Future<Output = (T, usize)>>(
 }
 ```
 
-- [ ] **Step 4: Re-export from `lib.rs`.**
+- [x] **Step 4: Re-export from `lib.rs`.**
 
 Add to `crates/ohara-core/src/lib.rs` (after the existing `pub mod`
 declarations):
@@ -188,7 +198,7 @@ declarations):
 pub mod perf_trace;
 ```
 
-- [ ] **Step 5: Add `futures` to ohara-core dev-deps for the test.**
+- [x] **Step 5: Add `futures` to ohara-core dev-deps for the test.**
 
 Edit `crates/ohara-core/Cargo.toml` `[dev-dependencies]` section.
 Add (alphabetically, near `tokio`):
@@ -202,7 +212,7 @@ If `tracing-subscriber` is not already in workspace dev-deps, add it
 under `[workspace.dependencies]` in the root `Cargo.toml` (it is; see
 the existing workspace deps).
 
-- [ ] **Step 6: Run the test and verify it passes.**
+- [x] **Step 6: Run the test and verify it passes.**
 
 ```bash
 cargo test -p ohara-core --lib perf_trace::tests::timed_phase_emits_one_event_with_phase_and_elapsed_ms
@@ -210,7 +220,7 @@ cargo test -p ohara-core --lib perf_trace::tests::timed_phase_emits_one_event_wi
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit.**
+- [x] **Step 7: Commit.**
 
 ```bash
 git add crates/ohara-core/src/perf_trace.rs \
@@ -226,7 +236,7 @@ git commit -m "feat(core): add timed_phase helper for perf tracing"
 **Files:**
 - Modify: `crates/ohara-core/src/retriever.rs:106-310`
 
-- [ ] **Step 1: Add a failing test asserting all expected phase names fire.**
+- [x] **Step 1: Add a failing test asserting all expected phase names fire.**
 
 Append to the existing `mod tests` block in
 `crates/ohara-core/src/retriever.rs` (before the closing `}`):
@@ -312,7 +322,7 @@ Append to the existing `mod tests` block in
     }
 ```
 
-- [ ] **Step 2: Run the test to confirm it fails.**
+- [x] **Step 2: Run the test to confirm it fails.**
 
 ```bash
 cargo test -p ohara-core --lib retriever::tests::find_pattern_emits_expected_phase_events
@@ -320,7 +330,7 @@ cargo test -p ohara-core --lib retriever::tests::find_pattern_emits_expected_pha
 
 Expected: FAIL — phase events do not yet fire.
 
-- [ ] **Step 3: Wrap each phase in `find_pattern_with_profile`.**
+- [x] **Step 3: Wrap each phase in `find_pattern_with_profile`.**
 
 Edit `crates/ohara-core/src/retriever.rs`. Add at the top of the file
 (near the existing `use` block):
@@ -412,7 +422,7 @@ use the simpler `timed_phase` consistently here. The
 `timed_phase_with_count` helper is retained for explicit hit-count
 phases added later (e.g., the harness binaries' own outer span).
 
-- [ ] **Step 4: Run the test and verify it passes.**
+- [x] **Step 4: Run the test and verify it passes.**
 
 ```bash
 cargo test -p ohara-core --lib retriever::tests::find_pattern_emits_expected_phase_events
@@ -420,7 +430,7 @@ cargo test -p ohara-core --lib retriever::tests::find_pattern_emits_expected_pha
 
 Expected: PASS.
 
-- [ ] **Step 5: Run the full retriever test module to verify no regressions.**
+- [x] **Step 5: Run the full retriever test module to verify no regressions.**
 
 ```bash
 cargo test -p ohara-core --lib retriever::
@@ -432,7 +442,7 @@ Expected: all PASS, including the four pre-existing tests
 `find_pattern_query_no_rerank_flag_skips_attached_reranker`,
 `find_pattern_recency_multiplier_breaks_ties_when_no_rerank`).
 
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
 
 ```bash
 git add crates/ohara-core/src/retriever.rs
@@ -446,13 +456,13 @@ git commit -m "feat(core): wrap retrieval phases with timed_phase"
 **Files:**
 - Modify: `crates/ohara-core/src/explain.rs`
 
-- [ ] **Step 1: Locate the current `explain_change` orchestration.**
+- [x] **Step 1: Locate the current `explain_change` orchestration.**
 
 Open `crates/ohara-core/src/explain.rs`. The function
 `pub async fn explain_change(...)` is the entry point used by both
 the CLI (`ohara explain`) and the MCP `explain_change` tool.
 
-- [ ] **Step 2: Add a failing test that captures phase events.**
+- [x] **Step 2: Add a failing test that captures phase events.**
 
 Append to the existing `mod tests` block:
 
@@ -528,7 +538,7 @@ tests module, factor one out from an existing test in the file
 construct these four values; promote them into a `fn` that returns
 the tuple).
 
-- [ ] **Step 3: Run the test and confirm it fails.**
+- [x] **Step 3: Run the test and confirm it fails.**
 
 ```bash
 cargo test -p ohara-core --lib explain::tests::explain_change_emits_blame_and_hydrate_phases
@@ -536,7 +546,7 @@ cargo test -p ohara-core --lib explain::tests::explain_change_emits_blame_and_hy
 
 Expected: FAIL — phase events do not yet fire.
 
-- [ ] **Step 4: Wrap blame + hydration with `timed_phase`.**
+- [x] **Step 4: Wrap blame + hydration with `timed_phase`.**
 
 In `crates/ohara-core/src/explain.rs`:
 
@@ -573,7 +583,7 @@ let (hits, meta) = timed_phase("hydrate_explain", async {
 The closure body is whatever the current hydration block does; this
 task changes nothing about the logic, only the wrapper.
 
-- [ ] **Step 5: Run the test and verify it passes.**
+- [x] **Step 5: Run the test and verify it passes.**
 
 ```bash
 cargo test -p ohara-core --lib explain::tests::explain_change_emits_blame_and_hydrate_phases
@@ -581,7 +591,7 @@ cargo test -p ohara-core --lib explain::tests::explain_change_emits_blame_and_hy
 
 Expected: PASS.
 
-- [ ] **Step 6: Run the full explain test module.**
+- [x] **Step 6: Run the full explain test module.**
 
 ```bash
 cargo test -p ohara-core --lib explain::
@@ -589,7 +599,7 @@ cargo test -p ohara-core --lib explain::
 
 Expected: all PASS.
 
-- [ ] **Step 7: Commit.**
+- [x] **Step 7: Commit.**
 
 ```bash
 git add crates/ohara-core/src/explain.rs
@@ -605,7 +615,7 @@ git commit -m "feat(core): wrap explain blame and hydration with timed_phase"
 - Modify: `crates/ohara-cli/src/commands/explain.rs:36-58`
 - Modify: `crates/ohara-mcp/src/server.rs:24-55`
 
-- [ ] **Step 1: Wrap storage open and embedder/reranker loads in `query.rs`.**
+- [x] **Step 1: Wrap storage open and embedder/reranker loads in `query.rs`.**
 
 Replace the body of `pub async fn run(args: Args) -> Result<()>` in
 `crates/ohara-cli/src/commands/query.rs` so that the existing
@@ -673,7 +683,7 @@ Note: `chosen_provider` is `Copy` (it's an enum), so the two
 compiler complains, change the second use to `let chosen_provider2 =
 chosen_provider;` and capture `chosen_provider2`.
 
-- [ ] **Step 2: Wrap storage open and blamer open in `explain.rs`.**
+- [x] **Step 2: Wrap storage open and blamer open in `explain.rs`.**
 
 In `crates/ohara-cli/src/commands/explain.rs`, add the same import:
 
@@ -691,7 +701,7 @@ Replace the storage and blamer construction lines (currently lines
     let blamer = timed_phase("blamer_open", async { Blamer::open(&canonical) }).await?;
 ```
 
-- [ ] **Step 3: Wrap the same three setup phases in MCP server boot.**
+- [x] **Step 3: Wrap the same three setup phases in MCP server boot.**
 
 In `crates/ohara-mcp/src/server.rs`, add the import:
 
@@ -743,7 +753,7 @@ same three wraps:
     }
 ```
 
-- [ ] **Step 4: Build the workspace to confirm it still compiles.**
+- [x] **Step 4: Build the workspace to confirm it still compiles.**
 
 ```bash
 cargo build --workspace
@@ -751,7 +761,7 @@ cargo build --workspace
 
 Expected: success with no warnings about unused imports.
 
-- [ ] **Step 5: Run the MCP integration tests if present, plus the CLI subcommand tests.**
+- [x] **Step 5: Run the MCP integration tests if present, plus the CLI subcommand tests.**
 
 ```bash
 cargo test -p ohara-cli
@@ -760,7 +770,7 @@ cargo test -p ohara-mcp
 
 Expected: PASS. (No behavioral change; the wraps only emit events.)
 
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
 
 ```bash
 git add crates/ohara-cli/src/commands/query.rs \
@@ -778,7 +788,7 @@ git commit -m "feat(cli,mcp): time storage_open / embed_load / rerank_load / bla
 **Files:**
 - Modify: `crates/ohara-core/src/storage.rs`
 
-- [ ] **Step 1: Add the snapshot type and trait method.**
+- [x] **Step 1: Add the snapshot type and trait method.**
 
 In `crates/ohara-core/src/storage.rs`, near the top (after the existing
 type aliases `pub type Vector` / `pub type HunkId`), add:
@@ -821,7 +831,7 @@ closing `}`), add:
     }
 ```
 
-- [ ] **Step 2: Build to confirm trait compiles and existing impls still satisfy it.**
+- [x] **Step 2: Build to confirm trait compiles and existing impls still satisfy it.**
 
 ```bash
 cargo build -p ohara-core -p ohara-storage
@@ -830,7 +840,7 @@ cargo build -p ohara-core -p ohara-storage
 Expected: success. The default body means existing `Storage`
 implementations don't need changes yet.
 
-- [ ] **Step 3: Commit.**
+- [x] **Step 3: Commit.**
 
 ```bash
 git add crates/ohara-core/src/storage.rs
@@ -844,7 +854,7 @@ git commit -m "feat(core): add Storage::metrics_snapshot with default impl"
 **Files:**
 - Modify: `crates/ohara-storage/src/storage_impl.rs`
 
-- [ ] **Step 1: Write a failing test.**
+- [x] **Step 1: Write a failing test.**
 
 Append to the existing test module at the bottom of
 `crates/ohara-storage/src/storage_impl.rs` (or create one if absent;
@@ -882,7 +892,7 @@ mod metrics_tests {
 }
 ```
 
-- [ ] **Step 2: Run the test and confirm it fails.**
+- [x] **Step 2: Run the test and confirm it fails.**
 
 ```bash
 cargo test -p ohara-storage --lib storage_impl::metrics_tests::knn_call_increments_counters
@@ -891,7 +901,7 @@ cargo test -p ohara-storage --lib storage_impl::metrics_tests::knn_call_incremen
 Expected: FAIL — counters not yet implemented (the default-impl
 snapshot always returns 0, so `after` stays at `before`).
 
-- [ ] **Step 3: Add the counters struct.**
+- [x] **Step 3: Add the counters struct.**
 
 At the top of `crates/ohara-storage/src/storage_impl.rs`, after the
 existing `use` block, add:
@@ -977,7 +987,7 @@ Update `SqliteStorage::open` to initialize counters:
     }
 ```
 
-- [ ] **Step 4: Add a small recording helper next to `with_conn`.**
+- [x] **Step 4: Add a small recording helper next to `with_conn`.**
 
 Right after the existing `async fn with_conn<F, T>` definition, add:
 
@@ -1001,7 +1011,7 @@ where
 }
 ```
 
-- [ ] **Step 5: Replace `with_conn` with `timed_with_conn` in the nine
+- [x] **Step 5: Replace `with_conn` with `timed_with_conn` in the nine
 counted methods.**
 
 For each of these nine `Storage` impl methods on `SqliteStorage`,
@@ -1052,7 +1062,7 @@ Concrete example — replace the existing `knn_hunks` body:
 Apply the equivalent change to the other eight methods listed in the
 table.
 
-- [ ] **Step 6: Implement `metrics_snapshot` on `SqliteStorage`.**
+- [x] **Step 6: Implement `metrics_snapshot` on `SqliteStorage`.**
 
 In the `impl Storage for SqliteStorage` block, add at the bottom
 (overriding the trait default):
@@ -1063,7 +1073,7 @@ In the `impl Storage for SqliteStorage` block, add at the bottom
     }
 ```
 
-- [ ] **Step 7: Run the test and verify it passes.**
+- [x] **Step 7: Run the test and verify it passes.**
 
 ```bash
 cargo test -p ohara-storage --lib storage_impl::metrics_tests::knn_call_increments_counters
@@ -1071,7 +1081,7 @@ cargo test -p ohara-storage --lib storage_impl::metrics_tests::knn_call_incremen
 
 Expected: PASS.
 
-- [ ] **Step 8: Run the full storage test suite to ensure no regressions.**
+- [x] **Step 8: Run the full storage test suite to ensure no regressions.**
 
 ```bash
 cargo test -p ohara-storage
@@ -1079,7 +1089,7 @@ cargo test -p ohara-storage
 
 Expected: all PASS.
 
-- [ ] **Step 9: Commit.**
+- [x] **Step 9: Commit.**
 
 ```bash
 git add crates/ohara-storage/src/storage_impl.rs
@@ -1093,13 +1103,13 @@ git commit -m "feat(storage): per-method atomic counters and metrics_snapshot"
 **Files:**
 - Modify: `crates/ohara-storage/src/codec/pool.rs`
 
-- [ ] **Step 1: Read the current pool builder.**
+- [x] **Step 1: Read the current pool builder.**
 
 Open `crates/ohara-storage/src/codec/pool.rs` and identify the
 function that opens each `rusqlite::Connection` (most likely a
 closure passed to `deadpool_sqlite`'s `Manager`).
 
-- [ ] **Step 2: Write a failing test.**
+- [x] **Step 2: Write a failing test.**
 
 Append to the same file (or create a `#[cfg(test)] mod tests { ... }`
 block if missing):
@@ -1176,7 +1186,7 @@ mod sql_trace_tests {
 }
 ```
 
-- [ ] **Step 3: Confirm it fails.**
+- [x] **Step 3: Confirm it fails.**
 
 ```bash
 cargo test -p ohara-storage --lib codec::pool::sql_trace_tests::sql_trace_emits_events_when_target_is_enabled
@@ -1184,7 +1194,7 @@ cargo test -p ohara-storage --lib codec::pool::sql_trace_tests::sql_trace_emits_
 
 Expected: FAIL — no trace callback installed yet.
 
-- [ ] **Step 4: Install the trace callback.**
+- [x] **Step 4: Install the trace callback.**
 
 In the connection-init closure inside `SqlitePoolBuilder::build`,
 register a trace callback. The exact insertion point is the closure
@@ -1217,7 +1227,7 @@ the version pinned by the workspace, accept the function signature
 the API requires (the rusqlite 0.31 docs show
 `trace(Option<fn(&str)>)`, which is safe).
 
-- [ ] **Step 5: Run the test and verify it passes.**
+- [x] **Step 5: Run the test and verify it passes.**
 
 ```bash
 cargo test -p ohara-storage --lib codec::pool::sql_trace_tests::sql_trace_emits_events_when_target_is_enabled
@@ -1225,7 +1235,7 @@ cargo test -p ohara-storage --lib codec::pool::sql_trace_tests::sql_trace_emits_
 
 Expected: PASS.
 
-- [ ] **Step 6: Run the full storage test suite.**
+- [x] **Step 6: Run the full storage test suite.**
 
 ```bash
 cargo test -p ohara-storage
@@ -1233,7 +1243,7 @@ cargo test -p ohara-storage
 
 Expected: all PASS.
 
-- [ ] **Step 7: Commit.**
+- [x] **Step 7: Commit.**
 
 ```bash
 git add crates/ohara-storage/src/codec/pool.rs
@@ -1251,7 +1261,7 @@ git commit -m "feat(storage): per-statement SQL trace on ohara_storage::sql targ
 - Modify: `crates/ohara-cli/src/main.rs`
 - Modify: `crates/ohara-cli/Cargo.toml`
 
-- [ ] **Step 1: Write the aggregator.**
+- [x] **Step 1: Write the aggregator.**
 
 Create `crates/ohara-cli/src/perf_trace.rs`:
 
@@ -1381,7 +1391,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Add `--trace-perf` global flag and install the layer.**
+- [x] **Step 2: Add `--trace-perf` global flag and install the layer.**
 
 Open `crates/ohara-cli/src/main.rs`. Add:
 
@@ -1456,7 +1466,7 @@ async fn main() -> Result<()> {
 }
 ```
 
-- [ ] **Step 3: Update Cargo.toml dev-deps if needed.**
+- [x] **Step 3: Update Cargo.toml dev-deps if needed.**
 
 `tracing-subscriber` is already a workspace dep (see root
 `Cargo.toml`). Make sure `crates/ohara-cli/Cargo.toml` has:
@@ -1470,7 +1480,7 @@ tracing-subscriber.workspace = true
 If `tracing-subscriber` is currently absent from the cli's
 `[dependencies]`, add it.
 
-- [ ] **Step 4: Run the unit test.**
+- [x] **Step 4: Run the unit test.**
 
 ```bash
 cargo test -p ohara-cli --lib perf_trace::tests::aggregator_sums_two_events_for_same_phase
@@ -1478,7 +1488,7 @@ cargo test -p ohara-cli --lib perf_trace::tests::aggregator_sums_two_events_for_
 
 Expected: PASS.
 
-- [ ] **Step 5: Smoke-test against the tiny fixture.**
+- [x] **Step 5: Smoke-test against the tiny fixture.**
 
 ```bash
 fixtures/build_tiny.sh
@@ -1489,7 +1499,7 @@ cargo run --release -p ohara-cli -- --trace-perf query fixtures/tiny/repo --quer
 Expected: the second invocation prints `[phase]` lines on stderr
 ending in `[phase] total <N>ms`. Numbers will vary.
 
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
 
 ```bash
 git add crates/ohara-cli/src/perf_trace.rs \
@@ -1508,7 +1518,7 @@ git commit -m "feat(cli): --trace-perf flag and per-phase aggregator"
 - Create: `fixtures/build_medium.sh`
 - Modify: `.gitignore`
 
-- [ ] **Step 1: Add the build script.**
+- [x] **Step 1: Add the build script.**
 
 Create `fixtures/build_medium.sh`:
 
@@ -1563,13 +1573,13 @@ fi
 echo "[medium] ready: $DEST @ $resolved"
 ```
 
-- [ ] **Step 2: Make it executable.**
+- [x] **Step 2: Make it executable.**
 
 ```bash
 chmod +x fixtures/build_medium.sh
 ```
 
-- [ ] **Step 3: Add to `.gitignore`.**
+- [x] **Step 3: Add to `.gitignore`.**
 
 Append to `.gitignore`:
 
@@ -1580,7 +1590,7 @@ fixtures/medium/repo/
 (Leave `.fixture-sha` checked in — it's the contract that pins the
 clone hash.)
 
-- [ ] **Step 4: Run it once to capture the SHA.**
+- [x] **Step 4: Run it once to capture the SHA.**
 
 ```bash
 fixtures/build_medium.sh
@@ -1590,7 +1600,7 @@ Expected: clones into `fixtures/medium/repo`, prints
 `[medium] recording fixture SHA: <SHA>`. The new file
 `fixtures/medium/.fixture-sha` should be created.
 
-- [ ] **Step 5: Run it again to verify idempotency.**
+- [x] **Step 5: Run it again to verify idempotency.**
 
 ```bash
 fixtures/build_medium.sh
@@ -1599,7 +1609,7 @@ fixtures/build_medium.sh
 Expected: prints `[medium] ready: …` without re-cloning, no SHA
 mismatch error.
 
-- [ ] **Step 6: Commit (script + .fixture-sha + gitignore).**
+- [x] **Step 6: Commit (script + .fixture-sha + gitignore).**
 
 ```bash
 git add fixtures/build_medium.sh fixtures/medium/.fixture-sha .gitignore
@@ -1616,7 +1626,7 @@ git commit -m "feat(fixtures): build_medium.sh — ripgrep 14.1.1 perf fixture"
 - Create: `tests/perf/cli_query_bench.rs`
 - Modify: `tests/perf/Cargo.toml`
 
-- [ ] **Step 1: Add the `[[test]]` entry.**
+- [x] **Step 1: Add the `[[test]]` entry.**
 
 Append to `tests/perf/Cargo.toml`:
 
@@ -1629,7 +1639,7 @@ name = "cli_query_bench"
 path = "cli_query_bench.rs"
 ```
 
-- [ ] **Step 2: Create the harness file.**
+- [x] **Step 2: Create the harness file.**
 
 Create `tests/perf/cli_query_bench.rs`:
 
@@ -1819,7 +1829,7 @@ fn cli_query_bench_emits_run_report() {
 }
 ```
 
-- [ ] **Step 3: Build the release binary needed by the harness.**
+- [x] **Step 3: Build the release binary needed by the harness.**
 
 ```bash
 cargo build --release -p ohara-cli
@@ -1827,7 +1837,7 @@ cargo build --release -p ohara-cli
 
 Expected: success.
 
-- [ ] **Step 4: Run the harness.**
+- [x] **Step 4: Run the harness.**
 
 ```bash
 cargo test -p ohara-perf-tests --release -- --ignored cli_query_bench --nocapture
@@ -1835,7 +1845,7 @@ cargo test -p ohara-perf-tests --release -- --ignored cli_query_bench --nocaptur
 
 Expected: PASS. A JSON file appears under `target/perf/runs/`.
 
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 ```bash
 git add tests/perf/cli_query_bench.rs tests/perf/Cargo.toml
@@ -1850,7 +1860,7 @@ git commit -m "test(perf): cli_query_bench harness binary"
 - Create: `tests/perf/mcp_query_bench.rs`
 - Modify: `tests/perf/Cargo.toml`
 
-- [ ] **Step 1: Register the binary.**
+- [x] **Step 1: Register the binary.**
 
 Append to `tests/perf/Cargo.toml`:
 
@@ -1869,7 +1879,7 @@ If `ohara-mcp` is not yet listed in `[dev-dependencies]`, add:
 ohara-mcp = { path = "../../crates/ohara-mcp" }
 ```
 
-- [ ] **Step 2: Create the harness.**
+- [x] **Step 2: Create the harness.**
 
 Create `tests/perf/mcp_query_bench.rs`:
 
@@ -2074,7 +2084,7 @@ async fn mcp_query_bench_emits_run_report() {
 }
 ```
 
-- [ ] **Step 3: Pre-index the medium fixture.**
+- [x] **Step 3: Pre-index the medium fixture.**
 
 ```bash
 fixtures/build_medium.sh
@@ -2084,7 +2094,7 @@ cargo run --release -p ohara-cli -- index fixtures/medium/repo
 Expected: index completes (will take a while — this is the index
 path, intentionally not optimized in this plan).
 
-- [ ] **Step 4: Run the harness.**
+- [x] **Step 4: Run the harness.**
 
 ```bash
 cargo test -p ohara-perf-tests --release -- --ignored mcp_query_bench --nocapture
@@ -2093,7 +2103,7 @@ cargo test -p ohara-perf-tests --release -- --ignored mcp_query_bench --nocaptur
 Expected: PASS. A `*-mcp.json` report appears under
 `target/perf/runs/`.
 
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 ```bash
 git add tests/perf/mcp_query_bench.rs tests/perf/Cargo.toml
@@ -2108,7 +2118,7 @@ git commit -m "test(perf): mcp_query_bench harness binary"
 - Create: `tests/perf/perf_diff.rs`
 - Modify: `tests/perf/Cargo.toml`
 
-- [ ] **Step 1: Register the binary.**
+- [x] **Step 1: Register the binary.**
 
 Append to `tests/perf/Cargo.toml`:
 
@@ -2121,7 +2131,7 @@ name = "perf_diff"
 path = "perf_diff.rs"
 ```
 
-- [ ] **Step 2: Create the differ.**
+- [x] **Step 2: Create the differ.**
 
 Create `tests/perf/perf_diff.rs`:
 
@@ -2219,7 +2229,7 @@ fn perf_diff_prints_per_phase_delta() {
 }
 ```
 
-- [ ] **Step 3: Smoke-test against two runs.**
+- [x] **Step 3: Smoke-test against two runs.**
 
 Run `cli_query_bench` twice (Tasks E.1 step 4 already produced one
 run; produce a second, then diff):
@@ -2236,7 +2246,7 @@ cargo test -p ohara-perf-tests --release -- --ignored perf_diff --nocapture
 Expected: a tabular delta on stderr. Most numbers near 0 since both
 runs are against the same code.
 
-- [ ] **Step 4: Commit.**
+- [x] **Step 4: Commit.**
 
 ```bash
 git add tests/perf/perf_diff.rs tests/perf/Cargo.toml
@@ -2252,7 +2262,7 @@ git commit -m "test(perf): perf_diff utility for before/after comparisons"
 **Files:**
 - Modify: `tests/perf/README.md`
 
-- [ ] **Step 1: Add a "Plan 14 — phase tracing + harness binaries" section.**
+- [x] **Step 1: Add a "Plan 14 — phase tracing + harness binaries" section.**
 
 Append to `tests/perf/README.md`:
 
@@ -2300,7 +2310,7 @@ on the `ohara::phase` tracing target. End-of-process stderr summary:
 Equivalent MCP per-phase data is captured by `mcp_query_bench` directly.
 ````
 
-- [ ] **Step 2: Commit.**
+- [x] **Step 2: Commit.**
 
 ```bash
 git add tests/perf/README.md
@@ -2311,7 +2321,7 @@ git commit -m "docs(perf): document plan-14 phase tracing and harness binaries"
 
 ## Final verification
 
-- [ ] **Step 1: Workspace fmt + clippy + test pass.**
+- [x] **Step 1: Workspace fmt + clippy + test pass.**
 
 ```bash
 cargo fmt --all
@@ -2321,7 +2331,7 @@ cargo test --workspace
 
 Expected: all clean, all PASS.
 
-- [ ] **Step 2: Confirm no unintended file growth.**
+- [x] **Step 2: Confirm no unintended file growth.**
 
 ```bash
 find crates -name "*.rs" -exec wc -l {} \; | awk '$1 > 500'
@@ -2333,7 +2343,7 @@ appear in this plan's modified set (likely
 1497 lines), the file was already over budget — note in the PR but
 do not refactor as part of this plan.
 
-- [ ] **Step 3: Run the full perf harness end-to-end.**
+- [x] **Step 3: Run the full perf harness end-to-end.**
 
 ```bash
 cargo test -p ohara-perf-tests --release -- --ignored cli_query_bench --nocapture
@@ -2347,21 +2357,21 @@ that plan-15 PRs will diff against.
 
 ## Done criteria
 
-- [ ] `timed_phase` helper lives in `ohara-core::perf_trace` with the
+- [x] `timed_phase` helper lives in `ohara-core::perf_trace` with the
   unit test in Task A.1.
-- [ ] All retrieval and explain phases emit `ohara::phase` events
+- [x] All retrieval and explain phases emit `ohara::phase` events
   (Tasks A.2, A.3) and CLI / MCP boot phases too (Task A.4).
-- [ ] `Storage::metrics_snapshot` returns real numbers from
+- [x] `Storage::metrics_snapshot` returns real numbers from
   `SqliteStorage` and zero from defaults (Task B.2).
-- [ ] `RUST_LOG=ohara_storage::sql=trace` produces per-statement
+- [x] `RUST_LOG=ohara_storage::sql=trace` produces per-statement
   events (Task B.3).
-- [ ] `ohara --trace-perf <subcommand>` prints a per-phase summary on
+- [x] `ohara --trace-perf <subcommand>` prints a per-phase summary on
   stderr at exit (Task C.1).
-- [ ] `fixtures/build_medium.sh` is idempotent and pins ripgrep
+- [x] `fixtures/build_medium.sh` is idempotent and pins ripgrep
   14.1.1 via `.fixture-sha` (Task D.1).
-- [ ] `cli_query_bench`, `mcp_query_bench`, `perf_diff` produce
+- [x] `cli_query_bench`, `mcp_query_bench`, `perf_diff` produce
   / consume JSON under `target/perf/runs/` (Tasks E.1–E.3).
-- [ ] `tests/perf/README.md` documents the new binaries (Task F.1).
+- [x] `tests/perf/README.md` documents the new binaries (Task F.1).
 
 After this plan ships, `plan-15` (Phase 2 standalone CLI wins) can
 be written with concrete `target/perf/runs/...-cli-query.json`

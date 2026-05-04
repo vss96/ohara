@@ -67,6 +67,17 @@ path = "mcp_query_bench.rs"
 name = "perf_diff"
 path = "perf_diff.rs"
 
+[[test]]
+# Plan 15 Task A.2 — indexing-path peak-RSS + wall-clock harness.
+# `#[ignore]`'d; opt in via:
+#   cargo test -p ohara-perf-tests --release -- \
+#       --ignored index_bench --nocapture
+name = "index_bench"
+path = "index_bench.rs"
+
+[dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 ohara-cli = { path = "../../crates/ohara-cli" }
 ohara-core = { path = "../../crates/ohara-core" }

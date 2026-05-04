@@ -2246,6 +2246,7 @@ version = "0.7.2"
 dependencies = [
  "anyhow",
  "chrono",
+ "libc",
  "ohara-cli",
  "ohara-core",
  "ohara-embed",

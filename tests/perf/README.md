@@ -218,3 +218,29 @@ on the `ohara::phase` tracing target. End-of-process stderr summary:
 Equivalent MCP per-phase data is captured by `mcp_query_bench` directly via
 an in-process tracing subscriber (no need for `--trace-perf` since the
 harness owns the subscriber).
+
+## Plan 15 — indexing memory + wall-time harness
+
+`index_bench.rs` runs `ohara index` against a fresh copy of the medium
+ripgrep fixture three times and writes per-iteration wall-time +
+peak-RSS to `target/perf/runs/<git-sha>-<utc>-index.json`. Operators
+run it before/after each plan-15 task and paste the JSON deltas into
+the PR description.
+
+### Running
+
+```sh
+fixtures/build_medium.sh
+cargo build --release -p ohara-cli
+cargo test -p ohara-perf-tests --release -- --ignored index_bench --nocapture
+```
+
+### Child-process peak RSS
+
+`index_bench` wraps each `ohara index` invocation with
+`/usr/bin/time -l` (macOS) or `/usr/bin/time -v` (Linux) and parses
+the "maximum resident set size" line from its stderr output. The
+`peak_rss_bytes` field in the JSON report reflects the child process's
+peak, not the test harness. If `/usr/bin/time` is unavailable on the
+host, the harness falls back to the parent-process peak with a warning
+printed to stderr.
