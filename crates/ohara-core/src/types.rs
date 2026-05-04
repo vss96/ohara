@@ -185,6 +185,44 @@ pub struct Symbol {
 }
 
 #[cfg(test)]
+mod content_hash_tests {
+    use super::*;
+
+    #[test]
+    fn from_hex_round_trips_as_str() {
+        // Plan 21 Task A.1: ContentHash constructed from a known hex
+        // string must echo it back via as_str() unchanged.
+        let h = ContentHash::from_hex("deadbeef1234");
+        assert_eq!(h.as_str(), "deadbeef1234");
+    }
+
+    #[test]
+    fn content_hash_is_eq_and_hash() {
+        // Plan 21 Task A.1: ContentHash must be usable as a HashMap key
+        // (requires Hash + Eq). Two values built from the same hex string
+        // must be equal; two different hex strings must differ.
+        use std::collections::HashMap;
+        let a = ContentHash::from_hex("aaa");
+        let b = ContentHash::from_hex("aaa");
+        let c = ContentHash::from_hex("bbb");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        let mut m: HashMap<ContentHash, u8> = HashMap::new();
+        m.insert(a.clone(), 1);
+        assert_eq!(*m.get(&b).expect("must find by equal key"), 1);
+    }
+
+    #[test]
+    fn from_blob_oid_produces_40_char_hex() {
+        // Plan 21 Task A.1: from_blob_oid wraps git2::Oid::from_str,
+        // which produces 40-character hex. Verify the length contract.
+        let oid = git2::Oid::from_str("a".repeat(40).as_str()).expect("valid oid");
+        let h = ContentHash::from_blob_oid(oid);
+        assert_eq!(h.as_str().len(), 40);
+    }
+}
+
+#[cfg(test)]
 mod symbol_tests {
     use super::*;
 
