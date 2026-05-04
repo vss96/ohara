@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
         Cmd::Index(a) => commands::index::run(a).await.map(|_| ()),
         Cmd::Query(a) => commands::query::run(a, no_daemon).await,
         Cmd::Status(a) => commands::status::run(a).await,
-        Cmd::Explain(a) => commands::explain::run(a).await,
+        Cmd::Explain(a) => commands::explain::run(a, no_daemon).await,
         Cmd::Update(a) => commands::update::run(a).await,
         Cmd::Serve(a) => commands::serve::run(a).await,
     };
