@@ -11,6 +11,9 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[cfg(unix)]
+use libc;
+
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
@@ -104,6 +107,41 @@ impl Registry {
         })
     }
 
+    /// Return only records whose PID is still alive and whose last health
+    /// check is within the past 5 minutes.  Stale records are pruned from
+    /// the registry file in the same operation.
+    pub fn list_alive(&self) -> Result<Vec<DaemonRecord>> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut out = Vec::new();
+        for d in self.list()? {
+            if !pid_alive(d.pid) {
+                continue;
+            }
+            if now.saturating_sub(d.last_health_unix) > 5 * 60 {
+                continue;
+            }
+            out.push(d);
+        }
+        let snap = out.clone();
+        self.mutate(|f| {
+            f.daemons = snap;
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// Return the first alive, non-busy daemon that matches `ohara_version`,
+    /// or `None` if no compatible daemon is registered.
+    pub fn pick_compatible(&self, ohara_version: &str) -> Result<Option<DaemonRecord>> {
+        let alive = self.list_alive()?;
+        Ok(alive
+            .into_iter()
+            .find(|d| d.ohara_version == ohara_version && !d.busy))
+    }
+
     // ── Internal helpers ──────────────────────────────────────────────────
 
     /// Open the file, acquire an exclusive lock, deserialise, run `f`,
@@ -160,6 +198,20 @@ impl Registry {
 
         result
     }
+}
+
+// ── OS helpers ────────────────────────────────────────────────────────────────
+
+/// Return `true` if `pid` is a running process visible to this user.
+///
+/// Uses `kill(pid, 0)` — the POSIX "are you there?" signal — which returns 0
+/// if the process exists and we have permission to signal it, or an error
+/// otherwise.  This is safe: signal 0 never actually delivers a signal.
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    // SAFETY: kill(pid, 0) is the standard "is process alive?" check.
+    // No signal is delivered; the call is used purely for process existence.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
