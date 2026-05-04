@@ -18,10 +18,7 @@ pub struct HunkChunkStage;
 impl HunkChunkStage {
     /// Fetch and convert hunks for a single `CommitMeta` into
     /// `HunkRecord` values.
-    pub async fn run(
-        source: &dyn CommitSource,
-        commit: &CommitMeta,
-    ) -> Result<Vec<HunkRecord>> {
+    pub async fn run(source: &dyn CommitSource, commit: &CommitMeta) -> Result<Vec<HunkRecord>> {
         let raw_hunks = source.hunks_for_commit(&commit.commit_sha).await?;
         let records = raw_hunks
             .into_iter()
@@ -43,7 +40,7 @@ impl HunkChunkStage {
 mod tests {
     use super::*;
     use crate::indexer::CommitSource;
-    use crate::types::{CommitMeta, ChangeKind};
+    use crate::types::{ChangeKind, CommitMeta};
     use crate::Result;
     use async_trait::async_trait;
 
@@ -72,17 +69,11 @@ mod tests {
 
     #[async_trait]
     impl CommitSource for TwoMethodSource {
-        async fn list_commits(
-            &self,
-            _since: Option<&str>,
-        ) -> Result<Vec<CommitMeta>> {
+        async fn list_commits(&self, _since: Option<&str>) -> Result<Vec<CommitMeta>> {
             Ok(vec![meta("abc")])
         }
 
-        async fn hunks_for_commit(
-            &self,
-            _sha: &str,
-        ) -> Result<Vec<Hunk>> {
+        async fn hunks_for_commit(&self, _sha: &str) -> Result<Vec<Hunk>> {
             Ok(vec![
                 hunk("abc", "src/foo.rs", "+fn alpha() {}\n"),
                 hunk("abc", "src/foo.rs", "+fn beta() {}\n"),
@@ -117,16 +108,10 @@ mod tests {
         struct EmptySource;
         #[async_trait]
         impl CommitSource for EmptySource {
-            async fn list_commits(
-                &self,
-                _: Option<&str>,
-            ) -> Result<Vec<CommitMeta>> {
+            async fn list_commits(&self, _: Option<&str>) -> Result<Vec<CommitMeta>> {
                 Ok(vec![])
             }
-            async fn hunks_for_commit(
-                &self,
-                _: &str,
-            ) -> Result<Vec<Hunk>> {
+            async fn hunks_for_commit(&self, _: &str) -> Result<Vec<Hunk>> {
                 Ok(vec![])
             }
         }

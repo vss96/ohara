@@ -34,18 +34,15 @@ impl CommitWalkStage {
 mod walk_tests {
     use super::*;
     use crate::indexer::CommitSource;
+    use crate::types::{CommitMeta, Hunk};
     use crate::Result;
     use async_trait::async_trait;
-    use crate::types::{Hunk, CommitMeta};
 
     struct VecSource(Vec<CommitMeta>);
 
     #[async_trait]
     impl CommitSource for VecSource {
-        async fn list_commits(
-            &self,
-            since: Option<&str>,
-        ) -> Result<Vec<CommitMeta>> {
+        async fn list_commits(&self, since: Option<&str>) -> Result<Vec<CommitMeta>> {
             match since {
                 None => Ok(self.0.clone()),
                 Some(sha) => {
@@ -58,10 +55,7 @@ mod walk_tests {
             }
         }
 
-        async fn hunks_for_commit(
-            &self,
-            _sha: &str,
-        ) -> Result<Vec<Hunk>> {
+        async fn hunks_for_commit(&self, _sha: &str) -> Result<Vec<Hunk>> {
             Ok(vec![])
         }
     }
@@ -130,7 +124,10 @@ mod tests {
     fn is_before_returns_true_for_different_sha() {
         let w = CommitWatermark::new("aaa");
         let m = meta("bbb");
-        assert!(w.is_before(&m), "watermark on 'aaa' must report 'bbb' as unindexed");
+        assert!(
+            w.is_before(&m),
+            "watermark on 'aaa' must report 'bbb' as unindexed"
+        );
     }
 
     #[test]

@@ -1,12 +1,14 @@
 //! Coordinator: drives the 5-stage pipeline per commit.
 
-use crate::indexer::stages::{
-    attribute::AttributeStage, commit_walk::CommitWalkStage,
-    embed::EmbedStage, hunk_chunk::HunkChunkStage, persist::PersistStage,
-};
 use crate::indexer::stages::attribute::AttributedHunk;
 use crate::indexer::stages::commit_walk::CommitWatermark;
-use crate::indexer::{AtomicSymbolExtractor, CommitSource, NullAtomicSymbolExtractor, PhaseTimings, SymbolSource};
+use crate::indexer::stages::{
+    attribute::AttributeStage, commit_walk::CommitWalkStage, embed::EmbedStage,
+    hunk_chunk::HunkChunkStage, persist::PersistStage,
+};
+use crate::indexer::{
+    AtomicSymbolExtractor, CommitSource, NullAtomicSymbolExtractor, PhaseTimings, SymbolSource,
+};
 use crate::types::{CommitMeta, RepoId};
 use crate::{EmbeddingProvider, Result, Storage};
 use std::sync::Arc;
@@ -185,8 +187,7 @@ impl Coordinator {
 
         // Stage 4: embed (timed). Create the embed stage here rather than
         // accepting it as a parameter to keep argument count within limits.
-        let embed_stage = EmbedStage::new(self.embedder.clone())
-            .with_embed_batch(self.embed_batch);
+        let embed_stage = EmbedStage::new(self.embedder.clone()).with_embed_batch(self.embed_batch);
         let embed_start = Instant::now();
         let embed_output = embed_stage.run(&commit.message, &attributed).await?;
         result.timings.embed_ms += embed_start.elapsed().as_millis() as u64;
@@ -212,8 +213,7 @@ impl Coordinator {
         commit: &CommitMeta,
         attributed: Vec<AttributedHunk>,
     ) -> Result<()> {
-        let embed_stage = EmbedStage::new(self.embedder.clone())
-            .with_embed_batch(self.embed_batch);
+        let embed_stage = EmbedStage::new(self.embedder.clone()).with_embed_batch(self.embed_batch);
 
         // Stage 4: embed.
         let embed_output = embed_stage.run(&commit.message, &attributed).await?;
@@ -236,7 +236,7 @@ mod tests {
     use super::*;
     use crate::index_metadata::StoredIndexMetadata;
     use crate::query::IndexStatus;
-    use crate::storage::{CommitRecord, HunkRecord as StorageHunkRecord, HunkHit, HunkId};
+    use crate::storage::{CommitRecord, HunkHit, HunkId, HunkRecord as StorageHunkRecord};
     use crate::types::{CommitMeta, Hunk, HunkSymbol, RepoId, Symbol};
     use crate::{EmbeddingProvider, Result, Storage};
     use async_trait::async_trait;
@@ -274,11 +274,17 @@ mod tests {
         }
     }
 
-    struct ZeroEmbedder { dim: usize }
+    struct ZeroEmbedder {
+        dim: usize,
+    }
     #[async_trait]
     impl EmbeddingProvider for ZeroEmbedder {
-        fn dimension(&self) -> usize { self.dim }
-        fn model_id(&self) -> &str { "zero" }
+        fn dimension(&self) -> usize {
+            self.dim
+        }
+        fn model_id(&self) -> &str {
+            "zero"
+        }
         async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
             Ok(texts.iter().map(|_| vec![0.0_f32; self.dim]).collect())
         }
@@ -294,7 +300,9 @@ mod tests {
 
     #[async_trait]
     impl Storage for SpyStorage {
-        async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> Result<()> { Ok(()) }
+        async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
         async fn get_index_status(&self, _: &RepoId) -> Result<IndexStatus> {
             Ok(IndexStatus {
                 last_indexed_commit: self.watermark.lock().unwrap().clone(),
@@ -302,36 +310,122 @@ mod tests {
                 indexed_at: None,
             })
         }
-        async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> Result<()> { Ok(()) }
+        async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> Result<()> {
+            Ok(())
+        }
         async fn put_commit(&self, _: &RepoId, meta: &CommitRecord) -> Result<()> {
-            self.put_commit_calls.lock().unwrap().push(meta.meta.commit_sha.clone());
-            self.seen_commits.lock().unwrap().push(meta.meta.commit_sha.clone());
+            self.put_commit_calls
+                .lock()
+                .unwrap()
+                .push(meta.meta.commit_sha.clone());
+            self.seen_commits
+                .lock()
+                .unwrap()
+                .push(meta.meta.commit_sha.clone());
             Ok(())
         }
         async fn commit_exists(&self, sha: &str) -> Result<bool> {
             // If we have a watermark matching sha, consider it already indexed.
             let wm = self.watermark.lock().unwrap().clone();
-            Ok(wm.as_deref() == Some(sha) || self.seen_commits.lock().unwrap().contains(&sha.to_string()))
+            Ok(wm.as_deref() == Some(sha)
+                || self.seen_commits.lock().unwrap().contains(&sha.to_string()))
         }
         async fn put_hunks(&self, _: &RepoId, rows: &[StorageHunkRecord]) -> Result<()> {
             self.put_hunk_totals.lock().unwrap().push(rows.len());
             Ok(())
         }
-        async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> Result<()> { Ok(()) }
-        async fn clear_head_symbols(&self, _: &RepoId) -> Result<()> { Ok(()) }
-        async fn knn_hunks(&self, _: &RepoId, _: &[f32], _: u8, _: Option<&str>, _: Option<i64>) -> Result<Vec<HunkHit>> { Ok(vec![]) }
-        async fn bm25_hunks_by_text(&self, _: &RepoId, _: &str, _: u8, _: Option<&str>, _: Option<i64>) -> Result<Vec<HunkHit>> { Ok(vec![]) }
-        async fn bm25_hunks_by_semantic_text(&self, _: &RepoId, _: &str, _: u8, _: Option<&str>, _: Option<i64>) -> Result<Vec<HunkHit>> { Ok(vec![]) }
-        async fn bm25_hunks_by_symbol_name(&self, _: &RepoId, _: &str, _: u8, _: Option<&str>, _: Option<i64>) -> Result<Vec<HunkHit>> { Ok(vec![]) }
-        async fn bm25_hunks_by_historical_symbol(&self, _: &RepoId, _: &str, _: u8, _: Option<&str>, _: Option<i64>) -> Result<Vec<HunkHit>> { Ok(vec![]) }
-        async fn get_hunk_symbols(&self, _: &RepoId, _: HunkId) -> Result<Vec<HunkSymbol>> { Ok(vec![]) }
-        async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> { Ok(false) }
-        async fn record_blob_seen(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
-        async fn get_commit(&self, _: &RepoId, _: &str) -> Result<Option<CommitMeta>> { Ok(None) }
-        async fn get_hunks_for_file_in_commit(&self, _: &RepoId, _: &str, _: &str) -> Result<Vec<Hunk>> { Ok(vec![]) }
-        async fn get_neighboring_file_commits(&self, _: &RepoId, _: &str, _: &str, _: u8, _: u8) -> Result<Vec<(u32, CommitMeta)>> { Ok(vec![]) }
-        async fn get_index_metadata(&self, _: &RepoId) -> Result<StoredIndexMetadata> { Ok(StoredIndexMetadata::default()) }
-        async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> Result<()> { Ok(()) }
+        async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> Result<()> {
+            Ok(())
+        }
+        async fn clear_head_symbols(&self, _: &RepoId) -> Result<()> {
+            Ok(())
+        }
+        async fn knn_hunks(
+            &self,
+            _: &RepoId,
+            _: &[f32],
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<Vec<HunkHit>> {
+            Ok(vec![])
+        }
+        async fn bm25_hunks_by_text(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<Vec<HunkHit>> {
+            Ok(vec![])
+        }
+        async fn bm25_hunks_by_semantic_text(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<Vec<HunkHit>> {
+            Ok(vec![])
+        }
+        async fn bm25_hunks_by_symbol_name(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<Vec<HunkHit>> {
+            Ok(vec![])
+        }
+        async fn bm25_hunks_by_historical_symbol(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<Vec<HunkHit>> {
+            Ok(vec![])
+        }
+        async fn get_hunk_symbols(&self, _: &RepoId, _: HunkId) -> Result<Vec<HunkSymbol>> {
+            Ok(vec![])
+        }
+        async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> {
+            Ok(false)
+        }
+        async fn record_blob_seen(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn get_commit(&self, _: &RepoId, _: &str) -> Result<Option<CommitMeta>> {
+            Ok(None)
+        }
+        async fn get_hunks_for_file_in_commit(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<Hunk>> {
+            Ok(vec![])
+        }
+        async fn get_neighboring_file_commits(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: &str,
+            _: u8,
+            _: u8,
+        ) -> Result<Vec<(u32, CommitMeta)>> {
+            Ok(vec![])
+        }
+        async fn get_index_metadata(&self, _: &RepoId) -> Result<StoredIndexMetadata> {
+            Ok(StoredIndexMetadata::default())
+        }
+        async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> Result<()> {
+            Ok(())
+        }
     }
 
     fn hunk(sha: &str) -> Hunk {
@@ -348,10 +442,7 @@ mod tests {
     #[tokio::test]
     async fn coordinator_indexes_single_commit_end_to_end() {
         let storage = Arc::new(SpyStorage::default());
-        let coordinator = Coordinator::new(
-            storage.clone(),
-            Arc::new(ZeroEmbedder { dim: 4 }),
-        );
+        let coordinator = Coordinator::new(storage.clone(), Arc::new(ZeroEmbedder { dim: 4 }));
         let repo = RepoId::from_parts("sha", "/repo");
         let source = SingleCommitSource {
             sha: "abc".into(),
@@ -382,10 +473,7 @@ mod tests {
             watermark: Mutex::new(Some("abc".into())),
             ..Default::default()
         });
-        let coordinator = Coordinator::new(
-            storage.clone(),
-            Arc::new(ZeroEmbedder { dim: 4 }),
-        );
+        let coordinator = Coordinator::new(storage.clone(), Arc::new(ZeroEmbedder { dim: 4 }));
         let repo = RepoId::from_parts("sha", "/repo");
         let source = SingleCommitSource {
             sha: "abc".into(),

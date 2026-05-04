@@ -28,12 +28,14 @@ pub use index_metadata::{
     compose_hint, runtime_metadata_from, CompatibilityStatus, RuntimeIndexMetadata,
     StoredIndexMetadata,
 };
+pub use indexer::stages;
+pub use indexer::stages::{
+    AttributedHunk, CommitWatermark, EmbeddedHunk, HunkRecord as StageHunkRecord,
+};
 pub use indexer::{
     CommitSource, Indexer, IndexerReport, NullProgress, PhaseTimings, ProgressSink, SymbolSource,
     MAX_ATTRIBUTABLE_SOURCE_BYTES,
 };
-pub use indexer::stages;
-pub use indexer::stages::{AttributedHunk, CommitWatermark, EmbeddedHunk, HunkRecord as StageHunkRecord};
 pub use query::*;
 pub use retriever::{RankingWeights, Retriever};
 pub use storage::{CommitRecord, HunkHit, HunkId, HunkRecord, Storage, Vector};

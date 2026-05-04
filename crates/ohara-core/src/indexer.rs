@@ -253,7 +253,8 @@ impl Indexer {
         }
 
         self.progress.commit_done(total_commits, total_hunks);
-        self.progress.finish(total_commits, total_hunks, symbols.len());
+        self.progress
+            .finish(total_commits, total_hunks, symbols.len());
         Ok(IndexerReport {
             new_commits: total_commits,
             new_hunks: total_hunks,

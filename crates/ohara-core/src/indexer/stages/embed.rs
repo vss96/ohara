@@ -107,10 +107,7 @@ impl EmbedStage {
     /// Slice `texts` into chunks of `self.embed_batch`, embed each
     /// chunk, and concatenate results. Keeps peak-embed allocation
     /// bounded regardless of commit size.
-    async fn embed_in_chunks(
-        &self,
-        texts: &[String],
-    ) -> Result<Vec<Vec<f32>>> {
+    async fn embed_in_chunks(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let cap = self.embed_batch.max(1);
         let mut out = Vec::with_capacity(texts.len());
         for chunk in texts.chunks(cap) {
@@ -142,10 +139,8 @@ pub struct EmbeddedHunk {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexer::stages::{
-        attribute::AttributedHunk, hunk_chunk::HunkRecord,
-    };
     use crate::embed::EmbeddingProvider;
+    use crate::indexer::stages::{attribute::AttributedHunk, hunk_chunk::HunkRecord};
     use crate::types::Hunk;
     use crate::Result;
     use async_trait::async_trait;
@@ -178,10 +173,7 @@ mod tests {
         fn model_id(&self) -> &str {
             "counter"
         }
-        async fn embed_batch(
-            &self,
-            texts: &[String],
-        ) -> Result<Vec<Vec<f32>>> {
+        async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
             self.calls.lock().unwrap().push(texts.len());
             Ok(texts.iter().map(|_| vec![0.0_f32; self.dim]).collect())
         }
@@ -199,7 +191,11 @@ mod tests {
         });
         let stage = EmbedStage::new(embedder).with_embed_batch(2);
         let result = stage.run("commit message", &hunks).await.unwrap();
-        assert_eq!(result.hunks.len(), 6, "must produce one EmbeddedHunk per input");
+        assert_eq!(
+            result.hunks.len(),
+            6,
+            "must produce one EmbeddedHunk per input"
+        );
         let observed = calls.lock().unwrap().clone();
         // 7 texts / 2 = chunks [2, 2, 2, 1]
         assert_eq!(

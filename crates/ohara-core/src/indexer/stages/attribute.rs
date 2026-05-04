@@ -1,7 +1,9 @@
 //! Output type and stage implementation for the attribute stage.
 
 use super::hunk_chunk::HunkRecord;
-use crate::indexer::{AtomicSymbolExtractor, CommitSource, SymbolSource, MAX_ATTRIBUTABLE_SOURCE_BYTES};
+use crate::indexer::{
+    AtomicSymbolExtractor, CommitSource, SymbolSource, MAX_ATTRIBUTABLE_SOURCE_BYTES,
+};
 use crate::types::Symbol;
 use crate::Result;
 
@@ -152,10 +154,10 @@ mod tests {
 #[cfg(test)]
 mod stage_tests {
     use super::*;
-    use crate::indexer::{AtomicSymbolExtractor, MAX_ATTRIBUTABLE_SOURCE_BYTES};
     use crate::indexer::stages::hunk_chunk::HunkRecord;
+    use crate::indexer::{AtomicSymbolExtractor, MAX_ATTRIBUTABLE_SOURCE_BYTES};
     use crate::indexer::{CommitSource, SymbolSource};
-    use crate::types::{Hunk, CommitMeta, Symbol};
+    use crate::types::{CommitMeta, Hunk, Symbol};
     use crate::Result;
     use async_trait::async_trait;
 
@@ -234,7 +236,10 @@ mod stage_tests {
         .await
         .unwrap();
         assert_eq!(ah.len(), 1);
-        assert!(ah[0].symbols.is_none(), "deleted-file hunk must have symbols=None");
+        assert!(
+            ah[0].symbols.is_none(),
+            "deleted-file hunk must have symbols=None"
+        );
     }
 
     #[tokio::test]
@@ -252,6 +257,9 @@ mod stage_tests {
         .await
         .unwrap();
         assert_eq!(ah.len(), 1);
-        assert!(ah[0].symbols.is_none(), "oversized source must yield symbols=None");
+        assert!(
+            ah[0].symbols.is_none(),
+            "oversized source must yield symbols=None"
+        );
     }
 }
