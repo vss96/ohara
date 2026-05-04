@@ -184,6 +184,20 @@ impl RetrievalProfile {
         }
     }
 
+    /// Return whether a given lane is enabled for this profile.
+    ///
+    /// Plan 20: `RetrievalLane` impls call this method as their first
+    /// step and return `Ok(vec![])` when the result is `false`. This
+    /// keeps the coordinator dumb — it fires all lanes unconditionally.
+    pub fn is_lane_enabled(&self, lane: crate::retriever::LaneId) -> bool {
+        match lane {
+            crate::retriever::LaneId::Vec => self.vec_lane_enabled,
+            crate::retriever::LaneId::Bm25Text => self.text_lane_enabled,
+            crate::retriever::LaneId::Bm25HistSym => self.symbol_lane_enabled,
+            crate::retriever::LaneId::Bm25HeadSym => self.symbol_lane_enabled,
+        }
+    }
+
     /// Pick the profile for a parsed intent.
     pub fn for_intent(intent: QueryIntent) -> Self {
         match intent {

@@ -1,15 +1,62 @@
+//! Plan 20 — retrieval lane abstractions.
+//!
+//! Each lane encapsulates one candidate-gathering strategy (vector KNN,
+//! BM25-by-text, BM25-by-historical-symbol, BM25-by-head-symbol). The
+//! coordinator fires all enabled lanes via `join_all` and merges their
+//! results with Reciprocal Rank Fusion.
+//!
+//! Lane implementations live in sibling modules:
+//!   vec, bm25_text, bm25_hist_sym, bm25_head_sym.
+
+use crate::query::PatternQuery;
+use crate::storage::HunkHit;
+use crate::types::RepoId;
+use async_trait::async_trait;
+
 pub mod bm25_head_sym;
 pub mod bm25_hist_sym;
 pub mod bm25_text;
 pub mod vec;
 
+/// Stable identifier for each retrieval lane. Used by
+/// `RetrievalProfile::is_lane_enabled` so the coordinator can ask each lane
+/// whether its profile flag is set without knowing the concrete type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LaneId {
+    Vec,
+    Bm25Text,
+    Bm25HistSym,
+    Bm25HeadSym,
+}
+
+/// One retrieval strategy.
+///
+/// Implementors query their respective storage method and return an ordered
+/// `Vec<HunkHit>` from most to least relevant according to that lane's
+/// scoring function. The caller (coordinator) merges lanes via RRF —
+/// lane-internal scores are used only for the informational
+/// `HunkHit::similarity` field.
+///
+/// Each implementation checks
+/// `query.profile.is_lane_enabled(self.id())` as its first step and returns
+/// `Ok(vec![])` when the lane is disabled by the profile (option a — lanes
+/// self-gate). This keeps the coordinator dumb: it always fires all lanes
+/// via `join_all` and trusts disabled lanes to return empty without touching
+/// storage.
+#[async_trait]
+pub trait RetrievalLane: Send + Sync {
+    fn id(&self) -> LaneId;
+    async fn search(
+        &self,
+        query: &PatternQuery,
+        repo_id: &RepoId,
+        k: usize,
+    ) -> crate::Result<Vec<HunkHit>>;
+}
+
 #[cfg(test)]
 mod trait_object_tests {
     use super::*;
-    use crate::query::PatternQuery;
-    use crate::storage::HunkHit;
-    use crate::types::RepoId;
-    use async_trait::async_trait;
 
     struct DummyLane(LaneId);
 
