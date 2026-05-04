@@ -71,4 +71,18 @@ mod tests {
             assert_eq!(s.blob_sha, "deadbeef");
         }
     }
+
+    #[test]
+    fn extracts_class_and_method_declarations() {
+        let src = "class Foo {\n  bar() { return 1; }\n  baz(x) { return x; }\n}\n";
+        let syms = extract("a.js", src, "deadbeef").unwrap();
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"Foo"), "Foo class missing: {names:?}");
+        assert!(names.contains(&"bar"), "bar method missing: {names:?}");
+        assert!(names.contains(&"baz"), "baz method missing: {names:?}");
+        let foo = syms.iter().find(|s| s.name == "Foo").unwrap();
+        assert!(matches!(foo.kind, ohara_core::types::SymbolKind::Class));
+        let bar = syms.iter().find(|s| s.name == "bar").unwrap();
+        assert!(matches!(bar.kind, ohara_core::types::SymbolKind::Method));
+    }
 }
