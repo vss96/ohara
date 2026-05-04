@@ -14,7 +14,9 @@ use std::time::Instant;
 /// 2 MiB is large enough to cover every hand-written source file in
 /// the languages we support and small enough to keep tree-sitter's
 /// AST allocation bounded for vendor drops, generated bundles, and
-/// minified blobs.
+/// minified blobs. No CLI override today — operators who hit this
+/// cap can edit the constant and rebuild. A flag will be added if
+/// real workloads show a need.
 pub const MAX_ATTRIBUTABLE_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Source of commits + hunks. Implemented by `ohara-git` in a later task; defined
@@ -276,10 +278,8 @@ impl Indexer {
                                 size = source.len(),
                                 "skipping ExactSpan attribution for oversized source"
                             );
-                            // Header-only path: drop `source` here so
-                            // the giant string is freed before the next
-                            // iteration's allocation.
-                            drop(source);
+                            // Header-only path. `source` goes out of
+                            // scope at the end of this arm.
                             let inputs = crate::hunk_attribution::AttributionInputs {
                                 diff_text: &h.diff_text,
                                 symbols: None,
@@ -455,9 +455,13 @@ async fn embed_in_chunks(
         // takes `&[String]`; it already clones internally for
         // `spawn_blocking`, so this allocation is unavoidable
         // without changing the trait. Keeping it inside the loop
-        // means each iteration's clone is freed before the next
-        // chunk is fetched — `cap` is the upper bound on resident
-        // copies of input text at any moment.
+        // means each iteration's `Vec<String>` clone is freed
+        // before the next chunk is fetched, bounding the
+        // *embedder's* working set per call to `cap` strings.
+        // (The outer `texts: Vec<String>` in `Indexer::run` is
+        // still O(commit-size); a future task can move
+        // semantic-text construction inside this loop to also
+        // bound that.)
         let chunk_owned: Vec<String> = chunk.to_vec();
         let mut embs = embedder.embed_batch(&chunk_owned).await?;
         if embs.len() != chunk_owned.len() {
@@ -905,8 +909,8 @@ mod phase_timing_tests {
                 // rather than the previous "embed_batch returned empty".
                 // Both are sub-strings of "embed_batch returned".
                 assert!(
-                    msg.contains("embed_batch returned"),
-                    "expected embed_batch-mismatch diagnostic, got: {msg}"
+                    msg.contains("embed_batch returned") && msg.contains("vectors for"),
+                    "expected embed_batch length-mismatch diagnostic, got: {msg}"
                 );
             }
             other => panic!("expected OhraError::Embedding, got {other:?}"),
@@ -1343,6 +1347,125 @@ mod phase_timing_tests {
             calls.load(Ordering::SeqCst),
             0,
             "extractor must not be called for oversized sources"
+        );
+    }
+
+    #[tokio::test]
+    async fn embed_in_chunks_preserves_per_element_ordering() {
+        // Embedder returns a unique single-component vector per input
+        // (the input's index). After chunked embedding we must recover
+        // the same ordering — i.e. out[i] must be the embedding of
+        // texts[i], not someone else's chunk.
+        struct IndexedEmbedder;
+        #[async_trait]
+        impl crate::EmbeddingProvider for IndexedEmbedder {
+            fn dimension(&self) -> usize {
+                1
+            }
+            fn model_id(&self) -> &str {
+                "indexed"
+            }
+            async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+                Ok(texts
+                    .iter()
+                    .map(|t| vec![t.parse::<f32>().unwrap_or(-1.0)])
+                    .collect())
+            }
+        }
+
+        // texts[i] = "i", so out[i][0] must == i.
+        let texts: Vec<String> = (0..7).map(|i| format!("{i}")).collect();
+        let out = super::embed_in_chunks(&IndexedEmbedder, &texts, 3)
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 7);
+        for (i, v) in out.iter().enumerate() {
+            assert_eq!(v.len(), 1);
+            assert_eq!(v[0], i as f32, "out[{i}] should be embedding of texts[{i}]");
+        }
+    }
+
+    /// Plan 15 Task C.1 sibling: when `file_at_commit` returns a source
+    /// at or below `MAX_ATTRIBUTABLE_SOURCE_BYTES`, the indexer must
+    /// still hit the ExactSpan extraction path. Verified by giving a
+    /// counting extractor that records every call.
+    #[tokio::test]
+    async fn sub_cap_sources_still_hit_atomic_extraction() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingExtractor {
+            calls: std::sync::Arc<AtomicUsize>,
+        }
+        impl crate::indexer::AtomicSymbolExtractor for CountingExtractor {
+            fn extract(&self, _path: &str, _source: &str) -> Vec<Symbol> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Vec::new()
+            }
+        }
+
+        struct SmallSourceCommitSource {
+            commits: Vec<CommitMeta>,
+            hunks: Vec<Hunk>,
+            source_bytes: usize,
+        }
+        #[async_trait]
+        impl CommitSource for SmallSourceCommitSource {
+            async fn list_commits(&self, _: Option<&str>) -> Result<Vec<CommitMeta>> {
+                Ok(self.commits.clone())
+            }
+            async fn hunks_for_commit(&self, _: &str) -> Result<Vec<Hunk>> {
+                Ok(self.hunks.clone())
+            }
+            async fn file_at_commit(&self, _: &str, _: &str) -> Result<Option<String>> {
+                Ok(Some("x".repeat(self.source_bytes)))
+            }
+        }
+
+        struct ZeroEmbedder2;
+        #[async_trait]
+        impl crate::EmbeddingProvider for ZeroEmbedder2 {
+            fn dimension(&self) -> usize {
+                4
+            }
+            fn model_id(&self) -> &str {
+                "z"
+            }
+            async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+                Ok(texts.iter().map(|_| vec![0.0; 4]).collect())
+            }
+        }
+
+        let mut hunk = fake_hunk(
+            "deadbeef",
+            "--- a/src/small.rs\n+++ b/src/small.rs\n@@ -0,0 +1 @@\n+x\n",
+        );
+        hunk.file_path = "src/small.rs".into();
+        // 1 KiB — well under the 2 MiB cap.
+        let cs = SmallSourceCommitSource {
+            commits: vec![fake_commit("deadbeef")],
+            hunks: vec![hunk],
+            source_bytes: 1024,
+        };
+        let ss = FakeSymbolSource {
+            symbols: vec![],
+            sleep: std::time::Duration::ZERO,
+        };
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let extractor = std::sync::Arc::new(CountingExtractor {
+            calls: calls.clone(),
+        });
+
+        let indexer = Indexer::new(
+            std::sync::Arc::new(FakeStorage::new(std::time::Duration::ZERO)),
+            std::sync::Arc::new(ZeroEmbedder2),
+        )
+        .with_atomic_symbol_extractor(extractor);
+        let id = RepoId::from_parts("deadbeef", "/x");
+        indexer.run(&id, &cs, &ss).await.unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "extractor must be called exactly once for the in-bounds hunk"
         );
     }
 }
