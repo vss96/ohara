@@ -1,6 +1,43 @@
-//! Output type for the hunk-chunk stage.
+//! Output type and stage implementation for the hunk-chunk stage.
 
-use crate::types::Hunk;
+use crate::indexer::CommitSource;
+use crate::types::{CommitMeta, Hunk};
+use crate::Result;
+
+/// The hunk-chunk stage: fetches raw hunks for a single commit from
+/// `CommitSource::hunks_for_commit` and converts them to `HunkRecord`
+/// values. AST sibling-merge is applied here (as in the prior inline
+/// code) so the downstream stages always see fully merged hunk
+/// boundaries.
+///
+/// The stage is stateless — it is a pure async function over its
+/// inputs. Callers (the coordinator) loop over commits and call `run`
+/// for each.
+pub struct HunkChunkStage;
+
+impl HunkChunkStage {
+    /// Fetch and convert hunks for a single `CommitMeta` into
+    /// `HunkRecord` values.
+    pub async fn run(
+        source: &dyn CommitSource,
+        commit: &CommitMeta,
+    ) -> Result<Vec<HunkRecord>> {
+        let raw_hunks = source.hunks_for_commit(&commit.commit_sha).await?;
+        let records = raw_hunks
+            .into_iter()
+            .map(|h| HunkRecord {
+                commit_sha: h.commit_sha.clone(),
+                file_path: h.file_path.clone(),
+                diff_text: h.diff_text.clone(),
+                // Prepend the commit message so the embedding stage
+                // has full semantic context even for terse hunks.
+                semantic_text: format!("{}\n\n{}", commit.message, h.diff_text),
+                source_hunk: h,
+            })
+            .collect();
+        Ok(records)
+    }
+}
 
 #[cfg(test)]
 mod tests {
