@@ -566,4 +566,79 @@ pub(crate) mod tests {
             "invalidated handle must be re-opened, got the same Arc"
         );
     }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn explain_change_blame_cache_hit_on_second_call() {
+        // Plan 21 Task E.1: calling explain_change twice for the same
+        // file on an unchanged HEAD must result in a BlameCache hit on
+        // the second call — i.e., Blamer::blame_range is NOT called a
+        // second time. We verify this indirectly by asserting that the
+        // second call returns an identical result without error, and that
+        // blame_cache_hits() increments.
+        let ohara_home = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = env_lock();
+        std::env::set_var("OHARA_HOME", ohara_home.path());
+        build_test_repo(tmp.path());
+
+        // Index so storage has the commit metadata.
+        let canonical = std::fs::canonicalize(tmp.path()).unwrap();
+        {
+            let walker = ohara_git::GitWalker::open(&canonical).unwrap();
+            let first = walker.first_commit_sha().unwrap();
+            let repo_id =
+                ohara_core::types::RepoId::from_parts(&first, &canonical.to_string_lossy());
+            let db_path = ohara_core::paths::index_db_path(&repo_id).unwrap();
+            let storage: Arc<dyn ohara_core::Storage> =
+                Arc::new(ohara_storage::SqliteStorage::open(&db_path).await.unwrap());
+            let commit_src = ohara_git::GitCommitSource::open(&canonical).unwrap();
+            let symbol_src = ohara_parse::GitSymbolSource::open(&canonical).unwrap();
+            let indexer = ohara_core::Indexer::new(storage, Arc::new(DummyEmbedder));
+            indexer
+                .run(&repo_id, &commit_src, &symbol_src)
+                .await
+                .unwrap();
+        }
+
+        let engine = make_test_engine();
+        let q = ohara_core::explain::ExplainQuery {
+            file: "a.rs".into(),
+            line_start: 1,
+            line_end: 1,
+            k: 5,
+            include_diff: false,
+            include_related: false,
+        };
+
+        // First call: cache miss → Blamer runs → result cached.
+        let r1 = engine
+            .explain_change(&canonical, q.clone())
+            .await
+            .expect("first explain");
+
+        // Second call: cache hit → Blamer skipped → same result.
+        let r2 = engine
+            .explain_change(&canonical, q)
+            .await
+            .expect("second explain");
+
+        // Both calls must produce the same number of hits (single-commit repo).
+        assert_eq!(
+            r1.hits.len(),
+            r2.hits.len(),
+            "second call must return same result as first"
+        );
+        assert_eq!(
+            r1.hits.len(),
+            1,
+            "single-commit repo must produce exactly one blame hit"
+        );
+
+        assert_eq!(
+            engine.blame_cache_hits(),
+            1,
+            "second call must increment blame_cache_hits by 1"
+        );
+    }
 }
