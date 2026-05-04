@@ -1,0 +1,14 @@
+{
+  "name": "vss96",
+  "owner": {
+    "name": "Vikas"
+  },
+  "description": "Plugins by vss96",
+  "plugins": [
+    {
+      "name": "ohara",
+      "source": "./plugins/ohara",
+      "description": "Local-first git-history lineage engine. Adds the ohara MCP server (find_pattern + explain_change) plus skills teaching when to use lineage queries vs grep, and how to manage the index lifecycle."
+    }
+  ]
+}

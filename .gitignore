@@ -2,6 +2,9 @@
 **/*.rs.bk
 .DS_Store
 
+# Git worktrees for parallel branch work
+/.worktrees/
+
 # Build artifacts under fixtures (the repos themselves are scripted, not committed)
 /fixtures/*/repo
 fixtures/medium/repo/
@@ -25,5 +28,8 @@ fixtures/medium/repo/
 # Per-developer Claude Code state (settings, sessions, and ruflo MCP scaffolding)
 .claude/
 .mcp.json
+# Exception: the Claude Code plugin's MCP entry must ship — it registers the
+# ohara stdio server when users install the plugin from the marketplace.
+!plugins/ohara/.mcp.json
 CLAUDE.md
 /docs-book/book

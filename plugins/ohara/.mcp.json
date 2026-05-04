@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ohara": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/ohara-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}
