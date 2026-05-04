@@ -6,22 +6,48 @@ use std::sync::{Arc, Mutex};
 ///
 /// Thread-safe: wraps the inner [`LruCache`] in a [`Mutex`] so it can be
 /// shared across async tasks via `Arc<EmbeddingCache>`.
+///
+/// One cache instance is scoped to a single model id; do not share across models.
 pub struct EmbeddingCache {
     model_id: String,
     inner: Mutex<LruCache<[u8; 32], Arc<Vec<f32>>>>,
 }
 
 impl EmbeddingCache {
-    pub fn new(_model_id: impl Into<String>, _capacity: usize) -> Self {
-        todo!("EmbeddingCache::new not yet implemented")
+    /// Create a new cache for `model_id` with the given LRU `capacity`.
+    ///
+    /// If `capacity` is 0 it is promoted to 1 so the `NonZeroUsize`
+    /// constructor cannot fail.  The `expect` below documents that invariant
+    /// rather than recovering from an actual runtime condition.
+    #[allow(clippy::expect_used)]
+    // INVARIANT: capacity.max(1) >= 1, so NonZeroUsize::new always succeeds here.
+    pub fn new(model_id: impl Into<String>, capacity: usize) -> Self {
+        let cap = NonZeroUsize::new(capacity.max(1)).expect("capacity is non-zero");
+        Self {
+            model_id: model_id.into(),
+            inner: Mutex::new(LruCache::new(cap)),
+        }
     }
 
-    pub fn get(&self, _text: &str) -> Option<Arc<Vec<f32>>> {
-        todo!("EmbeddingCache::get not yet implemented")
+    fn cache_key(&self, text: &str) -> [u8; 32] {
+        let input = format!("{}:{}", self.model_id, text);
+        *blake3::hash(input.as_bytes()).as_bytes()
     }
 
-    pub fn put(&self, _text: &str, _value: Arc<Vec<f32>>) {
-        todo!("EmbeddingCache::put not yet implemented")
+    /// Look up `text` in the cache; returns `None` on miss or poisoned lock.
+    pub fn get(&self, text: &str) -> Option<Arc<Vec<f32>>> {
+        let key = self.cache_key(text);
+        let mut g = self.inner.lock().ok()?;
+        g.get(&key).cloned()
+    }
+
+    /// Insert `value` for `text`, evicting the LRU entry if at capacity.
+    /// Silently no-ops on a poisoned lock so the caller re-embeds on next access.
+    pub fn put(&self, text: &str, value: Arc<Vec<f32>>) {
+        let key = self.cache_key(text);
+        if let Ok(mut g) = self.inner.lock() {
+            g.put(key, value);
+        }
     }
 }
 
