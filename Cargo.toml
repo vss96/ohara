@@ -8,6 +8,7 @@ members = [
   "crates/ohara-parse",
   "crates/ohara-cli",
   "crates/ohara-mcp",
+  "crates/ohara-engine",
   "tests/perf",
 ]
 

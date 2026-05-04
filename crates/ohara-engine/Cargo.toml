@@ -1,0 +1,18 @@
+[package]
+name = "ohara-engine"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+ohara-core = { path = "../ohara-core" }
+ohara-embed = { path = "../ohara-embed" }
+ohara-git = { path = "../ohara-git" }
+thiserror.workspace = true
+tokio.workspace = true
+
+[features]
+default = []
+coreml = ["ohara-embed/coreml"]
+cuda = ["ohara-embed/cuda"]
