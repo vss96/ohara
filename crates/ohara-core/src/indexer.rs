@@ -1,3 +1,5 @@
+pub mod stages;
+
 use crate::index_metadata::RuntimeIndexMetadata;
 use crate::storage::{CommitRecord, HunkRecord};
 use crate::types::{CommitMeta, Hunk, RepoId, Symbol};
@@ -1467,5 +1469,42 @@ mod phase_timing_tests {
             1,
             "extractor must be called exactly once for the in-bounds hunk"
         );
+    }
+}
+
+#[cfg(test)]
+mod stage_type_tests {
+    #[test]
+    fn stage_types_compose_into_pipeline_chain() {
+        use crate::stages::{AttributedHunk, EmbeddedHunk, HunkRecord};
+        use crate::types::{ChangeKind, Hunk};
+
+        // Verify the chain compiles and the helper methods are reachable.
+        let hunk = Hunk {
+            commit_sha: "abc".into(),
+            file_path: "src/lib.rs".into(),
+            language: None,
+            change_kind: ChangeKind::Added,
+            diff_text: "+fn foo() {}\n".into(),
+        };
+        let record = HunkRecord {
+            commit_sha: "abc".into(),
+            file_path: "src/lib.rs".into(),
+            diff_text: "+fn foo() {}\n".into(),
+            semantic_text: "fn foo() {}".into(),
+            source_hunk: hunk,
+        };
+        let attributed = AttributedHunk {
+            record,
+            symbols: None,
+            attributed_semantic_text: None,
+        };
+        assert_eq!(attributed.effective_semantic_text(), "fn foo() {}");
+        let embedded = EmbeddedHunk {
+            attributed,
+            embedding: vec![0.1, 0.2, 0.3, 0.4],
+        };
+        assert_eq!(embedded.embedding.len(), 4);
+        let _ = embedded; // consumed — verifies ownership model
     }
 }
