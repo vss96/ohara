@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use ohara_core::types::{Symbol, SymbolKind};
-use tree_sitter::{Parser, Query, QueryCursor};
+use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
 
 const QUERY_SRC: &str = include_str!("../../queries/rust.scm");
 
 pub fn extract(file_path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symbol>> {
     let mut parser = Parser::new();
-    let language = tree_sitter_rust::language();
+    let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
     parser
         .set_language(&language)
         .context("set rust language")?;
@@ -15,7 +15,8 @@ pub fn extract(file_path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symb
     let mut cursor = QueryCursor::new();
 
     let mut out = Vec::new();
-    for m in cursor.matches(&query, tree.root_node(), source.as_bytes()) {
+    let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    while let Some(m) = matches.next() {
         let mut name: Option<String> = None;
         let mut kind: Option<SymbolKind> = None;
         let mut node_range: Option<(usize, usize)> = None;
