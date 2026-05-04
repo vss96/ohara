@@ -147,7 +147,7 @@ mod tests {
     };
     use crate::embed::EmbeddingProvider;
     use crate::types::Hunk;
-    use crate::{OhraError, Result};
+    use crate::Result;
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
 

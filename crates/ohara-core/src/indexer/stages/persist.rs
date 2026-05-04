@@ -74,9 +74,9 @@ mod tests {
     use crate::indexer::stages::hunk_chunk::HunkRecord;
     use crate::index_metadata::StoredIndexMetadata;
     use crate::query::IndexStatus;
-    use crate::storage::{CommitRecord, HunkRecord as StorageHunkRecord, HunkHit, HunkId, StorageMetricsSnapshot};
+    use crate::storage::{CommitRecord, HunkRecord as StorageHunkRecord, HunkHit, HunkId};
     use crate::types::{CommitMeta, Hunk, RepoId, Symbol, HunkSymbol};
-    use crate::{OhraError, Result, Storage};
+    use crate::{Result, Storage};
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
 

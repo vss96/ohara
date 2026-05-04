@@ -6,10 +6,30 @@ use crate::indexer::stages::{
 };
 use crate::indexer::stages::attribute::AttributedHunk;
 use crate::indexer::stages::commit_walk::CommitWatermark;
-use crate::indexer::{AtomicSymbolExtractor, CommitSource, NullAtomicSymbolExtractor, SymbolSource};
+use crate::indexer::{AtomicSymbolExtractor, CommitSource, NullAtomicSymbolExtractor, PhaseTimings, SymbolSource};
 use crate::types::{CommitMeta, RepoId};
 use crate::{EmbeddingProvider, Result, Storage};
 use std::sync::Arc;
+use std::time::Instant;
+
+/// Counts and phase timings returned by `Coordinator::run_timed`.
+/// Used by `Indexer::run` to populate `IndexerReport` after delegating
+/// the per-commit pipeline to the coordinator.
+#[derive(Debug, Default)]
+pub struct CoordinatorResult {
+    /// Number of commits that were newly indexed (not already in storage).
+    pub new_commits: usize,
+    /// Total hunk count across all newly indexed commits.
+    pub new_hunks: usize,
+    /// Total diff bytes summed across newly indexed hunks.
+    pub total_diff_bytes: u64,
+    /// Total added lines summed across newly indexed hunks.
+    pub total_added_lines: u64,
+    /// Accumulated phase timings measured by the coordinator.
+    pub timings: PhaseTimings,
+    /// SHA of the last commit processed (for watermark advance).
+    pub latest_sha: Option<String>,
+}
 
 /// Drives the 5-stage indexer pipeline per commit.
 ///
@@ -47,12 +67,57 @@ impl Coordinator {
 
     /// Run the full 5-stage pipeline for all commits in `source` that
     /// follow the resume watermark.
+    ///
+    /// Returns `()` — use `run_timed` when `IndexerReport` fields are needed.
     pub async fn run(
         &self,
         repo: &RepoId,
         commit_source: &dyn CommitSource,
         symbol_source: &dyn SymbolSource,
     ) -> Result<()> {
+        self.run_timed_with_extractor(
+            repo,
+            commit_source,
+            symbol_source,
+            &NullAtomicSymbolExtractor,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Run the 5-stage pipeline and return phase timing + counts for
+    /// report hydration by `Indexer::run`.
+    ///
+    /// `symbol_extractor` is used by the attribute stage for per-hunk
+    /// ExactSpan attribution. Pass `NullAtomicSymbolExtractor` when no
+    /// tree-sitter extractor is wired.
+    pub async fn run_timed(
+        &self,
+        repo: &RepoId,
+        commit_source: &dyn CommitSource,
+        symbol_source: &dyn SymbolSource,
+    ) -> Result<CoordinatorResult> {
+        self.run_timed_with_extractor(
+            repo,
+            commit_source,
+            symbol_source,
+            &NullAtomicSymbolExtractor,
+        )
+        .await
+    }
+
+    /// Like `run_timed` but accepts a custom `AtomicSymbolExtractor`
+    /// for ExactSpan attribution. Used by `Indexer::run` to pass the
+    /// configured `symbol_extractor` through to the attribute stage.
+    pub async fn run_timed_with_extractor(
+        &self,
+        repo: &RepoId,
+        commit_source: &dyn CommitSource,
+        symbol_source: &dyn SymbolSource,
+        extractor: &dyn AtomicSymbolExtractor,
+    ) -> Result<CoordinatorResult> {
+        let mut result = CoordinatorResult::default();
+
         // Stage 0: determine resume watermark from index status.
         let status = self.storage.get_index_status(repo).await?;
         let watermark = status
@@ -60,47 +125,53 @@ impl Coordinator {
             .as_deref()
             .map(CommitWatermark::new);
 
-        // Stage 1: commit walk.
+        // Stage 1: commit walk (timed).
+        let walk_start = Instant::now();
         let commits = CommitWalkStage::run(commit_source, watermark.as_ref()).await?;
-
-        let embed_stage = EmbedStage::new(self.embedder.clone())
-            .with_embed_batch(self.embed_batch);
-
-        // Null extractor — binaries wire the real tree-sitter extractor
-        // via `Indexer::with_atomic_symbol_extractor`.
-        let extractor = NullAtomicSymbolExtractor;
+        result.timings.commit_walk_ms = walk_start.elapsed().as_millis() as u64;
 
         for commit in &commits {
             // Skip commits that are already indexed.
             if self.storage.commit_exists(&commit.commit_sha).await? {
                 tracing::debug!(sha = %commit.commit_sha, "plan-19: skipping already-indexed commit");
+                result.latest_sha = Some(commit.commit_sha.clone());
                 continue;
             }
-            self.run_commit(
+            self.run_commit_timed(
                 repo,
                 commit,
                 commit_source,
                 symbol_source,
-                &embed_stage,
-                &extractor,
+                extractor,
+                &mut result,
             )
             .await?;
+            result.latest_sha = Some(commit.commit_sha.clone());
         }
-        Ok(())
+        Ok(result)
     }
 
-    /// Run stages 2-5 for a single commit.
-    async fn run_commit(
+    /// Run stages 2-5 for a single commit, accumulating timing and counts.
+    async fn run_commit_timed(
         &self,
         repo: &RepoId,
         commit: &CommitMeta,
         commit_source: &dyn CommitSource,
         symbol_source: &dyn SymbolSource,
-        _embed_stage: &EmbedStage,
         extractor: &dyn AtomicSymbolExtractor,
+        result: &mut CoordinatorResult,
     ) -> Result<()> {
-        // Stage 2: hunk chunk.
+        // Stage 2: hunk chunk (timed).
+        let extract_start = Instant::now();
         let records = HunkChunkStage::run(commit_source, commit).await?;
+        result.timings.diff_extract_ms += extract_start.elapsed().as_millis() as u64;
+
+        // Accumulate diff metrics for inflation-ratio diagnostic.
+        for rec in &records {
+            result.total_diff_bytes += rec.diff_text.len() as u64;
+            result.total_added_lines += count_added_lines_stage(&rec.diff_text);
+        }
+        result.new_hunks += records.len();
 
         // Stage 3: attribute.
         let attributed = AttributeStage::run(
@@ -112,8 +183,21 @@ impl Coordinator {
         )
         .await?;
 
-        // Stages 4-5 share a helper so they can be tested in isolation.
-        self.run_from_attributed(repo, commit, attributed).await
+        // Stage 4: embed (timed). Create the embed stage here rather than
+        // accepting it as a parameter to keep argument count within limits.
+        let embed_stage = EmbedStage::new(self.embedder.clone())
+            .with_embed_batch(self.embed_batch);
+        let embed_start = Instant::now();
+        let embed_output = embed_stage.run(&commit.message, &attributed).await?;
+        result.timings.embed_ms += embed_start.elapsed().as_millis() as u64;
+
+        // Stage 5: persist (timed).
+        let write_start = Instant::now();
+        PersistStage::run(repo, commit, embed_output, self.storage.as_ref()).await?;
+        result.timings.storage_write_ms += write_start.elapsed().as_millis() as u64;
+
+        result.new_commits += 1;
+        Ok(())
     }
 
     /// Run stages 4 (embed) and 5 (persist) given pre-built
@@ -139,15 +223,22 @@ impl Coordinator {
     }
 }
 
+/// Count "+"-prefixed lines in a unified-diff snippet (excludes `+++` headers).
+fn count_added_lines_stage(diff_text: &str) -> u64 {
+    diff_text
+        .lines()
+        .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
+        .count() as u64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexer::stages::commit_walk::CommitWatermark;
     use crate::index_metadata::StoredIndexMetadata;
     use crate::query::IndexStatus;
-    use crate::storage::{CommitRecord, HunkRecord as StorageHunkRecord, HunkHit, HunkId, StorageMetricsSnapshot};
+    use crate::storage::{CommitRecord, HunkRecord as StorageHunkRecord, HunkHit, HunkId};
     use crate::types::{CommitMeta, Hunk, HunkSymbol, RepoId, Symbol};
-    use crate::{EmbeddingProvider, OhraError, Result, Storage};
+    use crate::{EmbeddingProvider, Result, Storage};
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
 
