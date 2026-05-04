@@ -74,8 +74,7 @@ async fn explain_change_returns_one_blame_range_for_single_commit_repo() {
     {
         let walker = ohara_git::GitWalker::open(&canonical).unwrap();
         let first = walker.first_commit_sha().unwrap();
-        let repo_id =
-            ohara_core::types::RepoId::from_parts(&first, &canonical.to_string_lossy());
+        let repo_id = ohara_core::types::RepoId::from_parts(&first, &canonical.to_string_lossy());
         let db_path = ohara_core::paths::index_db_path(&repo_id).unwrap();
         let storage: Arc<dyn ohara_core::Storage> =
             Arc::new(ohara_storage::SqliteStorage::open(&db_path).await.unwrap());
@@ -257,8 +256,7 @@ async fn explain_change_blame_cache_hit_on_second_call() {
     {
         let walker = ohara_git::GitWalker::open(&canonical).unwrap();
         let first = walker.first_commit_sha().unwrap();
-        let repo_id =
-            ohara_core::types::RepoId::from_parts(&first, &canonical.to_string_lossy());
+        let repo_id = ohara_core::types::RepoId::from_parts(&first, &canonical.to_string_lossy());
         let db_path = ohara_core::paths::index_db_path(&repo_id).unwrap();
         let storage: Arc<dyn ohara_core::Storage> =
             Arc::new(ohara_storage::SqliteStorage::open(&db_path).await.unwrap());

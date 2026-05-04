@@ -288,8 +288,10 @@ impl Storage for SqliteStorage {
             );
             let mut stmt = c.prepare(&sql)?;
             // Bind each sha in order.
-            let params: Vec<&dyn rusqlite::ToSql> =
-                shas_owned.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+            let params: Vec<&dyn rusqlite::ToSql> = shas_owned
+                .iter()
+                .map(|s| s as &dyn rusqlite::ToSql)
+                .collect();
             let rows = stmt.query_map(params.as_slice(), |row| {
                 let commit_sha: String = row.get(0)?;
                 let parent_sha: Option<String> = row.get(1)?;

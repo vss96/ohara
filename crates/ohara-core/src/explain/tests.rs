@@ -75,12 +75,7 @@ impl FakeStorageOrch {
                 diff_text: diff_text.into(),
             });
     }
-    fn seed_neighbours(
-        &mut self,
-        file: &str,
-        anchor: &str,
-        neighbours: Vec<(u32, CommitMeta)>,
-    ) {
+    fn seed_neighbours(&mut self, file: &str, anchor: &str, neighbours: Vec<(u32, CommitMeta)>) {
         self.neighbours
             .insert((file.to_string(), anchor.to_string()), neighbours);
     }

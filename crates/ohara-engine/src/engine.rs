@@ -283,8 +283,9 @@ impl RetrievalEngine {
 
         // Cache hit path — skip Blamer entirely.
         if let Some(ref hash) = content_hash_opt {
-            if let Some(cached) =
-                self.blame_cache.get(&handle.repo_id, &query.file, hash.as_str())
+            if let Some(cached) = self
+                .blame_cache
+                .get(&handle.repo_id, &query.file, hash.as_str())
             {
                 self.blame_cache_hit_count.fetch_add(1, Ordering::Relaxed);
                 tracing::debug!(file = %query.file, "explain_change: BlameCache hit");
@@ -398,10 +399,12 @@ fn assemble_explain_result(
     query: &ohara_core::explain::ExplainQuery,
 ) -> ExplainResult {
     const K_MAX: u8 = 20;
-    hydrated.hits.sort_by(|a, b| match b.commit_date.cmp(&a.commit_date) {
-        std::cmp::Ordering::Equal => a.commit_sha.cmp(&b.commit_sha),
-        other => other,
-    });
+    hydrated
+        .hits
+        .sort_by(|a, b| match b.commit_date.cmp(&a.commit_date) {
+            std::cmp::Ordering::Equal => a.commit_sha.cmp(&b.commit_sha),
+            other => other,
+        });
     let k = query.k.clamp(1, K_MAX) as usize;
     hydrated.hits.truncate(k);
     let commits_unique = hydrated.hits.len();
@@ -417,7 +420,6 @@ fn assemble_explain_result(
         },
     }
 }
-
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

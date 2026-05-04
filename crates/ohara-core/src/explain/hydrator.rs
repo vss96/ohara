@@ -251,8 +251,8 @@ mod tests {
     use crate::explain::{BlameRange, ExplainQuery};
     use crate::index_metadata::StoredIndexMetadata;
     use crate::query::IndexStatus;
-    use crate::storage::{CommitRecord, HunkHit, HunkRecord, StorageMetricsSnapshot};
-    use crate::types::{ChangeKind, CommitMeta, Hunk, HunkSymbol, RepoId, Symbol};
+    use crate::storage::{CommitRecord, HunkHit, HunkRecord};
+    use crate::types::{CommitMeta, Hunk, HunkSymbol, RepoId, Symbol};
     use async_trait::async_trait;
     use std::collections::HashMap;
 
@@ -371,11 +371,7 @@ mod tests {
         async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
             Ok(())
         }
-        async fn get_commit(
-            &self,
-            _: &RepoId,
-            sha: &str,
-        ) -> crate::Result<Option<CommitMeta>> {
+        async fn get_commit(&self, _: &RepoId, sha: &str) -> crate::Result<Option<CommitMeta>> {
             Ok(self.commits.get(sha).cloned())
         }
         async fn get_hunks_for_file_in_commit(
@@ -396,10 +392,7 @@ mod tests {
         ) -> crate::Result<Vec<(u32, CommitMeta)>> {
             Ok(Vec::new())
         }
-        async fn get_index_metadata(
-            &self,
-            _: &RepoId,
-        ) -> crate::Result<StoredIndexMetadata> {
+        async fn get_index_metadata(&self, _: &RepoId) -> crate::Result<StoredIndexMetadata> {
             Ok(StoredIndexMetadata::default())
         }
         async fn put_index_metadata(
@@ -447,7 +440,10 @@ mod tests {
             (h.coverage - 1.0_f32).abs() < 1e-6,
             "full coverage when all SHAs are indexed"
         );
-        assert!(h.limitation.is_none(), "no limitation when nothing is skipped");
+        assert!(
+            h.limitation.is_none(),
+            "no limitation when nothing is skipped"
+        );
         assert!(h.enrichment_limitation.is_none());
     }
 

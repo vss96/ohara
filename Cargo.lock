@@ -2230,6 +2230,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "git2",
  "hex",
  "serde",
  "serde_json",
