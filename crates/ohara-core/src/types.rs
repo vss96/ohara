@@ -184,6 +184,39 @@ pub struct Symbol {
     pub source_text: String,
 }
 
+/// Plan 21: opaque newtype wrapping the hex representation of a git blob
+/// OID. Used as the file-content key in `BlameCache`.
+///
+/// Two `ContentHash` values are equal iff they were produced from the same
+/// blob OID — which means the file's byte content is identical. The cache
+/// provides natural invalidation: a file whose content changes gets a new
+/// blob OID, producing a cache miss and a fresh `Blamer::blame_range` call.
+///
+/// `from_blob_oid` is the only constructor for production callers (where a
+/// real `git2::Oid` is available). `from_hex` exists for test and non-git
+/// callers that hold a pre-computed hex string.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ContentHash(String);
+
+impl ContentHash {
+    /// Construct from a git blob OID. The resulting hex string is 40 ASCII
+    /// characters (SHA-1) — the length guaranteed by `git2::Oid`.
+    pub fn from_blob_oid(oid: git2::Oid) -> Self {
+        Self(oid.to_string())
+    }
+
+    /// Construct from an already-computed hex string. No validation is
+    /// performed — callers are responsible for passing a valid hex OID.
+    pub fn from_hex(hex: &str) -> Self {
+        Self(hex.to_string())
+    }
+
+    /// Borrow the underlying hex string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 #[cfg(test)]
 mod content_hash_tests {
     use super::*;

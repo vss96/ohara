@@ -15,6 +15,7 @@ chrono.workspace = true
 sha2.workspace = true
 hex.workspace = true
 async-trait = "0.1"
+git2.workspace = true
 # tokio::join! is the cleanest way to gather the three retrieval lanes
 # concurrently. We only pull the `macros` feature so ohara-core stays
 # runtime-agnostic — the macro expands to plain futures, and the test

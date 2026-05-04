@@ -35,4 +35,7 @@ pub use indexer::{
 pub use query::*;
 pub use retriever::{RankingWeights, Retriever};
 pub use storage::{CommitRecord, HunkHit, HunkId, HunkRecord, Storage, Vector};
-pub use types::*;
+pub use types::{
+    AttributionKind, ChangeKind, CommitMeta, ContentHash, Hunk, HunkSymbol, Provenance, RepoId,
+    Symbol, SymbolKind,
+};
