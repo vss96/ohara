@@ -109,9 +109,8 @@ async fn daemon_lifecycle_ping_query_invalidate_query_shutdown() {
     let server_engine = engine.clone();
     let server_stop = stop.clone();
     let sock_for_task = sock.clone();
-    let listener = tokio::spawn(async move {
-        serve_unix(server_engine, &sock_for_task, server_stop).await
-    });
+    let listener =
+        tokio::spawn(async move { serve_unix(server_engine, &sock_for_task, server_stop).await });
 
     // Wait up to 1 s for the socket file to appear.
     for _ in 0..50 {
@@ -199,10 +198,7 @@ async fn daemon_lifecycle_ping_query_invalidate_query_shutdown() {
         })
         .await
         .expect("shutdown call");
-    assert!(
-        resp.error.is_none(),
-        "shutdown must not error: {resp:?}"
-    );
+    assert!(resp.error.is_none(), "shutdown must not error: {resp:?}");
 
     tokio::time::timeout(Duration::from_secs(2), listener)
         .await
