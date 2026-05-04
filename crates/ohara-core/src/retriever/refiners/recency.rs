@@ -34,30 +34,20 @@ impl RecencyRefiner {
 
 #[async_trait]
 impl ScoreRefiner for RecencyRefiner {
-    async fn refine(
-        &self,
-        _query_text: &str,
-        hits: Vec<HunkHit>,
-    ) -> crate::Result<Vec<HunkHit>> {
+    async fn refine(&self, _query_text: &str, hits: Vec<HunkHit>) -> crate::Result<Vec<HunkHit>> {
         if hits.is_empty() {
             return Ok(hits);
         }
         let mut scored: Vec<(HunkHit, f32)> = hits
             .into_iter()
             .map(|h| {
-                let age_days =
-                    ((self.now_unix - h.commit.ts).max(0) as f32) / 86_400.0;
-                let recency =
-                    (-age_days / self.weights.recency_half_life_days).exp();
-                let combined = h.similarity
-                    * (1.0 + self.weights.recency_weight * recency);
+                let age_days = ((self.now_unix - h.commit.ts).max(0) as f32) / 86_400.0;
+                let recency = (-age_days / self.weights.recency_half_life_days).exp();
+                let combined = h.similarity * (1.0 + self.weights.recency_weight * recency);
                 (h, combined)
             })
             .collect();
-        scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         Ok(scored.into_iter().map(|(h, _)| h).collect())
     }
 }
@@ -72,8 +62,21 @@ mod tests {
         use crate::types::{ChangeKind, CommitMeta, Hunk};
         HunkHit {
             hunk_id: id,
-            hunk: Hunk { commit_sha: "x".into(), file_path: "f.rs".into(), language: None, change_kind: ChangeKind::Added, diff_text: "diff".into() },
-            commit: CommitMeta { commit_sha: "x".into(), parent_sha: None, is_merge: false, author: None, ts, message: "m".into() },
+            hunk: Hunk {
+                commit_sha: "x".into(),
+                file_path: "f.rs".into(),
+                language: None,
+                change_kind: ChangeKind::Added,
+                diff_text: "diff".into(),
+            },
+            commit: CommitMeta {
+                commit_sha: "x".into(),
+                parent_sha: None,
+                is_merge: false,
+                author: None,
+                ts,
+                message: "m".into(),
+            },
             similarity: 1.0,
         }
     }
@@ -101,12 +104,11 @@ mod tests {
     async fn recency_refiner_zero_weight_preserves_input_order() {
         let now = 1_700_000_000_i64;
         let day = 86_400_i64;
-        let hits = vec![
-            make_hit(10, now - day),
-            make_hit(11, now - 200 * day),
-        ];
-        let mut weights = RankingWeights::default();
-        weights.recency_weight = 0.0; // disable tie-break
+        let hits = vec![make_hit(10, now - day), make_hit(11, now - 200 * day)];
+        let weights = RankingWeights {
+            recency_weight: 0.0, // disable tie-break
+            ..RankingWeights::default()
+        };
         let refiner = RecencyRefiner::new(weights, now);
         let out = refiner.refine("q", hits).await.unwrap();
         assert_eq!(out[0].hunk_id, 10);
