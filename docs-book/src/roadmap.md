@@ -11,42 +11,22 @@
 | **v0.5** | `explain_change` | Plan 5 — second MCP tool, deterministic git-blame-backed lookup of "why does THIS code look the way it does?". |
 | **v0.5.1** | Polish | Progress bar, abort-resume hardening, `ohara update` self-update via axoupdater. |
 | **v0.6.0** | Throughput prep | `--profile` PhaseTimings JSON, `--embed-provider` auto-detect, `--resources` policy, CoreML/CUDA feature wiring, resume-crash fix, pinned progress bar. |
+| **v0.7.0** | Evals + attribution | Plan 10/11/13 — eval harness, historical symbol attribution, index metadata + rebuild safety. |
+| **v0.7.2** | Perf tracing | Plan 14 — phase tracing, per-method storage metrics, perf harness binaries. |
+| **v0.7.3** | Memory-efficient indexing | Plan 15 — `embed_batch` chunking + source-text cap + peak-RSS sampler. |
+| **v0.7.4** | Submodule fix | Gitlink-skip in `file_at_commit` for uninitialized submodules. |
+| **v0.7.5** | Daemon + multi-repo | Plan 16 — `ohara serve` daemon, `RetrievalEngine`, multi-repo support, `ohara daemon` subcommands. |
 
 The [Changelog](./changelog.md) has a per-tag breakdown.
 
 ## In flight
 
-### v0.6.1 / v0.7 — Phase 2B (gated on baseline data)
+### v0.7.x — TypeScript / JavaScript support (plan-17)
 
-v0.6.0 shipped the measurement infrastructure (`--profile`, weekly
-perf workflow, QuestDB fixture) and the hardware-acceleration
-opt-in (`--embed-provider`, `--resources`, CoreML / CUDA feature
-flags). What hasn't shipped yet is the actual throughput surgery —
-those changes are gated on the QuestDB baseline data so we know we're
-optimizing the right phase.
-
-Candidates from Plan 6 Phase 2B, in rough order of expected impact:
-
-- **Hunk-text trimming.** `total_diff_bytes / total_added_lines`
-  from `PhaseTimings` is currently north of useful; the embed phase
-  is paying for boilerplate it doesn't benefit from.
-- **Pipeline parallelism.** The walk → embed → write path is
-  serialized today. A bounded channel between phases lets the embed
-  GPU/CoreML keep going while SQLite drains the previous batch.
-- **Recency-first / partial index.** The (B) success criterion from
-  the v0.6 RFC: index the newest-N commits first and backfill older
-  history in the background, with `_meta` exposing what window is
-  covered.
-
-**Success criteria** (one of, unchanged from the v0.6 RFC):
-
-- **(A)** First-time index of a QuestDB-class repo finishes in under
-  **15 minutes** on a typical M-series laptop.
-- **(B)** Time-to-useful is under **3 minutes**, with `_meta` clearly
-  exposing what window has been covered.
-
-The full RFC is at
-[`docs/superpowers/specs/2026-05-01-ohara-v0.6-indexing-throughput-rfc.md`](https://github.com/vss96/ohara/blob/main/docs/superpowers/specs/2026-05-01-ohara-v0.6-indexing-throughput-rfc.md).
+The next active plan adds a tree-sitter grammar for TypeScript and
+JavaScript so `find_pattern` and `explain_change` work on TS/JS repos
+without requiring a separate indexing step. See
+`docs/superpowers/plans/2026-05-04-ohara-plan-17-typescript-javascript.md`.
 
 ## Considered for later
 

@@ -30,8 +30,10 @@ questions about the *history* of the code:
   makes that essentially free.
 - **Idempotent and abort-safe.** Killed mid-index? Resume re-does at
   most ~100 commits.
-- **Single static binary.** No daemons, no system services. Distributed
-  via `cargo-dist` for macOS and Linux (Windows users: WSL).
+- **Single static binary by default.** By default ohara is local-first single-process;
+  an opt-in `ohara serve` daemon is available for warm-cache workflows.
+  Indexing is still always foreground. Distributed via `cargo-dist` for macOS
+  and Linux (Windows users: WSL).
 
 ## Where to go next
 
@@ -44,8 +46,9 @@ questions about the *history* of the code:
 
 ## Status
 
-Released versions: v0.1 (foundation + `find_pattern`) → v0.2 (auto-
-freshness) → v0.3 (retrieval pipeline upgrade) → v0.4 (Java + Kotlin
-support) → v0.5 (`explain_change` tool) → v0.5.1 (progress bar +
-abort-resume + self-update). v0.6 (indexing throughput) is in flight.
-See the [Roadmap](./roadmap.md).
+Released versions: v0.1 (foundation + `find_pattern`) → v0.2 (auto-freshness)
+→ v0.3 (retrieval pipeline upgrade) → v0.4 (Java + Kotlin support) →
+v0.5 (`explain_change` tool) → v0.5.1 (progress bar + abort-resume +
+self-update) → v0.6 (indexing throughput prep) → v0.7.0–v0.7.5 (evals,
+perf tracing, memory-efficient indexing, `ohara serve` daemon + multi-repo).
+**Current: v0.7.5.** See the [Roadmap](./roadmap.md).
