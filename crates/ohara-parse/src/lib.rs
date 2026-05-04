@@ -56,6 +56,7 @@ pub fn parser_versions() -> BTreeMap<String, String> {
         ("python", "2"), // bumped: tree-sitter-python 0.21 -> 0.25
         ("java", "2"),   // bumped: tree-sitter-java 0.21 -> 0.23
         ("kotlin", "2"), // bumped: grammar swapped to tree-sitter-kotlin-ng
+        ("javascript", "1"), // plan-17: initial javascript extractor
     ]
     .into_iter()
     .map(|(lang, ver)| (lang.to_string(), ver.to_string()))
@@ -91,6 +92,9 @@ pub fn extract_atomic_symbols(path: &str, source: &str, blob_sha: &str) -> Resul
         Some("py") => languages::python::extract(path, source, blob_sha)?,
         Some("java") => languages::java::extract(path, source, blob_sha)?,
         Some("kt") | Some("kts") => languages::kotlin::extract(path, source, blob_sha)?,
+        Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => {
+            languages::javascript::extract(path, source, blob_sha)?
+        }
         _ => return Ok(vec![]),
     };
     atoms.sort_by_key(|s| s.span_start);
