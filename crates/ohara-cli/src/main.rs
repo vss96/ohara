@@ -45,6 +45,11 @@ enum Cmd {
     Update(commands::update::Args),
     /// Run the retrieval engine as a long-lived Unix-socket daemon.
     Serve(commands::serve::ServeArgs),
+    /// Inspect or manage running ohara daemons.
+    Daemon {
+        #[command(subcommand)]
+        action: commands::daemon::DaemonAction,
+    },
 }
 
 #[tokio::main]
@@ -65,6 +70,7 @@ async fn main() -> Result<()> {
         Cmd::Explain(a) => commands::explain::run(a, no_daemon).await,
         Cmd::Update(a) => commands::update::run(a).await,
         Cmd::Serve(a) => commands::serve::run(a).await,
+        Cmd::Daemon { action } => commands::daemon::run(action).await,
     };
     if let Some(acc) = perf_acc {
         acc.print_summary_to_stderr();
