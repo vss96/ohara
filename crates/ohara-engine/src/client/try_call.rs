@@ -2,21 +2,32 @@
 //!
 //! Returns `None` on any failure so the caller can fall back to standalone mode.
 
-use crate::client::DaemonHandle;
+use crate::client::{Client, DaemonHandle};
 use crate::ipc::{Request, Response};
 
 /// Try to route `req` through a running daemon.
 ///
-/// Returns `None` whenever anything fails so the caller can transparently fall
-/// back to standalone execution.
+/// 1. Calls `discover()` to obtain a [`DaemonHandle`].
+/// 2. Connects to the daemon's socket and issues `req`.
+/// 3. Returns `Some(response)` on success.
 ///
-/// # Note
-/// Implementation pending (plan-16 D.7).
+/// Returns `None` — without propagating the error — whenever anything fails,
+/// so the caller can transparently fall back to standalone execution.
 pub async fn try_daemon_call(
-    _discover: impl FnOnce() -> crate::Result<Option<DaemonHandle>>,
-    _req: Request,
+    discover: impl FnOnce() -> crate::Result<Option<DaemonHandle>>,
+    req: Request,
 ) -> Option<Response> {
-    todo!("plan-16 D.7: implement try_daemon_call")
+    let h = match discover() {
+        Ok(Some(h)) => h,
+        _ => return None,
+    };
+    match Client::connect(&h.socket_path).call(req).await {
+        Ok(r) => Some(r),
+        Err(e) => {
+            tracing::warn!(error=%e, pid=h.pid, "daemon call failed; falling back to standalone");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
