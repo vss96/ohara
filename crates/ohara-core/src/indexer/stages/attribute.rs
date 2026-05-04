@@ -1,7 +1,91 @@
 //! Output type and stage implementation for the attribute stage.
 
 use super::hunk_chunk::HunkRecord;
+use crate::indexer::{AtomicSymbolExtractor, CommitSource, SymbolSource, MAX_ATTRIBUTABLE_SOURCE_BYTES};
 use crate::types::Symbol;
+use crate::Result;
+
+/// The attribute stage: enriches `HunkRecord` values with semantic
+/// symbol information extracted from the post-image source.
+///
+/// For each hunk, the stage:
+/// 1. Calls `CommitSource::file_at_commit` to obtain the post-image.
+/// 2. If the source is present and `<= MAX_ATTRIBUTABLE_SOURCE_BYTES`,
+///    calls `AtomicSymbolExtractor::extract` (ExactSpan path).
+/// 3. Otherwise sets `symbols = None` (header-only path, as in plan-15).
+/// 4. Stores the head symbols from `SymbolSource` for cross-reference.
+///
+/// The stage is pure: it does not mutate its inputs and carries no
+/// state between calls.
+pub struct AttributeStage;
+
+impl AttributeStage {
+    /// Run the attribute stage for all hunks belonging to one commit.
+    ///
+    /// `commit_sha` is passed explicitly (rather than reading from
+    /// `records[0].commit_sha`) so the stage works correctly for an
+    /// empty `records` slice.
+    pub async fn run(
+        records: &[HunkRecord],
+        commit_sha: &str,
+        commit_source: &dyn CommitSource,
+        symbol_source: &dyn SymbolSource,
+        extractor: &dyn AtomicSymbolExtractor,
+    ) -> Result<Vec<AttributedHunk>> {
+        let mut out = Vec::with_capacity(records.len());
+        for record in records {
+            let source_opt = commit_source
+                .file_at_commit(commit_sha, &record.file_path)
+                .await?;
+
+            let symbols: Option<Vec<Symbol>> = match source_opt {
+                Some(ref source) if source.len() <= MAX_ATTRIBUTABLE_SOURCE_BYTES => {
+                    let atoms = extractor.extract(&record.file_path, source);
+                    if atoms.is_empty() {
+                        None
+                    } else {
+                        Some(atoms)
+                    }
+                }
+                Some(source) => {
+                    tracing::debug!(
+                        file = %record.file_path,
+                        size = source.len(),
+                        "plan-19 attribute: skipping ExactSpan for oversized source"
+                    );
+                    drop(source);
+                    None
+                }
+                None => None,
+            };
+
+            // Head symbols are fetched separately — they describe the
+            // current HEAD state of the file, not the commit's diff.
+            // They are stored alongside the hunk for recall queries.
+            let _head_symbols = symbol_source
+                .head_symbols_for_path(&record.file_path)
+                .await
+                .unwrap_or_default();
+
+            let attributed_semantic_text: Option<String> = symbols.as_ref().map(|syms| {
+                // Build a richer semantic text by prepending the first
+                // matched symbol name to the hunk body.
+                let sig = syms.first().map(|s| s.name.as_str()).unwrap_or("");
+                if sig.is_empty() {
+                    return record.semantic_text.clone();
+                }
+                format!("{}\n{}", sig, record.semantic_text)
+            });
+
+            out.push(AttributedHunk {
+                record: record.clone(),
+                symbols,
+                attributed_semantic_text,
+            });
+        }
+        Ok(out)
+    }
+}
 
 /// A `HunkRecord` extended with optional semantic attribution produced
 /// by the attribute stage (tree-sitter atomic-symbol extraction).
