@@ -5,6 +5,18 @@ use crate::{EmbeddingProvider, OhraError, Result, Storage};
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Plan 15 Task C.1: maximum post-image source size (in bytes) the
+/// indexer will hand to `AtomicSymbolExtractor::extract`. Sources
+/// larger than this fall through to header-only attribution
+/// (`AttributionInputs { symbols: None, source: None }`), which is
+/// the same path used when `file_at_commit` returns `Ok(None)`.
+///
+/// 2 MiB is large enough to cover every hand-written source file in
+/// the languages we support and small enough to keep tree-sitter's
+/// AST allocation bounded for vendor drops, generated bundles, and
+/// minified blobs.
+pub const MAX_ATTRIBUTABLE_SOURCE_BYTES: usize = 2 * 1024 * 1024;
+
 /// Source of commits + hunks. Implemented by `ohara-git` in a later task; defined
 /// here so `ohara-core` stays git-free.
 #[async_trait::async_trait]
@@ -241,31 +253,50 @@ impl Indexer {
                 let mut hunk_attributions: Vec<Vec<crate::types::HunkSymbol>> =
                     Vec::with_capacity(hunks.len());
                 for h in &hunks {
-                    let attribution = if let Some(source) = commit_source
+                    let source_opt = commit_source
                         .file_at_commit(&cm.commit_sha, &h.file_path)
-                        .await?
-                    {
-                        // ExactSpan path: extract atomic symbols from
-                        // the post-image source and intersect their
-                        // line spans against the hunk's @@-headers.
-                        // The attributor falls back to HunkHeader for
-                        // symbols not covered by ExactSpan.
-                        let atoms = self.symbol_extractor.extract(&h.file_path, &source);
-                        let inputs = crate::hunk_attribution::AttributionInputs {
-                            diff_text: &h.diff_text,
-                            symbols: Some(&atoms),
-                            source: Some(&source),
-                        };
-                        crate::hunk_attribution::attribute_hunk(&inputs)
-                    } else {
-                        // Header-only path when the file isn't readable
-                        // (deleted, renamed-away, binary blob).
-                        let inputs = crate::hunk_attribution::AttributionInputs {
-                            diff_text: &h.diff_text,
-                            symbols: None,
-                            source: None,
-                        };
-                        crate::hunk_attribution::attribute_hunk(&inputs)
+                        .await?;
+                    let attribution = match source_opt {
+                        Some(source) if source.len() <= MAX_ATTRIBUTABLE_SOURCE_BYTES => {
+                            // ExactSpan path: extract atomic symbols
+                            // from the post-image source and intersect
+                            // their line spans against the hunk's
+                            // @@-headers.
+                            let atoms = self.symbol_extractor.extract(&h.file_path, &source);
+                            let inputs = crate::hunk_attribution::AttributionInputs {
+                                diff_text: &h.diff_text,
+                                symbols: Some(&atoms),
+                                source: Some(&source),
+                            };
+                            crate::hunk_attribution::attribute_hunk(&inputs)
+                        }
+                        Some(source) => {
+                            tracing::debug!(
+                                file = %h.file_path,
+                                size = source.len(),
+                                "skipping ExactSpan attribution for oversized source"
+                            );
+                            // Header-only path: drop `source` here so
+                            // the giant string is freed before the next
+                            // iteration's allocation.
+                            drop(source);
+                            let inputs = crate::hunk_attribution::AttributionInputs {
+                                diff_text: &h.diff_text,
+                                symbols: None,
+                                source: None,
+                            };
+                            crate::hunk_attribution::attribute_hunk(&inputs)
+                        }
+                        None => {
+                            // file_at_commit reported absence (deleted,
+                            // renamed-away, binary).
+                            let inputs = crate::hunk_attribution::AttributionInputs {
+                                diff_text: &h.diff_text,
+                                symbols: None,
+                                source: None,
+                            };
+                            crate::hunk_attribution::attribute_hunk(&inputs)
+                        }
                     };
                     hunk_attributions.push(attribution);
                 }
@@ -1283,7 +1314,9 @@ mod phase_timing_tests {
             sleep: std::time::Duration::ZERO,
         };
         let calls = std::sync::Arc::new(AtomicUsize::new(0));
-        let extractor = std::sync::Arc::new(PanicExtractor { calls: calls.clone() });
+        let extractor = std::sync::Arc::new(PanicExtractor {
+            calls: calls.clone(),
+        });
 
         struct ZeroEmbedder;
         #[async_trait]
