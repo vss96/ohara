@@ -42,6 +42,7 @@ pub async fn serve_unix(
     set_socket_perms(socket_path)?;
     info!(socket=?socket_path, "ohara serve listening");
     let stop_for_dispatch = stop.clone();
+    let mut handlers = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
             _ = stop.cancelled() => break,
@@ -50,7 +51,7 @@ pub async fn serve_unix(
                     Ok((conn, _addr)) => {
                         let eng = engine.clone();
                         let stop_d = stop_for_dispatch.clone();
-                        tokio::spawn(async move {
+                        handlers.spawn(async move {
                             if let Err(e) = handle_connection(eng, conn, stop_d).await {
                                 warn!("connection handler: {e}");
                             }
@@ -61,6 +62,10 @@ pub async fn serve_unix(
             }
         }
     }
+    // Drain in-flight handlers with a bounded 5-second grace period so
+    // requests that are mid-flight are not abruptly aborted.
+    let drain = async { while handlers.join_next().await.is_some() {} };
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), drain).await;
     let _ = std::fs::remove_file(socket_path);
     Ok(())
 }
