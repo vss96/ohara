@@ -268,6 +268,30 @@ pub trait Storage: Send + Sync {
     /// commit message + author + date for display.
     async fn get_commit(&self, repo_id: &RepoId, sha: &str) -> Result<Option<CommitMeta>>;
 
+    /// Plan 21: fetch multiple commits by SHA in one call. Returns a
+    /// `HashMap` mapping each found SHA to its `CommitMeta`. SHAs that
+    /// are not indexed produce no entry — callers treat absence as
+    /// "unindexed" (same semantics as `get_commit` returning `Ok(None)`).
+    ///
+    /// The default implementation calls `get_commit` once per SHA
+    /// (preserves backward compatibility for `MockStorage` and other
+    /// test fakes that don't override this method). Production callers
+    /// should use `SqliteStorage` whose override issues a single SQL
+    /// statement with `IN (?, …)`.
+    async fn get_commits_by_sha(
+        &self,
+        repo_id: &RepoId,
+        shas: &[String],
+    ) -> Result<std::collections::HashMap<String, CommitMeta>> {
+        let mut out = std::collections::HashMap::with_capacity(shas.len());
+        for sha in shas {
+            if let Some(cm) = self.get_commit(repo_id, sha).await? {
+                out.insert(sha.clone(), cm);
+            }
+        }
+        Ok(out)
+    }
+
     /// Fetch the hunks of a commit that touch a specific file path. Used
     /// by `explain_change` to attach a diff excerpt per blame hit.
     /// JOINs `hunk` against `file_path` filtered by sha + path.

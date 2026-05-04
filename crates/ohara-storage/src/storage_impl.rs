@@ -263,6 +263,59 @@ impl Storage for SqliteStorage {
         with_conn(&self.pool, move |c| crate::tables::commit::get(c, &sha)).await
     }
 
+    async fn get_commits_by_sha(
+        &self,
+        _repo_id: &RepoId,
+        shas: &[String],
+    ) -> CoreResult<std::collections::HashMap<String, CommitMeta>> {
+        // Plan 21 Task B.1: batch-fetch commits via a single SQL IN (?,…)
+        // statement rather than N individual round-trips.
+        if shas.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let shas_owned: Vec<String> = shas.to_vec();
+        with_conn(&self.pool, move |c| {
+            // Build the IN clause with one placeholder per SHA.
+            let placeholders = shas_owned
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT sha, parent_sha, is_merge, ts, author, message \
+                 FROM commit_record \
+                 WHERE sha IN ({placeholders})"
+            );
+            let mut stmt = c.prepare(&sql)?;
+            // Bind each sha in order.
+            let params: Vec<&dyn rusqlite::ToSql> =
+                shas_owned.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+            let rows = stmt.query_map(params.as_slice(), |row| {
+                let commit_sha: String = row.get(0)?;
+                let parent_sha: Option<String> = row.get(1)?;
+                let is_merge: i64 = row.get(2)?;
+                let ts: i64 = row.get(3)?;
+                let author: Option<String> = row.get(4)?;
+                let message: String = row.get(5)?;
+                Ok(CommitMeta {
+                    commit_sha,
+                    parent_sha,
+                    is_merge: is_merge != 0,
+                    ts,
+                    author,
+                    message,
+                })
+            })?;
+            let mut out = std::collections::HashMap::new();
+            for r in rows {
+                let cm = r?;
+                out.insert(cm.commit_sha.clone(), cm);
+            }
+            Ok(out)
+        })
+        .await
+    }
+
     async fn get_hunks_for_file_in_commit(
         &self,
         _repo_id: &RepoId,
