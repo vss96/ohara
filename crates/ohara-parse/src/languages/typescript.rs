@@ -173,6 +173,19 @@ mod tests {
     }
 
     #[test]
+    fn extracts_tsx_components() {
+        let src = "function App(): JSX.Element { return <div />; }\n\
+                   const Button = (props: { label: string }) => <button>{props.label}</button>;\n";
+        let syms = extract("a.tsx", src, "deadbeef", TsFlavor::Tsx).unwrap();
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"App"), "App component missing: {names:?}");
+        assert!(
+            names.contains(&"Button"),
+            "Button component missing: {names:?}"
+        );
+    }
+
+    #[test]
     fn extracts_interface_type_alias_and_enum() {
         let src = "interface Greeter { hello(): string; }\n\
                    type UserId = number;\n\
