@@ -65,15 +65,21 @@ fn result_to_value(res: &CallToolResult) -> Value {
     serde_json::from_str(text.text.as_str()).expect("content must be valid JSON")
 }
 
-/// Normalise dynamic fields (shas, timestamps, commit dates) so golden
-/// comparison is deterministic across runs.
+/// Normalise dynamic fields (shas, timestamps, commit dates, limitation
+/// messages that embed commit SHAs) so golden comparison is deterministic
+/// across runs.
 fn normalise(v: &mut Value) {
     match v {
         Value::Object(map) => {
             for (k, val) in map.iter_mut() {
                 if matches!(
                     k.as_str(),
-                    "commit_sha" | "last_indexed_commit" | "indexed_at" | "commit_date" | "since"
+                    "commit_sha"
+                        | "last_indexed_commit"
+                        | "indexed_at"
+                        | "commit_date"
+                        | "since"
+                        | "limitation"
                 ) {
                     if val.is_string() {
                         *val = Value::String("<normalised>".into());
@@ -174,20 +180,20 @@ async fn find_pattern_envelope_matches_golden() {
         "'_meta.query_profile.explanation' missing"
     );
 
-    // Write golden file (creates it on first run; subsequent runs verify
-    // the structure hasn't drifted).
     let golden_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    std::fs::create_dir_all(&golden_dir).expect("create golden dir");
     let golden_path = golden_dir.join("find_pattern.golden.json");
 
     let pretty = serde_json::to_string_pretty(&actual).expect("serialise");
-    std::fs::write(&golden_path, &pretty).expect("write golden");
-
-    // Verify the written file round-trips.
-    let on_disk: Value =
-        serde_json::from_str(&std::fs::read_to_string(&golden_path).expect("read golden"))
-            .expect("parse golden");
-    assert_eq!(actual, on_disk, "golden file round-trip failed");
+    if std::env::var_os("OHARA_UPDATE_GOLDENS").is_some() {
+        std::fs::create_dir_all(&golden_dir).expect("create golden dir");
+        std::fs::write(&golden_path, &pretty).expect("write golden");
+    }
+    let on_disk = std::fs::read_to_string(&golden_path)
+        .expect("read golden — commit the fixture or rerun with OHARA_UPDATE_GOLDENS=1");
+    assert_eq!(
+        pretty, on_disk,
+        "envelope drifted from golden at {golden_path:?}; rerun with OHARA_UPDATE_GOLDENS=1 to refresh"
+    );
 }
 
 /// Verifies the `explain_change` tool emits the expected top-level shape:
@@ -239,14 +245,17 @@ async fn explain_change_envelope_matches_golden() {
     );
 
     let golden_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    std::fs::create_dir_all(&golden_dir).expect("create golden dir");
     let golden_path = golden_dir.join("explain_change.golden.json");
 
     let pretty = serde_json::to_string_pretty(&actual).expect("serialise");
-    std::fs::write(&golden_path, &pretty).expect("write golden");
-
-    let on_disk: Value =
-        serde_json::from_str(&std::fs::read_to_string(&golden_path).expect("read golden"))
-            .expect("parse golden");
-    assert_eq!(actual, on_disk, "golden file round-trip failed");
+    if std::env::var_os("OHARA_UPDATE_GOLDENS").is_some() {
+        std::fs::create_dir_all(&golden_dir).expect("create golden dir");
+        std::fs::write(&golden_path, &pretty).expect("write golden");
+    }
+    let on_disk = std::fs::read_to_string(&golden_path)
+        .expect("read golden — commit the fixture or rerun with OHARA_UPDATE_GOLDENS=1");
+    assert_eq!(
+        pretty, on_disk,
+        "envelope drifted from golden at {golden_path:?}; rerun with OHARA_UPDATE_GOLDENS=1 to refresh"
+    );
 }
