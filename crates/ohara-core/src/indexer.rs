@@ -1222,4 +1222,94 @@ mod phase_timing_tests {
         assert_eq!(out.len(), 7);
         assert_eq!(*calls.lock().unwrap(), vec![3, 3, 1]);
     }
+
+    /// Plan 15 Task C.1: when `file_at_commit` returns a source
+    /// larger than `MAX_ATTRIBUTABLE_SOURCE_BYTES`, the indexer
+    /// must skip the atomic-symbol extraction path (which would
+    /// otherwise build a full tree-sitter AST against the giant
+    /// source) and fall back to the header-only attribution path.
+    /// Verified by giving an extractor that PANICS if invoked, so
+    /// any call into it fails the test loudly.
+    #[tokio::test]
+    async fn oversize_sources_skip_atomic_extraction() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct PanicExtractor {
+            calls: std::sync::Arc<AtomicUsize>,
+        }
+        impl crate::indexer::AtomicSymbolExtractor for PanicExtractor {
+            fn extract(&self, _path: &str, _source: &str) -> Vec<Symbol> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                panic!("extractor must not be called for oversized sources");
+            }
+        }
+
+        struct GiantSourceCommitSource {
+            commits: Vec<CommitMeta>,
+            hunks: Vec<Hunk>,
+            source_bytes: usize,
+        }
+        #[async_trait]
+        impl CommitSource for GiantSourceCommitSource {
+            async fn list_commits(&self, _: Option<&str>) -> Result<Vec<CommitMeta>> {
+                Ok(self.commits.clone())
+            }
+            async fn hunks_for_commit(&self, _: &str) -> Result<Vec<Hunk>> {
+                Ok(self.hunks.clone())
+            }
+            async fn file_at_commit(&self, _: &str, _: &str) -> Result<Option<String>> {
+                Ok(Some("x".repeat(self.source_bytes)))
+            }
+        }
+
+        // Build the commit + hunk via the module's existing
+        // helpers, then override the hunk's file_path so the
+        // attribution code path tries to fetch a "big.js" source
+        // (which the GiantSourceCommitSource always reports as
+        // 4 MiB regardless of the path).
+        let mut hunk = fake_hunk(
+            "deadbeef",
+            "--- a/vendor/big.js\n+++ b/vendor/big.js\n@@ -0,0 +1 @@\n+y\n",
+        );
+        hunk.file_path = "vendor/big.js".into();
+        let cs = GiantSourceCommitSource {
+            commits: vec![fake_commit("deadbeef")],
+            hunks: vec![hunk],
+            // 4 MiB — well over the 2 MiB default cap.
+            source_bytes: 4 * 1024 * 1024,
+        };
+        let ss = FakeSymbolSource {
+            symbols: vec![],
+            sleep: std::time::Duration::ZERO,
+        };
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let extractor = std::sync::Arc::new(PanicExtractor { calls: calls.clone() });
+
+        struct ZeroEmbedder;
+        #[async_trait]
+        impl crate::EmbeddingProvider for ZeroEmbedder {
+            fn dimension(&self) -> usize {
+                4
+            }
+            fn model_id(&self) -> &str {
+                "z"
+            }
+            async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+                Ok(texts.iter().map(|_| vec![0.0; 4]).collect())
+            }
+        }
+
+        let indexer = Indexer::new(
+            std::sync::Arc::new(FakeStorage::new(std::time::Duration::ZERO)),
+            std::sync::Arc::new(ZeroEmbedder),
+        )
+        .with_atomic_symbol_extractor(extractor);
+        let id = RepoId::from_parts("deadbeef", "/x");
+        indexer.run(&id, &cs, &ss).await.unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "extractor must not be called for oversized sources"
+        );
+    }
 }
