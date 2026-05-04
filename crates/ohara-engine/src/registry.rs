@@ -3,7 +3,7 @@
 /// A single JSON file (default `~/.ohara/daemons.json`) stores every live
 /// daemon record. Access is serialised via an `fs2` exclusive file-lock so
 /// multiple CLI processes can safely read/write concurrently.
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -66,7 +66,9 @@ impl Registry {
     /// Open (or create) the registry at `path`.
     ///
     /// If the file does not exist its parent directories are created and the
-    /// file is initialised with an empty daemon list.
+    /// file is initialised with an empty daemon list.  The initialisation is
+    /// atomic: `create_new` guarantees that exactly one concurrent caller
+    /// writes the seed content; others see `AlreadyExists` and proceed.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
 
@@ -74,9 +76,15 @@ impl Registry {
             fs::create_dir_all(parent)?;
         }
 
-        if !path.exists() {
-            let mut f = File::create(&path)?;
-            f.write_all(b"{\"daemons\":[]}")?;
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut f) => {
+                f.write_all(b"{\"daemons\":[]}")?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Race: another process (or this process on a previous call)
+                // already created the file.  That is fine.
+            }
+            Err(e) => return Err(e.into()),
         }
 
         Ok(Self { path })
