@@ -1539,6 +1539,58 @@ mod tests {
             .unwrap();
         assert!(hits.is_empty(), "no FTS match should yield empty Vec");
     }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn get_commits_by_sha_returns_all_three_rows() {
+        // Plan 21 Task B.1: SqliteStorage's batched implementation must
+        // return all three seeded commits in one round-trip. Uses an
+        // in-memory database (":memory:" path).
+        use ohara_core::storage::Storage;
+        use ohara_core::types::{CommitMeta, RepoId};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db = SqliteStorage::open(tmp.path().join("test.db"))
+            .await
+            .unwrap();
+        let rid = RepoId::from_parts("deadbeef", "/x");
+        db.open_repo(&rid, "/x", "deadbeef").await.unwrap();
+
+        let shas = ["aaa000", "bbb000", "ccc000"];
+        for (i, sha) in shas.iter().enumerate() {
+            db.put_commit(
+                &rid,
+                &ohara_core::storage::CommitRecord {
+                    meta: CommitMeta {
+                        commit_sha: sha.to_string(),
+                        parent_sha: None,
+                        is_merge: false,
+                        author: Some("alice".into()),
+                        ts: i as i64 * 1_000,
+                        message: format!("msg {sha}"),
+                    },
+                    message_emb: vec![0.0; 384],
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let result = db
+            .get_commits_by_sha(&rid, &shas.map(String::from))
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 3, "all three rows must be returned");
+        for sha in &shas {
+            assert!(result.contains_key(*sha), "missing sha {sha}");
+        }
+        // Unknown SHA is absent, not an error.
+        let unknown = db
+            .get_commits_by_sha(&rid, &["notexist".to_string()])
+            .await
+            .unwrap();
+        assert!(unknown.is_empty());
+    }
 }
 
 #[cfg(test)]
