@@ -1,12 +1,40 @@
-//! Output type for the commit-walk stage.
+//! Output type and stage implementation for the commit-walk stage.
 
+use crate::indexer::CommitSource;
 use crate::types::CommitMeta;
+use crate::Result;
+
+/// The commit-walk stage: asks the source for commits since `watermark`
+/// and returns them in the order the source provides (newest-first by
+/// convention). No filtering is applied beyond forwarding `since` to
+/// `CommitSource::list_commits`.
+///
+/// This is a pure async function, not a struct, because it carries no
+/// state. The coordinator constructs the watermark once and calls this
+/// for each indexing run.
+pub struct CommitWalkStage;
+
+impl CommitWalkStage {
+    /// Run the commit-walk stage.
+    ///
+    /// - `watermark=None` — cold start; returns every commit the source
+    ///   knows about.
+    /// - `watermark=Some(w)` — resume; passes `w.commit_sha` as the
+    ///   `since` hint to `CommitSource::list_commits`.
+    pub async fn run(
+        source: &dyn CommitSource,
+        watermark: Option<&CommitWatermark>,
+    ) -> Result<Vec<CommitMeta>> {
+        let since = watermark.map(|w| w.commit_sha.as_str());
+        source.list_commits(since).await
+    }
+}
 
 #[cfg(test)]
 mod walk_tests {
     use super::*;
     use crate::indexer::CommitSource;
-    use crate::{OhraError, Result};
+    use crate::Result;
     use async_trait::async_trait;
     use crate::types::{Hunk, CommitMeta};
 
