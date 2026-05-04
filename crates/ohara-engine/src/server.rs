@@ -23,6 +23,17 @@ pub async fn serve_unix(
     stop: CancellationToken,
 ) -> crate::Result<()> {
     if socket_path.exists() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            let meta = std::fs::symlink_metadata(socket_path)
+                .map_err(|e| EngineError::Internal(format!("stat {socket_path:?}: {e}")))?;
+            if !meta.file_type().is_socket() {
+                return Err(EngineError::Internal(format!(
+                    "refusing to unlink non-socket path {socket_path:?}"
+                )));
+            }
+        }
         std::fs::remove_file(socket_path)
             .map_err(|e| EngineError::Internal(format!("remove stale socket: {e}")))?;
     }
