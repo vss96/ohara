@@ -6,6 +6,7 @@
 
 - [Install](./install.md)
 - [Quickstart](./quickstart.md)
+- [Claude Code plugin](./claude-code-plugin.md)
 - [Wiring into MCP clients](./mcp-clients.md)
 
 # MCP Tools

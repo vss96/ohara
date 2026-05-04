@@ -103,6 +103,20 @@ The first run downloads the BGE-small embedding model (~80MB, one time).
 
 ## Wiring into MCP clients
 
+### Claude Code: install the plugin
+
+```text
+/plugin marketplace add vss96/ohara
+/plugin install ohara@vss96
+/reload-plugins
+```
+
+Registers the MCP server, ships two skills (`ohara:lineage`,
+`ohara:indexing`), and auto-downloads the binary on first use. Full
+details in the [docs site](https://vss96.github.io/ohara/claude-code-plugin.html).
+
+### Other MCP clients
+
 `ohara-mcp` speaks stdio MCP, so any MCP-aware client picks it up
 with the same shape:
 
@@ -120,7 +134,7 @@ with the same shape:
 
 Drop that block into the right config file:
 
-- **Claude Code / Claude Desktop:** `~/.claude/claude_desktop_config.json`, `.mcp.json` per-repo, or `claude mcp add ohara <path>`.
+- **Claude Code / Claude Desktop (manual fallback):** `~/.claude/claude_desktop_config.json`, `.mcp.json` per-repo, or `claude mcp add ohara <path>`. Prefer the plugin above.
 - **Cursor:** `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (per-workspace).
 - **OpenAI Codex CLI:** `~/.codex/config.toml` with a `[mcp_servers.ohara]` block (TOML, not JSON).
 - **OpenCode:** `~/.config/opencode/opencode.json` or repo-root `opencode.json` under an `mcp` key.
