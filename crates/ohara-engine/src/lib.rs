@@ -9,6 +9,7 @@ mod engine;
 mod error;
 mod handle;
 pub mod ipc;
+pub mod server;
 
 pub use cache::EmbeddingCache;
 pub use cache::MetaCache;
@@ -17,5 +18,6 @@ pub use engine::FindPatternResult;
 pub use engine::RetrievalEngine;
 pub use error::EngineError;
 pub use handle::RepoHandle;
+pub use server::serve_unix;
 
 pub type Result<T> = std::result::Result<T, EngineError>;

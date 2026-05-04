@@ -51,11 +51,18 @@ pub struct RetrievalEngine {
     embed_cache: EmbeddingCache,
     meta_cache: MetaCache,
     meta_hit_count: AtomicU64,
+    /// Unix-second timestamp of the last dispatched request.
+    /// Written by [`Self::touch`]; read by [`Self::idle_for`].
+    last_request_at: AtomicU64,
 }
 
 impl RetrievalEngine {
     pub fn new(embedder: Arc<dyn EmbeddingProvider>, reranker: Arc<dyn RerankProvider>) -> Self {
         let model_id = embedder.model_id().to_string();
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         Self {
             embedder,
             reranker,
@@ -63,7 +70,32 @@ impl RetrievalEngine {
             embed_cache: EmbeddingCache::new(model_id, 256),
             meta_cache: MetaCache::new(Duration::from_secs(5)),
             meta_hit_count: AtomicU64::new(0),
+            last_request_at: AtomicU64::new(now_unix),
         }
+    }
+
+    /// Record the current unix-second as the most recent request timestamp.
+    ///
+    /// Called by the socket server on every accepted request so the
+    /// idle-timeout watchdog can compute how long the engine has been quiet.
+    pub fn touch(&self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.last_request_at.store(now, Ordering::Relaxed);
+    }
+
+    /// Return the duration since the last request was dispatched.
+    ///
+    /// Saturates at zero if the clock appears to have gone backwards.
+    pub fn idle_for(&self) -> Duration {
+        let last = self.last_request_at.load(Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(last);
+        Duration::from_secs(now.saturating_sub(last))
     }
 
     /// Returns the number of times `find_pattern` served `ResponseMeta`
