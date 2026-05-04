@@ -150,6 +150,27 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn find_pattern_returns_empty_hits_on_empty_index() {
+        let ohara_home = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        {
+            let _g = env_lock();
+            std::env::set_var("OHARA_HOME", ohara_home.path());
+        }
+        build_test_repo(tmp.path());
+        let engine = make_test_engine();
+        let q = ohara_core::query::PatternQuery {
+            query: "hello".into(),
+            k: 5,
+            language: None,
+            since_unix: None,
+            no_rerank: false,
+        };
+        let out = engine.find_pattern(tmp.path(), q).await.expect("find_pattern");
+        assert!(out.hits.is_empty(), "empty index → empty hits, got {:?}", out.hits);
+    }
+
+    #[tokio::test]
     async fn open_repo_caches_handle_by_repo_id() {
         // `env_lock` serialises tests that mutate OHARA_HOME (process-global).
         // Drop the guard before the first await to satisfy clippy::await_holding_lock.
