@@ -1,3 +1,76 @@
+//! Plan 20 — retrieval coordinator.
+//!
+//! Wires the 5-step pipeline:
+//! 1. Fire all lanes in parallel via `join_all`.
+//! 2. RRF-merge into one ranked list (free function — not a trait).
+//! 3. Truncate to `rerank_pool_k` before the expensive refiners.
+//! 4. Apply each `ScoreRefiner` in sequence.
+//! 5. Truncate to caller's `k`.
+
+use crate::query::{reciprocal_rank_fusion, PatternQuery};
+use crate::retriever::{RetrievalLane, ScoreRefiner};
+use crate::storage::{HunkHit, HunkId};
+use crate::types::RepoId;
+use futures::future::join_all;
+use std::collections::HashMap;
+
+/// Run the full coordinator pipeline.
+///
+/// - `lanes`: all lane instances (disabled lanes self-skip by returning empty).
+/// - `refiners`: applied in order to the post-RRF candidate list.
+/// - `rerank_pool_k`: how many post-RRF candidates to feed into refiners.
+/// - `final_k`: hard truncation after refiners.
+pub async fn run(
+    lanes: &[Box<dyn RetrievalLane>],
+    refiners: &[Box<dyn ScoreRefiner>],
+    query: &PatternQuery,
+    repo_id: &RepoId,
+    rerank_pool_k: usize,
+    final_k: usize,
+) -> crate::Result<Vec<HunkHit>> {
+    // 1. Fire all lanes in parallel. Disabled lanes return Ok(vec![])
+    //    without touching storage.
+    let lane_futures = lanes.iter().map(|l| l.search(query, repo_id, final_k));
+    let lane_results: Vec<crate::Result<Vec<HunkHit>>> = join_all(lane_futures).await;
+
+    // 2. Build per-lane ranked id lists + a HunkId -> HunkHit lookup.
+    let mut by_id: HashMap<HunkId, HunkHit> = HashMap::new();
+    let mut rankings: Vec<Vec<HunkId>> = Vec::with_capacity(lanes.len());
+    for result in lane_results {
+        let hits = result?;
+        let ranking: Vec<HunkId> = hits
+            .iter()
+            .map(|h| {
+                by_id.entry(h.hunk_id).or_insert_with(|| h.clone());
+                h.hunk_id
+            })
+            .collect();
+        rankings.push(ranking);
+    }
+
+    // 3. RRF merge (k=60, Cormack 2009) → truncate to rerank pool.
+    let fused: Vec<HunkId> = reciprocal_rank_fusion(&rankings, 60);
+    let pool: Vec<HunkHit> = fused
+        .into_iter()
+        .take(rerank_pool_k)
+        .filter_map(|id| by_id.get(&id).cloned())
+        .collect();
+
+    if pool.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // 4. Apply refiners in sequence.
+    let mut hits = pool;
+    for refiner in refiners {
+        hits = refiner.refine(&query.query, hits).await?;
+    }
+
+    // 5. Truncate to final k.
+    hits.truncate(final_k);
+    Ok(hits)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
