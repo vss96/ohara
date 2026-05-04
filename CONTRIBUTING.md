@@ -12,7 +12,7 @@ The workspace is organised as a set of focused crates under `crates/`:
 
 | Crate | Role | Kind |
 |---|---|---|
-| `ohara-core` | Domain types, traits, orchestration | Library |
+| `ohara-core` | Domain types, traits, orchestration (`Indexer` → `Coordinator` + 5 pipeline stages in `indexer/stages/`, `Retriever`, `ExplainQuery`) | Library |
 | `ohara-storage` | SQLite + sqlite-vec persistence, migrations | Library |
 | `ohara-embed` | Embedding model providers (fastembed) | Library |
 | `ohara-git` | Git interaction (libgit2) | Library |
@@ -28,6 +28,20 @@ The workspace is organised as a set of focused crates under `crates/`:
 - Libraries **MUST NOT** depend on binaries.
 - `ohara-core` is the dependency root: it **SHOULD** define traits that other library crates implement (Dependency Inversion). `ohara-core` **MUST NOT** depend on `ohara-storage`, `ohara-embed`, `ohara-git`, or `ohara-parse` for concrete behaviour — only on the traits it owns.
 - Cross-library dependencies between leaves (e.g. `ohara-embed` depending on `ohara-git`) **MUST** be justified in the PR description.
+
+### Indexer pipeline stages
+
+`ohara-core::indexer` is organised as a `Coordinator` that composes five pure pipeline stages under `crates/ohara-core/src/indexer/stages/`:
+
+| Stage module | Input | Output |
+|---|---|---|
+| `commit_walk` | watermark SHA | `Vec<CommitMeta>` |
+| `hunk_chunk` | `CommitMeta` | `Vec<HunkRecord>` |
+| `attribute` | `Vec<HunkRecord>` | `Vec<AttributedHunk>` |
+| `embed` | `Vec<AttributedHunk>` | `EmbedOutput` |
+| `persist` | `EmbedOutput` | `()` (storage write) |
+
+Each stage **MUST** be a pure transformation with no shared mutable state. Integration between stages is done exclusively by `Coordinator`; stages **MUST NOT** call each other directly.
 
 ---
 
