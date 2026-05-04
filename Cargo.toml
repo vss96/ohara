@@ -52,6 +52,8 @@ indicatif = "0.17"
 tracing-indicatif = "=0.3.9"
 axoupdater = "0.10"
 libc = "0.2"
+tempfile = "3"
+async-trait = "0.1"
 
 [profile.release]
 lto = "thin"

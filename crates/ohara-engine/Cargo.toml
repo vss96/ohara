@@ -7,10 +7,17 @@ license.workspace = true
 
 [dependencies]
 ohara-core = { path = "../ohara-core" }
+ohara-storage = { path = "../ohara-storage" }
 ohara-embed = { path = "../ohara-embed" }
 ohara-git = { path = "../ohara-git" }
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+git2 = { version = "0.18", default-features = false }
+async-trait.workspace = true
 
 [features]
 default = []

@@ -2190,6 +2190,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ohara-engine"
+version = "0.7.4"
+dependencies = [
+ "async-trait",
+ "git2",
+ "ohara-core",
+ "ohara-embed",
+ "ohara-git",
+ "ohara-storage",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ohara-git"
 version = "0.7.4"
 dependencies = [
