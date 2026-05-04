@@ -511,26 +511,18 @@ mod tests {
 
     // ---- runtime_metadata_from tests ----------------------------------------
 
-    struct StubEmbedder;
-    impl crate::EmbeddingProvider for StubEmbedder {
-        fn dimension(&self) -> usize {
-            384
-        }
-        fn model_id(&self) -> &str {
-            "stub-model"
-        }
-        async fn embed_batch(&self, texts: &[String]) -> crate::Result<Vec<Vec<f32>>> {
-            Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
-        }
-    }
-
     #[test]
     fn runtime_metadata_from_populates_all_fields() {
         let mut parsers = BTreeMap::new();
         parsers.insert("rust".to_string(), "1".to_string());
-        let embedder = StubEmbedder;
-        let meta = runtime_metadata_from(&embedder, "bge-reranker-base", "2", parsers.clone());
-        assert_eq!(meta.embedding_model, "stub-model");
+        let meta = runtime_metadata_from(
+            "bge-small-en-v1.5",
+            384,
+            "bge-reranker-base",
+            "2",
+            parsers.clone(),
+        );
+        assert_eq!(meta.embedding_model, "bge-small-en-v1.5");
         assert_eq!(meta.embedding_dimension, 384);
         assert_eq!(meta.reranker_model, "bge-reranker-base");
         assert_eq!(meta.chunker_version, "2");
