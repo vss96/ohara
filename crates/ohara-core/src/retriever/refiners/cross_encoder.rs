@@ -32,8 +32,16 @@ impl ScoreRefiner for CrossEncoderRefiner {
         }
         let candidates: Vec<&str> = hits.iter().map(|h| h.hunk.diff_text.as_str()).collect();
         let scores = self.reranker.rerank(query_text, &candidates).await?;
-        // Zip hits with scores, sort descending by score, discard scores.
-        let mut scored: Vec<(HunkHit, f32)> = hits.into_iter().zip(scores).collect();
+        // Zip hits with scores, write reranker score into similarity so
+        // downstream refiners (e.g. RecencyRefiner) use it as the base.
+        let mut scored: Vec<(HunkHit, f32)> = hits
+            .into_iter()
+            .zip(scores)
+            .map(|(mut h, s)| {
+                h.similarity = s;
+                (h, s)
+            })
+            .collect();
         scored.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)

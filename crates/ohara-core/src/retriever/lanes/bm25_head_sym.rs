@@ -1,6 +1,7 @@
 //! Plan 20 — BM25-by-head-symbol retrieval lane.
 
 use super::{LaneId, RetrievalLane};
+use crate::perf_trace::timed_phase;
 use crate::query::PatternQuery;
 use crate::query_understanding::RetrievalProfile;
 use crate::storage::{HunkHit, Storage};
@@ -30,15 +31,17 @@ impl Bm25HeadSymLane {
         let since_unix = query
             .since_unix
             .or_else(|| crate::query_understanding::parse_query(&query.query).since_unix);
-        self.storage
-            .bm25_hunks_by_symbol_name(
+        timed_phase(
+            "lane_fts_sym_head",
+            self.storage.bm25_hunks_by_symbol_name(
                 repo_id,
                 &query.query,
                 u8::try_from(k).unwrap_or(u8::MAX),
                 query.language.as_deref(),
                 since_unix,
-            )
-            .await
+            ),
+        )
+        .await
     }
 }
 

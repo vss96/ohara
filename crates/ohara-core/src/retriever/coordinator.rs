@@ -7,6 +7,7 @@
 //! 4. Apply each `ScoreRefiner` in sequence.
 //! 5. Truncate to caller's `k`.
 
+use crate::perf_trace::timed_phase;
 use crate::query::{reciprocal_rank_fusion, PatternQuery};
 use crate::retriever::{RetrievalLane, ScoreRefiner};
 use crate::storage::{HunkHit, HunkId};
@@ -49,7 +50,10 @@ pub async fn run(
     }
 
     // 3. RRF merge (k=60, Cormack 2009) → truncate to rerank pool.
-    let fused: Vec<HunkId> = reciprocal_rank_fusion(&rankings, 60);
+    let fused: Vec<HunkId> = timed_phase("rrf", async {
+        reciprocal_rank_fusion(&rankings, 60)
+    })
+    .await;
     let pool: Vec<HunkHit> = fused
         .into_iter()
         .take(rerank_pool_k)

@@ -2,6 +2,7 @@
 
 use super::{LaneId, RetrievalLane};
 use crate::embed::EmbeddingProvider;
+use crate::perf_trace::timed_phase;
 use crate::query::PatternQuery;
 use crate::query_understanding::RetrievalProfile;
 use crate::storage::{HunkHit, Storage};
@@ -37,22 +38,24 @@ impl VecLane {
             return Ok(vec![]);
         }
         let q_text = vec![query.query.clone()];
-        let mut embs = self.embedder.embed_batch(&q_text).await?;
+        let mut embs = timed_phase("embed_query", self.embedder.embed_batch(&q_text)).await?;
         let q_emb = embs
             .pop()
             .ok_or_else(|| crate::OhraError::Embedding("embed_batch returned empty".into()))?;
         let since_unix = query
             .since_unix
             .or_else(|| crate::query_understanding::parse_query(&query.query).since_unix);
-        self.storage
-            .knn_hunks(
+        timed_phase(
+            "lane_knn",
+            self.storage.knn_hunks(
                 repo_id,
                 &q_emb,
                 u8::try_from(k).unwrap_or(u8::MAX),
                 query.language.as_deref(),
                 since_unix,
-            )
-            .await
+            ),
+        )
+        .await
     }
 }
 
