@@ -22,11 +22,7 @@ impl CrossEncoderRefiner {
 
 #[async_trait]
 impl ScoreRefiner for CrossEncoderRefiner {
-    async fn refine(
-        &self,
-        query_text: &str,
-        hits: Vec<HunkHit>,
-    ) -> crate::Result<Vec<HunkHit>> {
+    async fn refine(&self, query_text: &str, hits: Vec<HunkHit>) -> crate::Result<Vec<HunkHit>> {
         if hits.is_empty() {
             return Ok(hits);
         }
@@ -42,10 +38,7 @@ impl ScoreRefiner for CrossEncoderRefiner {
                 (h, s)
             })
             .collect();
-        scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         Ok(scored.into_iter().map(|(h, _)| h).collect())
     }
 }
@@ -62,8 +55,21 @@ mod tests {
         use crate::types::{ChangeKind, CommitMeta, Hunk};
         HunkHit {
             hunk_id: id,
-            hunk: Hunk { commit_sha: "x".into(), file_path: "f.rs".into(), language: None, change_kind: ChangeKind::Added, diff_text: diff.into() },
-            commit: CommitMeta { commit_sha: "x".into(), parent_sha: None, is_merge: false, author: None, ts: 0, message: "m".into() },
+            hunk: Hunk {
+                commit_sha: "x".into(),
+                file_path: "f.rs".into(),
+                language: None,
+                change_kind: ChangeKind::Added,
+                diff_text: diff.into(),
+            },
+            commit: CommitMeta {
+                commit_sha: "x".into(),
+                parent_sha: None,
+                is_merge: false,
+                author: None,
+                ts: 0,
+                message: "m".into(),
+            },
             similarity: 0.5,
         }
     }
@@ -85,8 +91,7 @@ mod tests {
             make_hit(101, "diff-b"),
             make_hit(102, "diff-c"),
         ];
-        let reranker: Arc<dyn RerankProvider> =
-            Arc::new(ScriptedReranker(vec![2.0, 1.0, 3.0]));
+        let reranker: Arc<dyn RerankProvider> = Arc::new(ScriptedReranker(vec![2.0, 1.0, 3.0]));
         let refiner = CrossEncoderRefiner::new(reranker);
         let out = refiner.refine("query", hits).await.unwrap();
         assert_eq!(out.len(), 3);
@@ -97,8 +102,7 @@ mod tests {
 
     #[tokio::test]
     async fn cross_encoder_refiner_empty_input_returns_empty() {
-        let reranker: Arc<dyn RerankProvider> =
-            Arc::new(ScriptedReranker(vec![]));
+        let reranker: Arc<dyn RerankProvider> = Arc::new(ScriptedReranker(vec![]));
         let refiner = CrossEncoderRefiner::new(reranker);
         let out = refiner.refine("q", vec![]).await.unwrap();
         assert!(out.is_empty());

@@ -29,11 +29,7 @@ pub mod recency;
 /// refiners use it for relevance scoring; recency refiners ignore it.
 #[async_trait]
 pub trait ScoreRefiner: Send + Sync {
-    async fn refine(
-        &self,
-        query_text: &str,
-        hits: Vec<HunkHit>,
-    ) -> crate::Result<Vec<HunkHit>>;
+    async fn refine(&self, query_text: &str, hits: Vec<HunkHit>) -> crate::Result<Vec<HunkHit>>;
 }
 
 #[cfg(test)]

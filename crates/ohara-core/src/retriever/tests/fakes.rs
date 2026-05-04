@@ -180,11 +180,7 @@ impl crate::Storage for FakeStorage {
     ) -> crate::Result<crate::index_metadata::StoredIndexMetadata> {
         Ok(crate::index_metadata::StoredIndexMetadata::default())
     }
-    async fn put_index_metadata(
-        &self,
-        _: &RepoId,
-        _: &[(String, String)],
-    ) -> crate::Result<()> {
+    async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> crate::Result<()> {
         Ok(())
     }
 }

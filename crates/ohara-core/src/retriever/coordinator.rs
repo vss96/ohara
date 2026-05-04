@@ -50,10 +50,8 @@ pub async fn run(
     }
 
     // 3. RRF merge (k=60, Cormack 2009) → truncate to rerank pool.
-    let fused: Vec<HunkId> = timed_phase("rrf", async {
-        reciprocal_rank_fusion(&rankings, 60)
-    })
-    .await;
+    let fused: Vec<HunkId> =
+        timed_phase("rrf", async { reciprocal_rank_fusion(&rankings, 60) }).await;
     let pool: Vec<HunkHit> = fused
         .into_iter()
         .take(rerank_pool_k)
@@ -88,8 +86,21 @@ mod tests {
         use crate::types::{ChangeKind, CommitMeta, Hunk};
         HunkHit {
             hunk_id: id,
-            hunk: Hunk { commit_sha: "x".into(), file_path: "f.rs".into(), language: None, change_kind: ChangeKind::Added, diff_text: format!("diff-{id}") },
-            commit: CommitMeta { commit_sha: "x".into(), parent_sha: None, is_merge: false, author: None, ts: 1_700_000_000, message: "m".into() },
+            hunk: Hunk {
+                commit_sha: "x".into(),
+                file_path: "f.rs".into(),
+                language: None,
+                change_kind: ChangeKind::Added,
+                diff_text: format!("diff-{id}"),
+            },
+            commit: CommitMeta {
+                commit_sha: "x".into(),
+                parent_sha: None,
+                is_merge: false,
+                author: None,
+                ts: 1_700_000_000,
+                message: "m".into(),
+            },
             similarity: sim,
         }
     }
@@ -98,8 +109,15 @@ mod tests {
 
     #[async_trait]
     impl RetrievalLane for StaticLane {
-        fn id(&self) -> LaneId { self.0 }
-        async fn search(&self, _: &PatternQuery, _: &RepoId, _: usize) -> crate::Result<Vec<HunkHit>> {
+        fn id(&self) -> LaneId {
+            self.0
+        }
+        async fn search(
+            &self,
+            _: &PatternQuery,
+            _: &RepoId,
+            _: usize,
+        ) -> crate::Result<Vec<HunkHit>> {
             Ok(self.1.clone())
         }
     }
@@ -116,17 +134,31 @@ mod tests {
     #[tokio::test]
     async fn coordinator_rrf_merges_lanes() {
         let lanes: Vec<Box<dyn RetrievalLane>> = vec![
-            Box::new(StaticLane(LaneId::Vec, vec![make_hit(1, 0.9), make_hit(2, 0.5)])),
-            Box::new(StaticLane(LaneId::Bm25Text, vec![make_hit(2, 0.8), make_hit(1, 0.3)])),
+            Box::new(StaticLane(
+                LaneId::Vec,
+                vec![make_hit(1, 0.9), make_hit(2, 0.5)],
+            )),
+            Box::new(StaticLane(
+                LaneId::Bm25Text,
+                vec![make_hit(2, 0.8), make_hit(1, 0.3)],
+            )),
             Box::new(StaticLane(LaneId::Bm25HistSym, vec![make_hit(3, 0.4)])),
         ];
         let refiners: Vec<Box<dyn ScoreRefiner>> = vec![Box::new(IdentityRefiner)];
-        let q = PatternQuery { query: "test".into(), k: 5, language: None, since_unix: None, no_rerank: false };
+        let q = PatternQuery {
+            query: "test".into(),
+            k: 5,
+            language: None,
+            since_unix: None,
+            no_rerank: false,
+        };
         let repo_id = RepoId::from_parts("sha", "/repo");
         let out = run(&lanes, &refiners, &q, &repo_id, 10, 20).await.unwrap();
         assert_eq!(out.len(), 3, "all three unique ids survive rrf");
-        assert!(out.iter().position(|h| h.hunk_id == 3).unwrap() > 0,
-            "id=3 (single-lane) must rank below the two-lane ids");
+        assert!(
+            out.iter().position(|h| h.hunk_id == 3).unwrap() > 0,
+            "id=3 (single-lane) must rank below the two-lane ids"
+        );
     }
 
     #[tokio::test]
@@ -139,11 +171,18 @@ mod tests {
                 Ok(hits)
             }
         }
-        let lanes: Vec<Box<dyn RetrievalLane>> = vec![
-            Box::new(StaticLane(LaneId::Vec, vec![make_hit(10, 0.9), make_hit(11, 0.5)])),
-        ];
+        let lanes: Vec<Box<dyn RetrievalLane>> = vec![Box::new(StaticLane(
+            LaneId::Vec,
+            vec![make_hit(10, 0.9), make_hit(11, 0.5)],
+        ))];
         let refiners: Vec<Box<dyn ScoreRefiner>> = vec![Box::new(ReverseRefiner)];
-        let q = PatternQuery { query: "anything".into(), k: 5, language: None, since_unix: None, no_rerank: false };
+        let q = PatternQuery {
+            query: "anything".into(),
+            k: 5,
+            language: None,
+            since_unix: None,
+            no_rerank: false,
+        };
         let repo_id = RepoId::from_parts("sha", "/repo");
         let out = run(&lanes, &refiners, &q, &repo_id, 10, 20).await.unwrap();
         assert_eq!(out[0].hunk_id, 11);
