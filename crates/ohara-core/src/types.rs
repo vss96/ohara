@@ -184,6 +184,77 @@ pub struct Symbol {
     pub source_text: String,
 }
 
+/// Plan 21: opaque newtype wrapping the hex representation of a git blob
+/// OID. Used as the file-content key in `BlameCache`.
+///
+/// Two `ContentHash` values are equal iff they were produced from the same
+/// blob OID — which means the file's byte content is identical. The cache
+/// provides natural invalidation: a file whose content changes gets a new
+/// blob OID, producing a cache miss and a fresh `Blamer::blame_range` call.
+///
+/// `from_blob_oid` is the only constructor for production callers (where a
+/// real `git2::Oid` is available). `from_hex` exists for test and non-git
+/// callers that hold a pre-computed hex string.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ContentHash(String);
+
+impl ContentHash {
+    /// Construct from a git blob OID. The resulting hex string is 40 ASCII
+    /// characters (SHA-1) — the length guaranteed by `git2::Oid`.
+    pub fn from_blob_oid(oid: git2::Oid) -> Self {
+        Self(oid.to_string())
+    }
+
+    /// Construct from an already-computed hex string. No validation is
+    /// performed — callers are responsible for passing a valid hex OID.
+    pub fn from_hex(hex: &str) -> Self {
+        Self(hex.to_string())
+    }
+
+    /// Borrow the underlying hex string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+mod content_hash_tests {
+    use super::*;
+
+    #[test]
+    fn from_hex_round_trips_as_str() {
+        // Plan 21 Task A.1: ContentHash constructed from a known hex
+        // string must echo it back via as_str() unchanged.
+        let h = ContentHash::from_hex("deadbeef1234");
+        assert_eq!(h.as_str(), "deadbeef1234");
+    }
+
+    #[test]
+    fn content_hash_is_eq_and_hash() {
+        // Plan 21 Task A.1: ContentHash must be usable as a HashMap key
+        // (requires Hash + Eq). Two values built from the same hex string
+        // must be equal; two different hex strings must differ.
+        use std::collections::HashMap;
+        let a = ContentHash::from_hex("aaa");
+        let b = ContentHash::from_hex("aaa");
+        let c = ContentHash::from_hex("bbb");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        let mut m: HashMap<ContentHash, u8> = HashMap::new();
+        m.insert(a.clone(), 1);
+        assert_eq!(*m.get(&b).expect("must find by equal key"), 1);
+    }
+
+    #[test]
+    fn from_blob_oid_produces_40_char_hex() {
+        // Plan 21 Task A.1: from_blob_oid wraps git2::Oid::from_str,
+        // which produces 40-character hex. Verify the length contract.
+        let oid = git2::Oid::from_str("a".repeat(40).as_str()).expect("valid oid");
+        let h = ContentHash::from_blob_oid(oid);
+        assert_eq!(h.as_str().len(), 40);
+    }
+}
+
 #[cfg(test)]
 mod symbol_tests {
     use super::*;

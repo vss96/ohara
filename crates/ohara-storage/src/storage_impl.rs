@@ -263,6 +263,61 @@ impl Storage for SqliteStorage {
         with_conn(&self.pool, move |c| crate::tables::commit::get(c, &sha)).await
     }
 
+    async fn get_commits_by_sha(
+        &self,
+        _repo_id: &RepoId,
+        shas: &[String],
+    ) -> CoreResult<std::collections::HashMap<String, CommitMeta>> {
+        // Plan 21 Task B.1: batch-fetch commits via a single SQL IN (?,…)
+        // statement rather than N individual round-trips.
+        if shas.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let shas_owned: Vec<String> = shas.to_vec();
+        with_conn(&self.pool, move |c| {
+            // Build the IN clause with one placeholder per SHA.
+            let placeholders = shas_owned
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT sha, parent_sha, is_merge, ts, author, message \
+                 FROM commit_record \
+                 WHERE sha IN ({placeholders})"
+            );
+            let mut stmt = c.prepare(&sql)?;
+            // Bind each sha in order.
+            let params: Vec<&dyn rusqlite::ToSql> = shas_owned
+                .iter()
+                .map(|s| s as &dyn rusqlite::ToSql)
+                .collect();
+            let rows = stmt.query_map(params.as_slice(), |row| {
+                let commit_sha: String = row.get(0)?;
+                let parent_sha: Option<String> = row.get(1)?;
+                let is_merge: i64 = row.get(2)?;
+                let ts: i64 = row.get(3)?;
+                let author: Option<String> = row.get(4)?;
+                let message: String = row.get(5)?;
+                Ok(CommitMeta {
+                    commit_sha,
+                    parent_sha,
+                    is_merge: is_merge != 0,
+                    ts,
+                    author,
+                    message,
+                })
+            })?;
+            let mut out = std::collections::HashMap::new();
+            for r in rows {
+                let cm = r?;
+                out.insert(cm.commit_sha.clone(), cm);
+            }
+            Ok(out)
+        })
+        .await
+    }
+
     async fn get_hunks_for_file_in_commit(
         &self,
         _repo_id: &RepoId,
@@ -1538,6 +1593,58 @@ mod tests {
             .await
             .unwrap();
         assert!(hits.is_empty(), "no FTS match should yield empty Vec");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn get_commits_by_sha_returns_all_three_rows() {
+        // Plan 21 Task B.1: SqliteStorage's batched implementation must
+        // return all three seeded commits in one round-trip. Uses an
+        // in-memory database (":memory:" path).
+        use ohara_core::storage::Storage;
+        use ohara_core::types::{CommitMeta, RepoId};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db = SqliteStorage::open(tmp.path().join("test.db"))
+            .await
+            .unwrap();
+        let rid = RepoId::from_parts("deadbeef", "/x");
+        db.open_repo(&rid, "/x", "deadbeef").await.unwrap();
+
+        let shas = ["aaa000", "bbb000", "ccc000"];
+        for (i, sha) in shas.iter().enumerate() {
+            db.put_commit(
+                &rid,
+                &ohara_core::storage::CommitRecord {
+                    meta: CommitMeta {
+                        commit_sha: sha.to_string(),
+                        parent_sha: None,
+                        is_merge: false,
+                        author: Some("alice".into()),
+                        ts: i as i64 * 1_000,
+                        message: format!("msg {sha}"),
+                    },
+                    message_emb: vec![0.0; 384],
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let result = db
+            .get_commits_by_sha(&rid, &shas.map(String::from))
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 3, "all three rows must be returned");
+        for sha in &shas {
+            assert!(result.contains_key(*sha), "missing sha {sha}");
+        }
+        // Unknown SHA is absent, not an error.
+        let unknown = db
+            .get_commits_by_sha(&rid, &["notexist".to_string()])
+            .await
+            .unwrap();
+        assert!(unknown.is_empty());
     }
 }
 
