@@ -1,6 +1,71 @@
 //! Persist stage: writes one commit + its embedded hunks to storage
 //! in a single logical operation.
 
+use crate::indexer::stages::embed::EmbedOutput;
+use crate::storage::{CommitRecord, HunkRecord as StorageHunkRecord};
+use crate::types::{CommitMeta, RepoId};
+use crate::{OhraError, Result, Storage};
+
+/// The persist stage: writes commit + embedded hunks to storage in a
+/// single logical operation. The storage layer's DELETE-then-INSERT
+/// contract (`commit::put`) guarantees idempotency — re-running on the
+/// same SHA replays cleanly.
+///
+/// This stage carries no state. The coordinator calls it once per
+/// successfully embedded commit.
+pub struct PersistStage;
+
+impl PersistStage {
+    /// Write `commit` and all hunks in `embed_output` to `storage`.
+    ///
+    /// On success, the commit's watermark is ready to be advanced.
+    /// On error, the storage write is incomplete — the coordinator
+    /// should not advance the watermark and should propagate the error.
+    pub async fn run(
+        repo: &RepoId,
+        commit: &CommitMeta,
+        embed_output: EmbedOutput,
+        storage: &dyn Storage,
+    ) -> Result<()> {
+        let commit_record = CommitRecord {
+            meta: commit.clone(),
+            message_emb: embed_output.commit_embedding,
+        };
+        storage.put_commit(repo, &commit_record).await?;
+
+        let hunk_rows: Vec<StorageHunkRecord> = embed_output
+            .hunks
+            .into_iter()
+            .map(|eh| {
+                let semantic_text = eh.attributed.effective_semantic_text().to_owned();
+                let symbols = eh
+                    .attributed
+                    .symbols
+                    .map(|syms| {
+                        syms.into_iter()
+                            .map(|s| crate::types::HunkSymbol {
+                                kind: s.kind,
+                                name: s.name.clone(),
+                                qualified_name: s.qualified_name.clone(),
+                                attribution: crate::types::AttributionKind::ExactSpan,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                StorageHunkRecord {
+                    hunk: eh.attributed.record.source_hunk,
+                    diff_emb: eh.embedding,
+                    semantic_text,
+                    symbols,
+                }
+            })
+            .collect();
+
+        storage.put_hunks(repo, &hunk_rows).await?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
