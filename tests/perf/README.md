@@ -235,16 +235,12 @@ cargo build --release -p ohara-cli
 cargo test -p ohara-perf-tests --release -- --ignored index_bench --nocapture
 ```
 
-### Authoritative child-process peak RSS
+### Child-process peak RSS
 
-`index_bench` reports the *parent* (test process) peak RSS. For the
-authoritative child-process number, also run:
-
-```sh
-# macOS
-/usr/bin/time -l target/release/ohara index fixtures/medium/repo --no-progress 2>&1 | \
-    grep "maximum resident set size"
-# Linux
-/usr/bin/time -v target/release/ohara index fixtures/medium/repo --no-progress 2>&1 | \
-    grep "Maximum resident set size"
-```
+`index_bench` wraps each `ohara index` invocation with
+`/usr/bin/time -l` (macOS) or `/usr/bin/time -v` (Linux) and parses
+the "maximum resident set size" line from its stderr output. The
+`peak_rss_bytes` field in the JSON report reflects the child process's
+peak, not the test harness. If `/usr/bin/time` is unavailable on the
+host, the harness falls back to the parent-process peak with a warning
+printed to stderr.

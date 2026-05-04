@@ -13,11 +13,13 @@
 //!     --ignored index_bench --nocapture
 //! ```
 //!
-//! For the authoritative *child*-process peak RSS, run:
-//!     /usr/bin/time -l target/release/ohara index <fixture> --no-progress
-//! and grep "maximum resident set size". The harness's reported
-//! `peak_rss_bytes` is the *parent* (test) process's peak — useful
-//! as a relative comparison across runs but not the absolute number.
+//! The harness wraps the `ohara index` invocation with
+//! `/usr/bin/time -l` (macOS) or `/usr/bin/time -v` (Linux) to
+//! capture the child-process peak RSS directly from the OS. The
+//! result is parsed from the `time` output's stderr and recorded
+//! in `peak_rss_bytes`. If `/usr/bin/time` is unavailable on the
+//! host, the harness falls back to the parent-process peak (same
+//! caveat as before: useful as a relative comparison only).
 use ohara_perf_tests::{current_git_sha, ensure_medium_fixture, peak_rss_bytes, workspace_root};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -92,16 +94,48 @@ fn write_report(report: &RunReport) -> PathBuf {
     path
 }
 
-/// Placeholder: getting the child's *exact* peak RSS portably from
-/// inside this harness is brittle (`RUSAGE_CHILDREN` aggregates across
-/// every child the test process has reaped, and we spawn multiple).
-/// The harness reports the *parent*'s peak, which moves with the
-/// child indirectly via fs cache pressure but does NOT include the
-/// child's anonymous pages. Operators who need the authoritative
-/// child number run `/usr/bin/time -l target/release/ohara index ...`
-/// directly — see the file-level docs.
-fn child_peak_rss(_out: &std::process::Output) -> u64 {
-    peak_rss_bytes().unwrap_or(0)
+fn time_command() -> &'static str {
+    "/usr/bin/time"
+}
+
+#[cfg(target_os = "macos")]
+fn time_flag() -> &'static str {
+    "-l"
+}
+#[cfg(target_os = "linux")]
+fn time_flag() -> &'static str {
+    "-v"
+}
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn time_flag() -> &'static str {
+    "-l" // best-effort; unsupported platforms fall back to harness peak
+}
+
+/// Parse `/usr/bin/time` stderr for the child's peak RSS in bytes.
+///
+/// macOS BSD `time -l` line:
+///     "        12345678  maximum resident set size"
+/// (number is bytes; line is whitespace-prefixed).
+///
+/// Linux GNU `time -v` line:
+///     "\tMaximum resident set size (kbytes): 12345"
+/// (number is kilobytes; we multiply by 1024).
+///
+/// Returns `None` when the line isn't found (e.g. /usr/bin/time missing on
+/// the host, unsupported platform), so the caller can fall back gracefully.
+fn parse_time_rss(stderr: &str) -> Option<u64> {
+    for line in stderr.lines() {
+        let trimmed = line.trim_start();
+        // macOS: "<bytes>  maximum resident set size"
+        if let Some(rest) = trimmed.strip_suffix("maximum resident set size") {
+            return rest.trim().parse::<u64>().ok();
+        }
+        // Linux: "Maximum resident set size (kbytes): <kb>"
+        if let Some(rest) = trimmed.strip_prefix("Maximum resident set size (kbytes): ") {
+            return rest.trim().parse::<u64>().ok().map(|kb| kb * 1024);
+        }
+    }
+    None
 }
 
 #[test]
@@ -120,7 +154,9 @@ fn index_bench_emits_run_report() {
         let work = copy_fixture(&fixture);
         let ohara_home = tempfile::tempdir().expect("tempdir");
         let start = Instant::now();
-        let out = Command::new(&bin)
+        let out = Command::new(time_command())
+            .arg(time_flag())
+            .arg(&bin)
             .env("OHARA_HOME", ohara_home.path())
             .arg("index")
             .arg(&work)
@@ -128,7 +164,7 @@ fn index_bench_emits_run_report() {
             .arg("--embed-provider")
             .arg("cpu")
             .output()
-            .expect("spawn ohara index");
+            .expect("spawn /usr/bin/time + ohara index");
         let wall_ms = start.elapsed().as_millis() as u64;
         if !out.status.success() {
             panic!(
@@ -137,8 +173,12 @@ fn index_bench_emits_run_report() {
             );
         }
         let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
         let (commits, hunks) = parse_report_line(&stdout);
-        let child_peak = child_peak_rss(&out);
+        let child_peak = parse_time_rss(&stderr).unwrap_or_else(|| {
+            eprintln!("warning: /usr/bin/time RSS line not found; falling back to parent peak");
+            peak_rss_bytes().unwrap_or(0)
+        });
         iters.push(IterReport {
             wall_ms,
             peak_rss_bytes: child_peak,
@@ -165,5 +205,36 @@ fn index_bench_emits_run_report() {
             it.new_commits,
             it.new_hunks,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_time_rss;
+
+    #[test]
+    fn parses_macos_time_l_format() {
+        let stderr = "\
+indexed: 100 new commits, 500 hunks, 0 HEAD symbols
+        12345678  maximum resident set size
+             1024  page reclaims
+";
+        assert_eq!(parse_time_rss(stderr), Some(12_345_678));
+    }
+
+    #[test]
+    fn parses_linux_time_v_format() {
+        let stderr = "\
+indexed: 100 new commits, 500 hunks, 0 HEAD symbols
+\tMaximum resident set size (kbytes): 1500
+\tAverage resident set size (kbytes): 0
+";
+        assert_eq!(parse_time_rss(stderr), Some(1_500 * 1024));
+    }
+
+    #[test]
+    fn returns_none_when_no_rss_line_present() {
+        let stderr = "ohara: indexing complete\nsome unrelated stderr noise\n";
+        assert_eq!(parse_time_rss(stderr), None);
     }
 }
