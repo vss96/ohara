@@ -4,12 +4,23 @@
 use crate::error::EngineError;
 use crate::handle::RepoHandle;
 use ohara_core::embed::RerankProvider;
+use ohara_core::query::{PatternQuery, ResponseMeta};
 use ohara_core::types::RepoId;
 use ohara_core::EmbeddingProvider;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// Result returned by [`RetrievalEngine::find_pattern`].
+///
+/// `Deserialize` is needed because the daemon client (Phase D) will
+/// deserialize this from a socket response.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct FindPatternResult {
+    pub hits: Vec<ohara_core::query::PatternHit>,
+    pub meta: ResponseMeta,
+}
 
 pub struct RetrievalEngine {
     embedder: Arc<dyn EmbeddingProvider>,
@@ -88,6 +99,33 @@ impl RetrievalEngine {
         w.insert(repo_id, handle.clone());
         Ok(handle)
     }
+
+    /// Semantic search over a repo's indexed git history.
+    ///
+    /// Opens (or reuses) the per-repo handle, then delegates to the
+    /// retriever's three-lane pipeline (vector KNN + BM25 text + BM25
+    /// symbol → RRF → optional cross-encoder rerank → recency multiplier).
+    ///
+    /// Returns [`FindPatternResult`] with the ranked hits and empty meta.
+    /// Meta is wired in Task B.4 (MetaCache).
+    pub async fn find_pattern(
+        &self,
+        repo_path: impl AsRef<Path>,
+        query: PatternQuery,
+    ) -> crate::Result<FindPatternResult> {
+        let handle = self.open_repo(repo_path).await?;
+        let now_unix = chrono::Utc::now().timestamp();
+        let (hits, _profile) = handle
+            .retriever
+            .find_pattern_with_profile(&handle.repo_id, &query, now_unix)
+            .await
+            .map_err(EngineError::from)?;
+        Ok(FindPatternResult {
+            hits,
+            // Meta wired in Task B.4 (MetaCache)
+            meta: ResponseMeta::default(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -110,7 +148,7 @@ pub(crate) mod tests {
     #[async_trait::async_trait]
     impl ohara_core::EmbeddingProvider for DummyEmbedder {
         fn dimension(&self) -> usize {
-            4
+            384
         }
 
         fn model_id(&self) -> &str {
@@ -118,7 +156,7 @@ pub(crate) mod tests {
         }
 
         async fn embed_batch(&self, texts: &[String]) -> ohara_core::Result<Vec<Vec<f32>>> {
-            Ok(texts.iter().map(|_| vec![0.1, 0.2, 0.3, 0.4]).collect())
+            Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
         }
     }
 
@@ -166,8 +204,15 @@ pub(crate) mod tests {
             since_unix: None,
             no_rerank: false,
         };
-        let out = engine.find_pattern(tmp.path(), q).await.expect("find_pattern");
-        assert!(out.hits.is_empty(), "empty index → empty hits, got {:?}", out.hits);
+        let out = engine
+            .find_pattern(tmp.path(), q)
+            .await
+            .expect("find_pattern");
+        assert!(
+            out.hits.is_empty(),
+            "empty index → empty hits, got {:?}",
+            out.hits
+        );
     }
 
     #[tokio::test]

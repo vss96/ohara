@@ -10,13 +10,15 @@ ohara-core = { path = "../ohara-core" }
 ohara-storage = { path = "../ohara-storage" }
 ohara-embed = { path = "../ohara-embed" }
 ohara-git = { path = "../ohara-git" }
+chrono.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-git2 = { version = "0.18", default-features = false }
+git2.workspace = true
 async-trait.workspace = true
 
 [features]

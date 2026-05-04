@@ -36,14 +36,14 @@ pub struct PatternHit {
     pub provenance: Provenance,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IndexStatus {
     pub last_indexed_commit: Option<String>,
     pub commits_behind_head: u64,
     pub indexed_at: Option<String>, // ISO 8601
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ResponseMeta {
     pub index_status: IndexStatus,
     pub hint: Option<String>,
