@@ -1,6 +1,7 @@
 //! `RetrievalEngine` — long-lived holder of the embedder, reranker,
 //! and per-repo handles.
 
+use crate::cache::BlameCache;
 use crate::cache::EmbeddingCache;
 use crate::cache::MetaCache;
 use crate::error::EngineError;
@@ -50,6 +51,7 @@ pub struct RetrievalEngine {
     repos: RwLock<HashMap<RepoId, Arc<RepoHandle>>>,
     embed_cache: EmbeddingCache,
     meta_cache: MetaCache,
+    blame_cache: BlameCache,
     meta_hit_count: AtomicU64,
     /// Unix-second timestamp of the last dispatched request.
     /// Written by [`Self::touch`]; read by [`Self::idle_for`].
@@ -69,6 +71,7 @@ impl RetrievalEngine {
             repos: RwLock::new(HashMap::new()),
             embed_cache: EmbeddingCache::new(model_id, 256),
             meta_cache: MetaCache::new(Duration::from_secs(5)),
+            blame_cache: BlameCache::new(64),
             meta_hit_count: AtomicU64::new(0),
             last_request_at: AtomicU64::new(now_unix),
         }
@@ -246,7 +249,7 @@ impl RetrievalEngine {
         let repo_id = RepoId::from_parts(&first, &canonical.to_string_lossy());
         self.repos.write().await.remove(&repo_id);
         self.meta_cache.invalidate(&repo_id);
-        // BlameCache invalidation lands in Phase E (Task E.1).
+        self.blame_cache.invalidate_repo(&repo_id);
         Ok(())
     }
 
@@ -265,6 +268,13 @@ impl RetrievalEngine {
         repo_path: impl AsRef<Path>,
         query: ExplainQuery,
     ) -> crate::Result<ExplainResult> {
+        // TODO(plan-16 E.1 follow-up): cache `Vec<BlameRange>` in `self.blame_cache`
+        // keyed by `(repo_id, query.file, head_blob_oid)` so repeated calls for the
+        // same file+range skip `Blamer::blame_range`. Requires either exposing the
+        // HEAD blob OID from `RepoHandle` or opening a git2::Repository from
+        // `handle.repo_path` to call `head_tree.get_path(&file).id()`. The hydration
+        // step (storage lookups) must still run on every call since it is cheap.
+        // `invalidate_repo` already calls `self.blame_cache.invalidate_repo` (E.1).
         let handle = self.open_repo(repo_path).await?;
         let (hits, meta) = ohara_core::explain::explain_change(
             &*handle.storage,
