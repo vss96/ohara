@@ -1,5 +1,144 @@
 //! Coordinator: drives the 5-stage pipeline per commit.
 
+use crate::indexer::stages::{
+    attribute::AttributeStage, commit_walk::CommitWalkStage,
+    embed::EmbedStage, hunk_chunk::HunkChunkStage, persist::PersistStage,
+};
+use crate::indexer::stages::attribute::AttributedHunk;
+use crate::indexer::stages::commit_walk::CommitWatermark;
+use crate::indexer::{AtomicSymbolExtractor, CommitSource, NullAtomicSymbolExtractor, SymbolSource};
+use crate::types::{CommitMeta, RepoId};
+use crate::{EmbeddingProvider, Result, Storage};
+use std::sync::Arc;
+
+/// Drives the 5-stage indexer pipeline per commit.
+///
+/// The coordinator:
+/// - Queries `Storage::get_index_status` once per run to build the
+///   resume watermark.
+/// - Filters `CommitWalkStage` output to skip already-indexed commits.
+/// - Orchestrates stages 2-5 per commit.
+/// - Does NOT hold per-stage state — stages are constructed fresh per
+///   `run` call so the coordinator is safe to re-use across runs.
+pub struct Coordinator {
+    storage: Arc<dyn Storage + Send + Sync>,
+    embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
+    embed_batch: usize,
+}
+
+impl Coordinator {
+    /// Construct a coordinator with the default `embed_batch` of 32.
+    pub fn new(
+        storage: Arc<dyn Storage + Send + Sync>,
+        embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
+    ) -> Self {
+        Self {
+            storage,
+            embedder,
+            embed_batch: 32,
+        }
+    }
+
+    /// Override the embed stage's batch size.
+    pub fn with_embed_batch(mut self, n: usize) -> Self {
+        self.embed_batch = n.max(1);
+        self
+    }
+
+    /// Run the full 5-stage pipeline for all commits in `source` that
+    /// follow the resume watermark.
+    pub async fn run(
+        &self,
+        repo: &RepoId,
+        commit_source: &dyn CommitSource,
+        symbol_source: &dyn SymbolSource,
+    ) -> Result<()> {
+        // Stage 0: determine resume watermark from index status.
+        let status = self.storage.get_index_status(repo).await?;
+        let watermark = status
+            .last_indexed_commit
+            .as_deref()
+            .map(CommitWatermark::new);
+
+        // Stage 1: commit walk.
+        let commits = CommitWalkStage::run(commit_source, watermark.as_ref()).await?;
+
+        let embed_stage = EmbedStage::new(self.embedder.clone())
+            .with_embed_batch(self.embed_batch);
+
+        // Null extractor — binaries wire the real tree-sitter extractor
+        // via `Indexer::with_atomic_symbol_extractor`.
+        let extractor = NullAtomicSymbolExtractor;
+
+        for commit in &commits {
+            // Skip commits that are already indexed.
+            if self.storage.commit_exists(&commit.commit_sha).await? {
+                tracing::debug!(sha = %commit.commit_sha, "plan-19: skipping already-indexed commit");
+                continue;
+            }
+            self.run_commit(
+                repo,
+                commit,
+                commit_source,
+                symbol_source,
+                &embed_stage,
+                &extractor,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Run stages 2-5 for a single commit.
+    async fn run_commit(
+        &self,
+        repo: &RepoId,
+        commit: &CommitMeta,
+        commit_source: &dyn CommitSource,
+        symbol_source: &dyn SymbolSource,
+        _embed_stage: &EmbedStage,
+        extractor: &dyn AtomicSymbolExtractor,
+    ) -> Result<()> {
+        // Stage 2: hunk chunk.
+        let records = HunkChunkStage::run(commit_source, commit).await?;
+
+        // Stage 3: attribute.
+        let attributed = AttributeStage::run(
+            &records,
+            &commit.commit_sha,
+            commit_source,
+            symbol_source,
+            extractor,
+        )
+        .await?;
+
+        // Stages 4-5 share a helper so they can be tested in isolation.
+        self.run_from_attributed(repo, commit, attributed).await
+    }
+
+    /// Run stages 4 (embed) and 5 (persist) given pre-built
+    /// `AttributedHunk` values.
+    ///
+    /// This entry point enables "resume from after attribute stage":
+    /// a caller can construct `Vec<AttributedHunk>` directly (e.g.
+    /// from a checkpoint) and drive only the downstream stages.
+    pub async fn run_from_attributed(
+        &self,
+        repo: &RepoId,
+        commit: &CommitMeta,
+        attributed: Vec<AttributedHunk>,
+    ) -> Result<()> {
+        let embed_stage = EmbedStage::new(self.embedder.clone())
+            .with_embed_batch(self.embed_batch);
+
+        // Stage 4: embed.
+        let embed_output = embed_stage.run(&commit.message, &attributed).await?;
+
+        // Stage 5: persist.
+        PersistStage::run(repo, commit, embed_output, self.storage.as_ref()).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

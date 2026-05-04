@@ -4,7 +4,7 @@
 use crate::indexer::stages::embed::EmbedOutput;
 use crate::storage::{CommitRecord, HunkRecord as StorageHunkRecord};
 use crate::types::{CommitMeta, RepoId};
-use crate::{OhraError, Result, Storage};
+use crate::{Result, Storage};
 
 /// The persist stage: writes commit + embedded hunks to storage in a
 /// single logical operation. The storage layer's DELETE-then-INSERT
