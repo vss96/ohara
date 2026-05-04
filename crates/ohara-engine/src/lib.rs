@@ -13,6 +13,7 @@ pub mod ipc;
 pub mod registry;
 pub mod server;
 
+pub use cache::BlameCache;
 pub use cache::EmbeddingCache;
 pub use cache::MetaCache;
 pub use engine::ExplainResult;
