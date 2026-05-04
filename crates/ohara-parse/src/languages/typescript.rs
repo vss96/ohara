@@ -171,4 +171,24 @@ mod tests {
             assert_eq!(s.language, "typescript");
         }
     }
+
+    #[test]
+    fn extracts_interface_type_alias_and_enum() {
+        let src = "interface Greeter { hello(): string; }\n\
+                   type UserId = number;\n\
+                   enum Status { Active, Inactive }\n";
+        let syms = extract("a.ts", src, "deadbeef", TsFlavor::Ts).unwrap();
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"Greeter"), "interface missing: {names:?}");
+        assert!(names.contains(&"UserId"), "type alias missing: {names:?}");
+        assert!(names.contains(&"Status"), "enum missing: {names:?}");
+        for n in ["Greeter", "UserId", "Status"] {
+            let s = syms.iter().find(|s| s.name == n).unwrap();
+            assert!(
+                matches!(s.kind, ohara_core::types::SymbolKind::Class),
+                "expected Class kind for {n}, got {:?}",
+                s.kind
+            );
+        }
+    }
 }
