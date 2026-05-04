@@ -1,1 +1,91 @@
-// Plan 20 — Bm25HeadSymLane implementation (to be added in Task B.4)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::PatternQuery;
+    use crate::storage::{HunkHit, HunkId};
+    use crate::types::RepoId;
+    use async_trait::async_trait;
+    use std::sync::Arc;
+
+    struct HeadSymStorage(Vec<HunkHit>);
+
+    #[async_trait]
+    impl crate::Storage for HeadSymStorage {
+        async fn bm25_hunks_by_symbol_name(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> crate::Result<Vec<HunkHit>> {
+            Ok(self.0.clone())
+        }
+        async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> crate::Result<()> { Ok(()) }
+        async fn get_index_status(&self, _: &RepoId) -> crate::Result<crate::query::IndexStatus> {
+            Ok(crate::query::IndexStatus { last_indexed_commit: None, commits_behind_head: 0, indexed_at: None })
+        }
+        async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> crate::Result<()> { Ok(()) }
+        async fn put_commit(&self, _: &RepoId, _: &crate::storage::CommitRecord) -> crate::Result<()> { Ok(()) }
+        async fn commit_exists(&self, _: &str) -> crate::Result<bool> { Ok(false) }
+        async fn put_hunks(&self, _: &RepoId, _: &[crate::storage::HunkRecord]) -> crate::Result<()> { Ok(()) }
+        async fn put_head_symbols(&self, _: &RepoId, _: &[crate::types::Symbol]) -> crate::Result<()> { Ok(()) }
+        async fn clear_head_symbols(&self, _: &RepoId) -> crate::Result<()> { Ok(()) }
+        async fn knn_hunks(&self, _: &RepoId, _: &[f32], _: u8, _: Option<&str>, _: Option<i64>) -> crate::Result<Vec<HunkHit>> { Ok(vec![]) }
+        async fn bm25_hunks_by_text(&self, _: &RepoId, _: &str, _: u8, _: Option<&str>, _: Option<i64>) -> crate::Result<Vec<HunkHit>> { Ok(vec![]) }
+        async fn bm25_hunks_by_semantic_text(&self, _: &RepoId, _: &str, _: u8, _: Option<&str>, _: Option<i64>) -> crate::Result<Vec<HunkHit>> { Ok(vec![]) }
+        async fn bm25_hunks_by_historical_symbol(&self, _: &RepoId, _: &str, _: u8, _: Option<&str>, _: Option<i64>) -> crate::Result<Vec<HunkHit>> { Ok(vec![]) }
+        async fn get_hunk_symbols(&self, _: &RepoId, _: HunkId) -> crate::Result<Vec<crate::types::HunkSymbol>> { Ok(vec![]) }
+        async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> { Ok(false) }
+        async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> { Ok(()) }
+        async fn get_commit(&self, _: &RepoId, _: &str) -> crate::Result<Option<crate::types::CommitMeta>> { Ok(None) }
+        async fn get_hunks_for_file_in_commit(&self, _: &RepoId, _: &str, _: &str) -> crate::Result<Vec<crate::types::Hunk>> { Ok(vec![]) }
+        async fn get_neighboring_file_commits(&self, _: &RepoId, _: &str, _: &str, _: u8, _: u8) -> crate::Result<Vec<(u32, crate::types::CommitMeta)>> { Ok(vec![]) }
+        async fn get_index_metadata(&self, _: &RepoId) -> crate::Result<crate::index_metadata::StoredIndexMetadata> { Ok(crate::index_metadata::StoredIndexMetadata::default()) }
+        async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> crate::Result<()> { Ok(()) }
+    }
+
+    fn make_hit(id: HunkId) -> HunkHit {
+        use crate::types::{ChangeKind, CommitMeta, Hunk};
+        HunkHit {
+            hunk_id: id,
+            hunk: Hunk { commit_sha: "ddd".into(), file_path: "src/main.rs".into(), language: Some("rust".into()), change_kind: ChangeKind::Modified, diff_text: "+fn qux(){}".into() },
+            commit: CommitMeta { commit_sha: "ddd".into(), parent_sha: None, is_merge: false, author: Some("diana".into()), ts: 1_700_000_000, message: "add qux".into() },
+            similarity: 0.5,
+        }
+    }
+
+    #[tokio::test]
+    async fn bm25_head_sym_lane_returns_hits() {
+        let hit = make_hit(30);
+        let storage: Arc<dyn crate::Storage> = Arc::new(HeadSymStorage(vec![hit]));
+        let lane = Bm25HeadSymLane::new(storage);
+        let q = PatternQuery { query: "qux".into(), k: 5, language: None, since_unix: None, no_rerank: false };
+        let repo_id = RepoId::from_parts("sha", "/repo");
+        let hits = lane.search(&q, &repo_id, 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].hunk_id, 30);
+    }
+
+    #[tokio::test]
+    async fn bm25_head_sym_lane_self_skips_when_symbol_disabled() {
+        use crate::query_understanding::RetrievalProfile;
+        let hit = make_hit(31);
+        let storage: Arc<dyn crate::Storage> = Arc::new(HeadSymStorage(vec![hit]));
+        let lane = Bm25HeadSymLane::new(storage);
+        let profile = RetrievalProfile {
+            name: "test".into(),
+            recency_multiplier: 1.0,
+            vec_lane_enabled: true,
+            text_lane_enabled: true,
+            symbol_lane_enabled: false,
+            rerank_top_k: None,
+            explanation: "test".into(),
+            ..RetrievalProfile::default_unknown()
+        };
+        let q = PatternQuery { query: "qux".into(), k: 5, language: None, since_unix: None, no_rerank: false };
+        let repo_id = RepoId::from_parts("sha", "/repo");
+        let hits = lane.search_with_profile(&q, &repo_id, 10, &profile).await.unwrap();
+        assert!(hits.is_empty());
+    }
+}
