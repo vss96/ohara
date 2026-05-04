@@ -376,6 +376,41 @@ mod tests {
         );
     }
 
+    fn rec(pid: u32, socket: &str) -> DaemonRecord {
+        DaemonRecord {
+            pid,
+            socket_path: PathBuf::from(socket),
+            ohara_version: "0.7.4".to_string(),
+            ohara_git_sha: None,
+            started_at_unix: 1_700_000_000,
+            last_health_unix: 0,
+            busy: false,
+        }
+    }
+
+    #[test]
+    fn touch_health_advances_last_health_unix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let r = Registry::open(&path).unwrap();
+        let pid = std::process::id();
+        let mut record = rec(pid, "/tmp/h.sock");
+        record.last_health_unix = 0; // explicitly stale
+        r.register(record).unwrap();
+        r.touch_health(pid).unwrap();
+        let after = r
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|d| d.pid == pid)
+            .expect("record present");
+        assert!(
+            after.last_health_unix > 0,
+            "touch_health must advance last_health_unix, got {}",
+            after.last_health_unix
+        );
+    }
+
     #[test]
     fn concurrent_register_does_not_lose_entries() {
         let dir = tempfile::tempdir().unwrap();
