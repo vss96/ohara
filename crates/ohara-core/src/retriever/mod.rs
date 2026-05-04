@@ -9,6 +9,9 @@
 pub mod lanes;
 pub use lanes::{LaneId, RetrievalLane};
 
+pub mod refiners;
+pub use refiners::ScoreRefiner;
+
 use crate::diff_text::{truncate_diff, DIFF_EXCERPT_MAX_LINES};
 use crate::embed::RerankProvider;
 use crate::perf_trace::timed_phase;
