@@ -18,13 +18,46 @@ pub struct DaemonHandle {
 /// (`no_daemon = true`) or by the environment (`CI=true` and
 /// `OHARA_FORCE_DAEMON` is not set).
 pub fn find_or_spawn_daemon(
-    _ohara_binary: &Path,
-    _ohara_version: &str,
-    _ohara_git_sha: &str,
-    _registry_path: &Path,
-    _no_daemon: bool,
+    ohara_binary: &Path,
+    ohara_version: &str,
+    ohara_git_sha: &str,
+    registry_path: &Path,
+    no_daemon: bool,
 ) -> crate::Result<Option<DaemonHandle>> {
-    todo!("D.6: implement find_or_spawn_daemon")
+    if no_daemon {
+        return Ok(None);
+    }
+    if std::env::var_os("CI").is_some() && std::env::var_os("OHARA_FORCE_DAEMON").is_none() {
+        return Ok(None);
+    }
+    let reg = Registry::open(registry_path)
+        .map_err(|e| EngineError::Internal(format!("registry open: {e}")))?;
+    if let Some(existing) = reg
+        .pick_compatible(ohara_version)
+        .map_err(|e| EngineError::Internal(format!("registry pick: {e}")))?
+    {
+        return Ok(Some(DaemonHandle {
+            socket_path: existing.socket_path.clone(),
+            pid: existing.pid,
+            spawned: false,
+        }));
+    }
+    let sd = spawn_daemon(ohara_binary, &runtime_dir(), ohara_version)?;
+    reg.register(DaemonRecord {
+        pid: sd.pid,
+        socket_path: sd.socket_path.clone(),
+        ohara_version: ohara_version.into(),
+        ohara_git_sha: Some(ohara_git_sha.into()),
+        started_at_unix: now_unix(),
+        last_health_unix: now_unix(),
+        busy: false,
+    })
+    .map_err(|e| EngineError::Internal(format!("registry register: {e}")))?;
+    Ok(Some(DaemonHandle {
+        socket_path: sd.socket_path,
+        pid: sd.pid,
+        spawned: true,
+    }))
 }
 
 /// Return the platform-appropriate path for the daemon registry file.
@@ -32,7 +65,32 @@ pub fn find_or_spawn_daemon(
 /// - macOS: `~/Library/Caches/ohara/daemon/<version>/registry.json`
 /// - Linux/other: `${XDG_CACHE_HOME:-~/.cache}/ohara/daemon/<version>/registry.json`
 pub fn registry_path() -> crate::Result<PathBuf> {
-    todo!("D.6: implement registry_path")
+    let base = registry_base()?;
+    Ok(base
+        .join("daemon")
+        .join(env!("CARGO_PKG_VERSION"))
+        .join("registry.json"))
+}
+
+fn registry_base() -> crate::Result<PathBuf> {
+    if cfg!(target_os = "macos") {
+        let home =
+            std::env::var_os("HOME").ok_or_else(|| EngineError::Internal("HOME not set".into()))?;
+        return Ok(PathBuf::from(home).join("Library/Caches/ohara"));
+    }
+    if let Some(d) = std::env::var_os("XDG_CACHE_HOME") {
+        return Ok(PathBuf::from(d).join("ohara"));
+    }
+    let home =
+        std::env::var_os("HOME").ok_or_else(|| EngineError::Internal("HOME not set".into()))?;
+    Ok(PathBuf::from(home).join(".cache/ohara"))
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
