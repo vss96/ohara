@@ -1,7 +1,9 @@
+pub mod coordinator;
+pub mod stages;
+
 use crate::index_metadata::RuntimeIndexMetadata;
-use crate::storage::{CommitRecord, HunkRecord};
 use crate::types::{CommitMeta, Hunk, RepoId, Symbol};
-use crate::{EmbeddingProvider, OhraError, Result, Storage};
+use crate::{EmbeddingProvider, Result, Storage};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -43,6 +45,16 @@ pub trait CommitSource: Send + Sync {
 #[async_trait::async_trait]
 pub trait SymbolSource: Send + Sync {
     async fn extract_head_symbols(&self) -> Result<Vec<Symbol>>;
+
+    /// Per-file HEAD symbol lookup for the attribute stage.
+    ///
+    /// Default implementation returns an empty Vec — callers fall back
+    /// to no symbol attribution. Implementations backed by a pre-built
+    /// symbol index can override this for fast per-file lookup without
+    /// re-parsing the whole tree.
+    async fn head_symbols_for_path(&self, _path: &str) -> Result<Vec<Symbol>> {
+        Ok(vec![])
+    }
 }
 
 /// Plan 11: per-file atomic-symbol extractor used during per-hunk
@@ -180,249 +192,71 @@ impl Indexer {
 
     /// Run a (full or incremental) indexing pass for `repo_id`.
     /// `commit_source` and `symbol_source` are wired by the caller.
+    ///
+    /// Delegates the per-commit pipeline (stages 1-5) to `Coordinator`,
+    /// keeping HEAD-symbol extraction, progress sink, runtime metadata,
+    /// and `IndexerReport` hydration in this wrapper (plan-19 C.2).
     pub async fn run(
         &self,
         repo_id: &RepoId,
         commit_source: &dyn CommitSource,
         symbol_source: &dyn SymbolSource,
     ) -> Result<IndexerReport> {
-        let mut timings = PhaseTimings::default();
+        use crate::indexer::coordinator::Coordinator;
 
-        let status = self.storage.get_index_status(repo_id).await?;
-        let walk_start = Instant::now();
-        let commits = commit_source
-            .list_commits(status.last_indexed_commit.as_deref())
+        // Delegate stages 1-5 to the coordinator.
+        let coordinator = Coordinator::new(self.storage.clone(), self.embedder.clone())
+            .with_embed_batch(self.embed_batch);
+
+        let result = coordinator
+            .run_timed_with_extractor(
+                repo_id,
+                commit_source,
+                symbol_source,
+                self.symbol_extractor.as_ref(),
+            )
             .await?;
-        timings.commit_walk_ms = walk_start.elapsed().as_millis() as u64;
-        let total_commits = commits.len();
-        tracing::info!(new_commits = total_commits, "begin index pass");
-        self.progress.start(total_commits);
 
-        let mut latest_sha: Option<String> = status.last_indexed_commit.clone();
-        let mut total_hunks = 0usize;
-        let mut commits_done = 0usize;
-        // Liveness signal for long runs: emit an info-level event every
-        // PROGRESS_INTERVAL commits so `RUST_LOG=info` users see steady
-        // output. Without this the indexer is silent for minutes on
-        // first-time runs against real-world repos (~5k+ commits).
-        const PROGRESS_INTERVAL: usize = 100;
+        let mut timings = result.timings;
+        timings.total_diff_bytes = result.total_diff_bytes;
+        timings.total_added_lines = result.total_added_lines;
 
-        for chunk in commits.chunks(self.batch_commits) {
-            for cm in chunk {
-                // Plan 9: resume short-circuit. The watermark only excludes
-                // strict ancestors of the last-indexed sha; commits reachable
-                // via a different parent path (merge from a feature branch,
-                // octopus merge, history rewrite) would otherwise be re-walked
-                // and re-embedded even though their commit_record row already
-                // exists. A sub-millisecond PK lookup avoids 14+ minutes of
-                // wasted embedding on merge-heavy resumes.
-                if self.storage.commit_exists(&cm.commit_sha).await? {
-                    tracing::debug!(sha = %cm.commit_sha, "skip already-indexed commit");
-                    latest_sha = Some(cm.commit_sha.clone());
-                    commits_done += 1;
-                    self.progress.commit_done(commits_done, total_hunks);
-                    if commits_done % PROGRESS_INTERVAL == 0 {
-                        if let Some(sha) = latest_sha.as_deref() {
-                            self.storage.set_last_indexed_commit(repo_id, sha).await?;
-                        }
-                    }
-                    continue;
-                }
-                let extract_start = Instant::now();
-                let hunks = commit_source.hunks_for_commit(&cm.commit_sha).await?;
-                timings.diff_extract_ms += extract_start.elapsed().as_millis() as u64;
-                total_hunks += hunks.len();
-
-                // Hunk-text inflation accounting (Task 0.3): the
-                // embedder sees `diff_text` byte-for-byte, so summing
-                // its byte-length gives the numerator. Added-line
-                // count is the signal-bearing denominator — context
-                // lines, deletions, and the `@@`/`---`/`+++` headers
-                // are excluded so the resulting ratio reflects "bytes
-                // per line that actually changed".
-                for h in &hunks {
-                    timings.total_diff_bytes += h.diff_text.len() as u64;
-                    timings.total_added_lines += count_added_lines(&h.diff_text);
-                }
-
-                // Plan 11 Task 3.1: per-hunk symbol attribution.
-                // Caller-side note: file_at_commit defaults to Ok(None)
-                // on the trait, so test fakes that don't override it
-                // produce HunkHeader-only attribution rather than
-                // erroring. The attribution callback is the single
-                // place that decides which symbols a hunk touched —
-                // the indexer just stores the result.
-                let mut hunk_attributions: Vec<Vec<crate::types::HunkSymbol>> =
-                    Vec::with_capacity(hunks.len());
-                for h in &hunks {
-                    let source_opt = commit_source
-                        .file_at_commit(&cm.commit_sha, &h.file_path)
-                        .await?;
-                    let attribution = match source_opt {
-                        Some(source) if source.len() <= MAX_ATTRIBUTABLE_SOURCE_BYTES => {
-                            // ExactSpan path: extract atomic symbols
-                            // from the post-image source and intersect
-                            // their line spans against the hunk's
-                            // @@-headers.
-                            let atoms = self.symbol_extractor.extract(&h.file_path, &source);
-                            let inputs = crate::hunk_attribution::AttributionInputs {
-                                diff_text: &h.diff_text,
-                                symbols: Some(&atoms),
-                                source: Some(&source),
-                            };
-                            crate::hunk_attribution::attribute_hunk(&inputs)
-                        }
-                        Some(source) => {
-                            tracing::debug!(
-                                file = %h.file_path,
-                                size = source.len(),
-                                "skipping ExactSpan attribution for oversized source"
-                            );
-                            // Header-only path. `source` goes out of
-                            // scope at the end of this arm.
-                            let inputs = crate::hunk_attribution::AttributionInputs {
-                                diff_text: &h.diff_text,
-                                symbols: None,
-                                source: None,
-                            };
-                            crate::hunk_attribution::attribute_hunk(&inputs)
-                        }
-                        None => {
-                            // file_at_commit reported absence (deleted,
-                            // renamed-away, binary).
-                            let inputs = crate::hunk_attribution::AttributionInputs {
-                                diff_text: &h.diff_text,
-                                symbols: None,
-                                source: None,
-                            };
-                            crate::hunk_attribution::attribute_hunk(&inputs)
-                        }
-                    };
-                    hunk_attributions.push(attribution);
-                }
-
-                // Plan 11 Task 2.1: build the semantic-text
-                // representation up front. Now also feeds the
-                // symbols list from the attribution step above.
-                // Step 4 fallback: when the builder's added_lines
-                // section is empty (deletion-only hunk, etc.), fall
-                // back to raw diff_text so the embedder still sees
-                // the change rather than an empty string.
-                let semantic_texts: Vec<String> = hunks
-                    .iter()
-                    .zip(hunk_attributions.iter())
-                    .map(|(h, syms)| {
-                        let body = crate::hunk_text::build(h, &cm.message, syms);
-                        if body.contains("added_lines:") {
-                            body
-                        } else {
-                            h.diff_text.clone()
-                        }
-                    })
-                    .collect();
-                let texts: Vec<String> = std::iter::once(cm.message.clone())
-                    .chain(semantic_texts.iter().cloned())
-                    .collect();
-                let embed_start = Instant::now();
-                let embs =
-                    embed_in_chunks(self.embedder.as_ref(), &texts, self.embed_batch).await?;
-                timings.embed_ms += embed_start.elapsed().as_millis() as u64;
-                // `texts` always contains at least 1 element (the commit
-                // message), so an empty `embs` here is an embedder bug, not
-                // an invariant the caller can violate. Surface it as a
-                // typed error rather than panicking so the indexer still
-                // reports a clean OhraError to its caller.
-                let (msg_emb, hunk_embs) = match embs.split_first() {
-                    Some(pair) => pair,
-                    None => {
-                        return Err(OhraError::Embedding(
-                            "embed_batch returned empty for non-empty input".into(),
-                        ));
-                    }
-                };
-
-                let write_start = Instant::now();
-                self.storage
-                    .put_commit(
-                        repo_id,
-                        &CommitRecord {
-                            meta: cm.clone(),
-                            message_emb: msg_emb.clone(),
-                        },
-                    )
-                    .await?;
-
-                // Plan 11 Task 2.1 + 3.1: persist raw diff (display /
-                // provenance), semantic_text (search-time), and
-                // per-hunk symbol attribution computed above.
-                let records: Vec<HunkRecord> = hunks
-                    .into_iter()
-                    .zip(hunk_embs.iter().cloned())
-                    .zip(semantic_texts)
-                    .zip(hunk_attributions)
-                    .map(|(((h, e), semantic_text), symbols)| HunkRecord {
-                        hunk: h,
-                        diff_emb: e,
-                        semantic_text,
-                        symbols,
-                    })
-                    .collect();
-                self.storage.put_hunks(repo_id, &records).await?;
-                timings.storage_write_ms += write_start.elapsed().as_millis() as u64;
-                latest_sha = Some(cm.commit_sha.clone());
-                commits_done += 1;
-                self.progress.commit_done(commits_done, total_hunks);
-                if commits_done % PROGRESS_INTERVAL == 0 {
-                    tracing::info!(
-                        commits_done,
-                        total_commits,
-                        total_hunks,
-                        "indexing progress"
-                    );
-                    // Resume safety: advance the watermark periodically
-                    // so a Ctrl-C / kill / crash mid-walk doesn't force
-                    // the next run to redo every already-indexed commit.
-                    // Combined with put_hunks's resume-clear semantics,
-                    // the worst case after abort is re-doing at most
-                    // PROGRESS_INTERVAL commits.
-                    if let Some(sha) = latest_sha.as_deref() {
-                        self.storage.set_last_indexed_commit(repo_id, sha).await?;
-                    }
-                }
-            }
-        }
+        let total_commits = result.new_commits;
+        let total_hunks = result.new_hunks;
 
         tracing::info!(
             total_commits,
             total_hunks,
             "commit walk done; extracting HEAD symbols"
         );
+        self.progress.start(total_commits);
         self.progress.phase_symbols();
+
+        // HEAD symbol extraction (outside coordinator scope — remains
+        // in Indexer so the ProgressSink and runtime-metadata paths
+        // keep a single responsibility boundary).
         let symbols_start = Instant::now();
         let symbols = symbol_source.extract_head_symbols().await?;
         self.storage.put_head_symbols(repo_id, &symbols).await?;
         timings.head_symbols_ms = symbols_start.elapsed().as_millis() as u64;
 
-        if let Some(sha) = latest_sha.as_deref() {
+        // Advance the watermark to the last processed commit.
+        if let Some(sha) = result.latest_sha.as_deref() {
             self.storage.set_last_indexed_commit(repo_id, sha).await?;
         }
 
-        // Plan 13: write runtime metadata only on full success — after
-        // hunks, HEAD symbols, and the final watermark are persisted.
-        // A failure earlier in the pass propagates as `?` above, which
-        // means we never reach this point and the previously-recorded
-        // metadata is preserved (so a half-finished run can't claim
-        // the new version is complete).
+        // Plan 13: write runtime metadata only on full success.
         if let Some(meta) = &self.runtime_metadata {
             self.storage
                 .put_index_metadata(repo_id, &meta.to_storage_components())
                 .await?;
         }
 
+        self.progress.commit_done(total_commits, total_hunks);
         self.progress
             .finish(total_commits, total_hunks, symbols.len());
         Ok(IndexerReport {
-            new_commits: commits.len(),
+            new_commits: total_commits,
             new_hunks: total_hunks,
             head_symbols: symbols.len(),
             phase_timings: timings,
@@ -439,6 +273,10 @@ impl Indexer {
 ///
 /// `cap == 0` is treated as `cap == 1` (degenerate but safe — every
 /// text is its own chunk).
+///
+/// Retained for tests in phase_timing_tests; production code now uses
+/// `EmbedStage::embed_in_chunks` (plan-19 B.4).
+#[cfg(test)]
 async fn embed_in_chunks(
     embedder: &dyn EmbeddingProvider,
     texts: &[String],
@@ -465,7 +303,7 @@ async fn embed_in_chunks(
         let chunk_owned: Vec<String> = chunk.to_vec();
         let mut embs = embedder.embed_batch(&chunk_owned).await?;
         if embs.len() != chunk_owned.len() {
-            return Err(OhraError::Embedding(format!(
+            return Err(crate::OhraError::Embedding(format!(
                 "embed_batch returned {} vectors for {} inputs",
                 embs.len(),
                 chunk_owned.len()
@@ -480,6 +318,10 @@ async fn embed_in_chunks(
 /// `+++ b/path` file header (a `+++` line is not a content add) so the
 /// ratio reported as `total_diff_bytes / total_added_lines` reflects
 /// real changed lines, not the metadata that git2 always emits.
+///
+/// Retained for tests; production code uses the coordinator's inline
+/// equivalent (plan-19 C.2).
+#[cfg(test)]
 fn count_added_lines(diff_text: &str) -> u64 {
     diff_text
         .lines()
@@ -563,7 +405,9 @@ mod count_added_lines_tests {
 mod phase_timing_tests {
     use super::*;
     use crate::query::IndexStatus;
+    use crate::storage::{CommitRecord, HunkRecord};
     use crate::types::{ChangeKind, CommitMeta, Hunk, RepoId, Symbol};
+    use crate::OhraError;
     use async_trait::async_trait;
     use std::collections::HashSet;
     use std::sync::Mutex;
@@ -1467,5 +1311,42 @@ mod phase_timing_tests {
             1,
             "extractor must be called exactly once for the in-bounds hunk"
         );
+    }
+}
+
+#[cfg(test)]
+mod stage_type_tests {
+    #[test]
+    fn stage_types_compose_into_pipeline_chain() {
+        use crate::stages::{AttributedHunk, EmbeddedHunk, HunkRecord};
+        use crate::types::{ChangeKind, Hunk};
+
+        // Verify the chain compiles and the helper methods are reachable.
+        let hunk = Hunk {
+            commit_sha: "abc".into(),
+            file_path: "src/lib.rs".into(),
+            language: None,
+            change_kind: ChangeKind::Added,
+            diff_text: "+fn foo() {}\n".into(),
+        };
+        let record = HunkRecord {
+            commit_sha: "abc".into(),
+            file_path: "src/lib.rs".into(),
+            diff_text: "+fn foo() {}\n".into(),
+            semantic_text: "fn foo() {}".into(),
+            source_hunk: hunk,
+        };
+        let attributed = AttributedHunk {
+            record,
+            symbols: None,
+            attributed_semantic_text: None,
+        };
+        assert_eq!(attributed.effective_semantic_text(), "fn foo() {}");
+        let embedded = EmbeddedHunk {
+            attributed,
+            embedding: vec![0.1, 0.2, 0.3, 0.4],
+        };
+        assert_eq!(embedded.embedding.len(), 4);
+        let _ = embedded; // consumed — verifies ownership model
     }
 }

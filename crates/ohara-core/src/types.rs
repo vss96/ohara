@@ -100,6 +100,18 @@ pub struct Hunk {
     pub diff_text: String,
 }
 
+impl Default for Hunk {
+    fn default() -> Self {
+        Self {
+            commit_sha: String::new(),
+            file_path: String::new(),
+            language: None,
+            change_kind: ChangeKind::Added,
+            diff_text: String::new(),
+        }
+    }
+}
+
 /// Plan 11: confidence for which symbol(s) a hunk touched.
 ///
 /// `ExactSpan` — a changed line intersects a parsed symbol's byte/line
