@@ -21,3 +21,22 @@ pub fn extract(
     let _ = QUERY_SRC;
     Ok(vec![])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_function_and_class_from_ts() {
+        let src = "function alpha(): number { return 1; }\n\
+                   class Foo {\n  bar(x: number): number { return x; }\n}\n";
+        let syms = extract("a.ts", src, "deadbeef", TsFlavor::Ts).unwrap();
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"alpha"), "alpha missing: {names:?}");
+        assert!(names.contains(&"Foo"), "Foo missing: {names:?}");
+        assert!(names.contains(&"bar"), "bar missing: {names:?}");
+        for s in &syms {
+            assert_eq!(s.language, "typescript");
+        }
+    }
+}
