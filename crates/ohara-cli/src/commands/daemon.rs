@@ -45,10 +45,10 @@ pub async fn run(action: DaemonAction) -> Result<()> {
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_secs();
             for d in alive {
-                let idle = now.saturating_sub(d.last_health_unix);
+                let last_heartbeat = now.saturating_sub(d.last_health_unix);
                 println!(
-                    "{}\t{}\tstarted_at={}\tidle={}s",
-                    d.pid, d.ohara_version, d.started_at_unix, idle
+                    "{}\t{}\tstarted_at={}\tlast_heartbeat={}s",
+                    d.pid, d.ohara_version, d.started_at_unix, last_heartbeat
                 );
             }
         }
