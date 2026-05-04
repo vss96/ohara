@@ -8,6 +8,7 @@ mod engine;
 mod error;
 mod handle;
 
+pub use engine::ExplainResult;
 pub use engine::FindPatternResult;
 pub use engine::RetrievalEngine;
 pub use error::EngineError;

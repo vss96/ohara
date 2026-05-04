@@ -4,6 +4,7 @@
 use crate::error::EngineError;
 use crate::handle::RepoHandle;
 use ohara_core::embed::RerankProvider;
+use ohara_core::explain::ExplainQuery;
 use ohara_core::query::{PatternQuery, ResponseMeta};
 use ohara_core::types::RepoId;
 use ohara_core::EmbeddingProvider;
@@ -20,6 +21,20 @@ use tokio::sync::RwLock;
 pub struct FindPatternResult {
     pub hits: Vec<ohara_core::query::PatternHit>,
     pub meta: ResponseMeta,
+}
+
+/// Result returned by [`RetrievalEngine::explain_change`].
+///
+/// Structural copy of the MCP `explain_change` envelope: `hits` are the
+/// blame-derived commits (newest-first, `provenance = EXACT`), and `meta`
+/// carries coverage / limitation diagnostics.  The JSON shape is
+/// byte-identical to `(Vec<ExplainHit>, ExplainMeta)` returned by
+/// `ohara_core::explain::explain_change`, so Phase G parity tests pass
+/// without massaging.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ExplainResult {
+    pub hits: Vec<ohara_core::explain::ExplainHit>,
+    pub meta: ohara_core::explain::ExplainMeta,
 }
 
 pub struct RetrievalEngine {
@@ -126,6 +141,33 @@ impl RetrievalEngine {
             meta: ResponseMeta::default(),
         })
     }
+
+    /// Blame-based explain for a file + line range in a repo's git history.
+    ///
+    /// Opens (or reuses) the per-repo handle, then delegates to the
+    /// `ohara_core::explain::explain_change` orchestrator, which:
+    ///   1. Calls `Blamer::blame_range` to obtain per-commit line ownership.
+    ///   2. Hydrates each commit SHA from storage.
+    ///   3. Sorts hits newest-first and caps to `query.k`.
+    ///
+    /// Returns [`ExplainResult`] whose JSON shape matches the existing MCP
+    /// `explain_change` envelope, so Phase G parity tests pass unchanged.
+    pub async fn explain_change(
+        &self,
+        repo_path: impl AsRef<Path>,
+        query: ExplainQuery,
+    ) -> crate::Result<ExplainResult> {
+        let handle = self.open_repo(repo_path).await?;
+        let (hits, meta) = ohara_core::explain::explain_change(
+            &*handle.storage,
+            &*handle.blamer,
+            &handle.repo_id,
+            &query,
+        )
+        .await
+        .map_err(EngineError::from)?;
+        Ok(ExplainResult { hits, meta })
+    }
 }
 
 #[cfg(test)]
@@ -187,33 +229,36 @@ pub(crate) mod tests {
             .unwrap();
     }
 
+    // env_lock is held across awaits intentionally: OHARA_HOME must remain
+    // stable from indexing through open_repo so both resolve the same DB path.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn explain_change_returns_one_blame_range_for_single_commit_repo() {
         let ohara_home = tempfile::tempdir().unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        {
-            let _g = env_lock();
-            std::env::set_var("OHARA_HOME", ohara_home.path());
-        }
+        let _g = env_lock();
+        std::env::set_var("OHARA_HOME", ohara_home.path());
         build_test_repo(tmp.path());
 
         // Index the repo so storage has the commit metadata the explain
         // orchestrator needs to hydrate blame ranges into ExplainHits.
+        // Canonicalize matches the path that open_repo will derive below.
+        let canonical = std::fs::canonicalize(tmp.path()).unwrap();
         {
-            let walker = ohara_git::GitWalker::open(tmp.path()).unwrap();
+            let walker = ohara_git::GitWalker::open(&canonical).unwrap();
             let first = walker.first_commit_sha().unwrap();
             let repo_id =
-                ohara_core::types::RepoId::from_parts(&first, &tmp.path().to_string_lossy());
+                ohara_core::types::RepoId::from_parts(&first, &canonical.to_string_lossy());
             let db_path = ohara_core::paths::index_db_path(&repo_id).unwrap();
-            let storage: Arc<dyn ohara_core::Storage> = Arc::new(
-                ohara_storage::SqliteStorage::open(&db_path)
-                    .await
-                    .unwrap(),
-            );
-            let commit_src = ohara_git::GitCommitSource::open(tmp.path()).unwrap();
-            let symbol_src = ohara_parse::GitSymbolSource::open(tmp.path()).unwrap();
+            let storage: Arc<dyn ohara_core::Storage> =
+                Arc::new(ohara_storage::SqliteStorage::open(&db_path).await.unwrap());
+            let commit_src = ohara_git::GitCommitSource::open(&canonical).unwrap();
+            let symbol_src = ohara_parse::GitSymbolSource::open(&canonical).unwrap();
             let indexer = ohara_core::Indexer::new(storage, Arc::new(DummyEmbedder));
-            indexer.run(&repo_id, &commit_src, &symbol_src).await.unwrap();
+            indexer
+                .run(&repo_id, &commit_src, &symbol_src)
+                .await
+                .unwrap();
         }
 
         let engine = make_test_engine();
@@ -225,10 +270,7 @@ pub(crate) mod tests {
             include_diff: false,
             include_related: false,
         };
-        let out = engine
-            .explain_change(tmp.path(), q)
-            .await
-            .expect("explain");
+        let out = engine.explain_change(&canonical, q).await.expect("explain");
         // Single-commit repo: line 1 of a.rs blames to the only commit.
         assert_eq!(out.hits.len(), 1, "expected exactly one blame hit");
     }
