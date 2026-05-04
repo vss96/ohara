@@ -198,6 +198,26 @@ impl RetrievalEngine {
         Ok(FindPatternResult { hits, meta })
     }
 
+    /// Evict the cached [`RepoHandle`] and [`MetaCache`] entry for `repo_path`.
+    ///
+    /// After this call, the next [`open_repo`][Self::open_repo] for the same
+    /// path will re-open storage and rebuild the handle from scratch.  The
+    /// BlameCache invalidation hook lives in Phase E (Task E.1).
+    pub async fn invalidate_repo(&self, repo_path: impl AsRef<Path>) -> crate::Result<()> {
+        let canonical = std::fs::canonicalize(repo_path.as_ref())
+            .map_err(|e| EngineError::Internal(format!("canonicalize: {e}")))?;
+        let walker = ohara_git::GitWalker::open(&canonical)
+            .map_err(|e| EngineError::Git(format!("open walker: {e}")))?;
+        let first = walker
+            .first_commit_sha()
+            .map_err(|e| EngineError::Git(format!("first_commit_sha: {e}")))?;
+        let repo_id = RepoId::from_parts(&first, &canonical.to_string_lossy());
+        self.repos.write().await.remove(&repo_id);
+        self.meta_cache.invalidate(&repo_id);
+        // BlameCache invalidation lands in Phase E (Task E.1).
+        Ok(())
+    }
+
     /// Blame-based explain for a file + line range in a repo's git history.
     ///
     /// Opens (or reuses) the per-repo handle, then delegates to the
@@ -538,7 +558,10 @@ pub(crate) mod tests {
         build_test_repo(tmp.path());
         let engine = make_test_engine();
         let h1 = engine.open_repo(tmp.path()).await.expect("first open");
-        engine.invalidate_repo(tmp.path()).await.expect("invalidate");
+        engine
+            .invalidate_repo(tmp.path())
+            .await
+            .expect("invalidate");
         let h2 = engine.open_repo(tmp.path()).await.expect("second open");
         assert!(
             !Arc::ptr_eq(&h1, &h2),
