@@ -5,6 +5,7 @@ use clap::Subcommand;
 use ohara_engine::client::{registry_path, Client};
 use ohara_engine::ipc::{Request, RequestMethod};
 use ohara_engine::registry::Registry;
+use tracing;
 
 #[derive(Subcommand, Debug)]
 pub enum DaemonAction {
@@ -61,8 +62,18 @@ pub async fn run(action: DaemonAction) -> Result<()> {
                     repo_path: None,
                     method: RequestMethod::Shutdown,
                 };
-                let _ = Client::connect(&d.socket_path).call(req).await;
-                let _ = reg.unregister(d.pid);
+                match Client::connect(&d.socket_path).call(req).await {
+                    Ok(_) => {
+                        let _ = reg.unregister(d.pid);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            pid = d.pid,
+                            error = %e,
+                            "daemon shutdown call failed; leaving registry entry for stale-prune"
+                        );
+                    }
+                }
             }
         }
     }
