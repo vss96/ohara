@@ -3,38 +3,22 @@ use ohara_core::embed::RerankProvider;
 use ohara_core::index_metadata::{
     CompatibilityStatus, RuntimeIndexMetadata, SCHEMA_VERSION, SEMANTIC_TEXT_VERSION,
 };
-use ohara_core::perf_trace::timed_phase;
-use ohara_core::types::RepoId;
-use ohara_core::{EmbeddingProvider, Retriever, Storage};
-use ohara_git::Blamer;
+use ohara_core::EmbeddingProvider;
+use ohara_engine::RetrievalEngine;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub struct OharaServer {
-    pub repo_id: RepoId,
     pub repo_path: PathBuf,
-    pub storage: Arc<dyn Storage>,
-    pub retriever: Retriever,
-    /// Plan 5: blame source backing the `explain_change` tool. One per
-    /// session; reuses the underlying `git2::Repository` via
-    /// `Arc<Mutex<Repository>>` (set up inside `Blamer::open`).
-    pub blamer: Arc<Blamer>,
+    pub engine: Arc<RetrievalEngine>,
 }
 
 impl OharaServer {
     pub async fn open<P: AsRef<Path>>(workdir: P) -> Result<Self> {
         let canonical = std::fs::canonicalize(workdir.as_ref()).context("canonicalize workdir")?;
-        let walker = ohara_git::GitWalker::open(&canonical).context("open repo")?;
-        let first_commit = walker.first_commit_sha()?;
-        let repo_id = RepoId::from_parts(&first_commit, &canonical.to_string_lossy());
 
-        let db_path = ohara_core::paths::index_db_path(&repo_id)?;
-
-        let storage: Arc<dyn Storage> = Arc::new(
-            timed_phase("storage_open", ohara_storage::SqliteStorage::open(&db_path)).await?,
-        );
         let embedder: Arc<dyn EmbeddingProvider> = Arc::new(
-            timed_phase(
+            ohara_core::perf_trace::timed_phase(
                 "embed_load",
                 tokio::task::spawn_blocking(ohara_embed::FastEmbedProvider::new),
             )
@@ -44,65 +28,36 @@ impl OharaServer {
         // opt-out is the MCP `no_rerank: true` flag, plumbed through
         // `PatternQuery`. First boot downloads ~110 MB for bge-reranker-base.
         let reranker: Arc<dyn RerankProvider> = Arc::new(
-            timed_phase(
+            ohara_core::perf_trace::timed_phase(
                 "rerank_load",
                 tokio::task::spawn_blocking(ohara_embed::FastEmbedReranker::new),
             )
             .await??,
         );
-        let retriever = Retriever::new(storage.clone(), embedder.clone()).with_reranker(reranker);
 
-        // Plan 5: blame source for `explain_change`. Reads from the same
-        // workdir; no model download or async work needed.
-        let blamer = Arc::new(
-            timed_phase("blamer_open", async { Blamer::open(&canonical) })
-                .await
-                .context("open blamer")?,
-        );
+        let engine = Arc::new(RetrievalEngine::new(embedder, reranker));
+        // Warm the per-repo handle so the first MCP call doesn't pay
+        // the cold-open cost of deriving the repo-id and opening SQLite.
+        engine
+            .open_repo(&canonical)
+            .await
+            .context("warm repo handle")?;
 
         Ok(Self {
-            repo_id,
             repo_path: canonical,
-            storage,
-            retriever,
-            blamer,
+            engine,
         })
     }
 
     pub async fn serve_stdio(self) -> Result<()> {
         crate::tools::serve(self).await
     }
-
-    pub async fn index_status_meta(&self) -> Result<ohara_core::query::ResponseMeta> {
-        let behind = ohara_git::GitCommitsBehind::open(&self.repo_path)?;
-        let st =
-            ohara_core::query::compute_index_status(self.storage.as_ref(), &self.repo_id, &behind)
-                .await?;
-        let compatibility = self.compatibility_status().await?;
-        let hint = compose_hint(&st, &compatibility);
-        Ok(ohara_core::query::ResponseMeta {
-            index_status: st,
-            hint,
-            compatibility: Some(compatibility),
-        })
-    }
-
-    /// Plan 13: build the runtime compatibility expectation and assess
-    /// it against what's stored in the opened index. Used by both MCP
-    /// tools (find_pattern fails early on NeedsRebuild; both surface
-    /// the verdict in `_meta`).
-    pub async fn compatibility_status(&self) -> Result<CompatibilityStatus> {
-        let runtime = current_runtime_metadata();
-        let stored = self.storage.get_index_metadata(&self.repo_id).await?;
-        Ok(CompatibilityStatus::assess(&runtime, &stored))
-    }
 }
 
 /// Build the runtime compatibility expectation from the constants
 /// owned by `ohara-embed` / `ohara-parse` / `ohara-core`. Mirrored in
-/// `ohara_cli::commands::status::current_runtime_metadata` — kept as
-/// a free function in each crate (rather than a shared helper) so
-/// neither binary has to depend on the other.
+/// `ohara_engine::engine::current_runtime_metadata` — kept as a free
+/// function here so `ohara-mcp` doesn't depend on engine internals.
 pub fn current_runtime_metadata() -> RuntimeIndexMetadata {
     RuntimeIndexMetadata {
         schema_version: SCHEMA_VERSION.to_string(),

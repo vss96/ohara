@@ -13,6 +13,8 @@
 use crate::server::OharaServer;
 use crate::tools::explain_change::{ExplainChangeInput, EXPLAIN_TOOL_DESCRIPTION};
 use ohara_core::count_lines;
+use ohara_core::index_metadata::CompatibilityStatus;
+use ohara_core::query_understanding::{parse_query, RetrievalProfile};
 use rmcp::{
     model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
     schemars, tool, ServerHandler,
@@ -95,14 +97,25 @@ impl OharaService {
         // stale-vector index would silently return wrong results;
         // returning a structured error with the rebuild command lets
         // the MCP client surface it instead of acting on bad data.
-        let compatibility = self
+        //
+        // The engine's open_repo has already warmed the handle; we derive
+        // compatibility from the per-handle storage via a fresh meta read.
+        let handle = self
             .server
-            .compatibility_status()
+            .engine
+            .open_repo(&self.server.repo_path)
             .await
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        if let ohara_core::index_metadata::CompatibilityStatus::NeedsRebuild { reason } =
-            &compatibility
-        {
+
+        let stored = handle
+            .storage
+            .get_index_metadata(&handle.repo_id)
+            .await
+            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+        let runtime = crate::server::current_runtime_metadata();
+        let compatibility = CompatibilityStatus::assess(&runtime, &stored);
+
+        if let CompatibilityStatus::NeedsRebuild { reason } = &compatibility {
             return Err(rmcp::Error::invalid_params(
                 format!(
                     "find_pattern refuses to run: index needs rebuild ({reason}). \
@@ -113,31 +126,35 @@ impl OharaService {
         }
 
         let q = ohara_core::query::PatternQuery {
-            query: input.query,
+            query: input.query.clone(),
             k: input.k.clamp(1, 20),
             language: input.language,
             since_unix,
             no_rerank: input.no_rerank,
         };
-        let now = chrono::Utc::now().timestamp();
-        // Plan 12 Task 2.1 Step 4: capture the profile alongside
-        // hits so MCP clients see _meta.query_profile (name +
-        // explanation). Internal weights stay out of the response
-        // shape per Task 1.1's serialisation contract.
-        let (hits, profile) = self
+
+        // Re-derive the query profile from the input text — this is the
+        // same deterministic computation the retriever performs internally.
+        // Surfacing it in `_meta.query_profile` preserves the pre-refactor
+        // wire format so existing Claude Code / Cursor integrations stay
+        // byte-identical.
+        let parsed = parse_query(&input.query);
+        let profile = RetrievalProfile::for_intent(parsed.intent);
+
+        let result = self
             .server
-            .retriever
-            .find_pattern_with_profile(&self.server.repo_id, &q, now)
-            .await
-            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        let meta = self
-            .server
-            .index_status_meta()
+            .engine
+            .find_pattern(&self.server.repo_path, q)
             .await
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
 
+        // Build the ResponseMeta for the index_status / hint / compatibility
+        // fields. The engine's find_pattern already computed it internally;
+        // we re-use the meta it stored (passed back in FindPatternResult).
+        let meta = result.meta;
+
         let body = json!({
-            "hits": hits,
+            "hits": result.hits,
             "_meta": {
                 "index_status": meta.index_status,
                 "hint": meta.hint,
@@ -192,29 +209,52 @@ impl OharaService {
             // include_related=true.
             include_related: false,
         };
-        let (hits, explain_meta) = ohara_core::explain::explain_change(
-            self.server.storage.as_ref(),
-            self.server.blamer.as_ref(),
-            &self.server.repo_id,
-            &q,
-        )
-        .await
-        .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        let index_meta = self
+
+        let explain_result = self
             .server
-            .index_status_meta()
+            .engine
+            .explain_change(&self.server.repo_path, q)
             .await
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
 
-        // Same response envelope shape as `find_pattern`: top-level
+        // Derive index_meta for the _meta.index_status fields. Re-use the
+        // engine's open_repo handle; index status requires a git walk + storage
+        // query, so we compute it here rather than caching in the tool.
+        let handle = self
+            .server
+            .engine
+            .open_repo(&self.server.repo_path)
+            .await
+            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+
+        let behind = ohara_git::GitCommitsBehind::open(&self.server.repo_path)
+            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+        let st = ohara_core::query::compute_index_status(
+            handle.storage.as_ref(),
+            &handle.repo_id,
+            &behind,
+        )
+        .await
+        .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+
+        let stored = handle
+            .storage
+            .get_index_metadata(&handle.repo_id)
+            .await
+            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+        let runtime = crate::server::current_runtime_metadata();
+        let compatibility = CompatibilityStatus::assess(&runtime, &stored);
+        let hint = crate::server::compose_hint(&st, &compatibility);
+
+        // Same response envelope shape as the pre-refactor code: top-level
         // `hits` + `_meta`, with `explain` placing its blame-specific
         // diagnostics under `_meta.explain`.
         let body = json!({
-            "hits": hits,
+            "hits": explain_result.hits,
             "_meta": {
-                "index_status": index_meta.index_status,
-                "hint": index_meta.hint,
-                "explain": explain_meta,
+                "index_status": st,
+                "hint": hint,
+                "explain": explain_result.meta,
             }
         });
         Ok(CallToolResult::success(vec![Content::text(

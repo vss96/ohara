@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 ohara-core = { path = "../ohara-core" }
+ohara-engine = { path = "../ohara-engine" }
 ohara-storage = { path = "../ohara-storage" }
 ohara-embed = { path = "../ohara-embed" }
 ohara-git = { path = "../ohara-git" }
@@ -33,6 +34,11 @@ serde.workspace = true
 serde_json.workspace = true
 async-trait = "0.1"
 chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+git2.workspace = true
+async-trait.workspace = true
 
 [features]
 default = []

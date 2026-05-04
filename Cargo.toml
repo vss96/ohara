@@ -8,6 +8,7 @@ members = [
   "crates/ohara-parse",
   "crates/ohara-cli",
   "crates/ohara-mcp",
+  "crates/ohara-engine",
   "tests/perf",
 ]
 
@@ -51,6 +52,12 @@ indicatif = "0.17"
 tracing-indicatif = "=0.3.9"
 axoupdater = "0.10"
 libc = "0.2"
+lru = "0.12"
+blake3 = "1"
+tempfile = "3"
+async-trait = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
+fs2 = "0.4"
 
 [profile.release]
 lto = "thin"

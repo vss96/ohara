@@ -7,11 +7,13 @@
 use anyhow::{anyhow, Result};
 use clap::Args as ClapArgs;
 use ohara_core::count_lines;
-use ohara_core::explain::{explain_change, ExplainQuery};
+use ohara_core::explain::ExplainQuery;
 use ohara_core::perf_trace::timed_phase;
+use ohara_engine::client::{find_or_spawn_daemon, registry_path, try_daemon_call};
+use ohara_engine::ipc::{Request, RequestMethod};
+use ohara_engine::ExplainResult;
 use ohara_git::Blamer;
-use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(ClapArgs, Debug)]
@@ -34,15 +36,28 @@ pub struct Args {
     pub path: PathBuf,
 }
 
-pub async fn run(args: Args) -> Result<()> {
-    let (repo_id, canonical, _) = super::resolve_repo_id(&args.path)?;
+/// Run the explain engine in-process (standalone path).
+///
+/// Opens storage and a blamer directly, then calls
+/// [`ohara_core::explain::explain_change`]. Used both as the direct standalone
+/// path and as the fallback when the daemon is unavailable or disabled.
+async fn run_standalone(canonical: &Path, q: ExplainQuery) -> Result<ExplainResult> {
+    let (repo_id, _, _) = super::resolve_repo_id(canonical)?;
     let db_path = super::index_db_path(&repo_id)?;
     let storage =
         Arc::new(timed_phase("storage_open", ohara_storage::SqliteStorage::open(&db_path)).await?);
-    let blamer = timed_phase("blamer_open", async { Blamer::open(&canonical) }).await?;
+    let blamer = timed_phase("blamer_open", async { Blamer::open(canonical) }).await?;
+    let (hits, meta) =
+        ohara_core::explain::explain_change(storage.as_ref(), &blamer, &repo_id, &q).await?;
+    Ok(ExplainResult { hits, meta })
+}
+
+pub async fn run(args: Args, no_daemon: bool) -> Result<()> {
+    let canonical = std::fs::canonicalize(&args.path)
+        .map_err(|e| anyhow::anyhow!("canonicalize {}: {e}", args.path.display()))?;
 
     let (line_start, line_end) = parse_lines(args.lines.as_deref(), &canonical, &args.file)?;
-    let q = ExplainQuery {
+    let explain_query = ExplainQuery {
         file: args.file,
         line_start,
         line_end,
@@ -53,16 +68,49 @@ pub async fn run(args: Args) -> Result<()> {
         // context too.
         include_related: true,
     };
-    let (hits, meta) = explain_change(storage.as_ref(), &blamer, &repo_id, &q).await?;
-    let body = json!({ "hits": hits, "_meta": meta });
-    println!("{}", serde_json::to_string_pretty(&body)?);
+
+    let req = Request {
+        id: 1,
+        repo_path: Some(canonical.to_string_lossy().to_string()),
+        method: RequestMethod::ExplainChange(explain_query.clone()),
+    };
+
+    let registry = registry_path().map_err(|e| anyhow::anyhow!("registry_path: {e}"))?;
+    let current_exe = std::env::current_exe().map_err(|e| anyhow::anyhow!("current_exe: {e}"))?;
+
+    let daemon_resp = try_daemon_call(
+        move || {
+            find_or_spawn_daemon(
+                &current_exe,
+                env!("CARGO_PKG_VERSION"),
+                option_env!("OHARA_GIT_SHA").unwrap_or("unknown"),
+                &registry,
+                no_daemon,
+            )
+        },
+        req,
+    )
+    .await;
+
+    let result: ExplainResult = match daemon_resp {
+        Some(resp) if resp.error.is_none() => {
+            let value = resp
+                .result
+                .ok_or_else(|| anyhow::anyhow!("daemon response missing result"))?;
+            serde_json::from_value(value)
+                .map_err(|e| anyhow::anyhow!("decode ExplainResult: {e}"))?
+        }
+        _ => run_standalone(&canonical, explain_query).await?,
+    };
+
+    println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
 
 /// Parse the `--lines` argument. Mirrors the MCP input semantics: a
 /// missing or `0`-valued upper bound resolves to the file's actual
 /// last line by reading the workdir.
-fn parse_lines(spec: Option<&str>, repo_root: &std::path::Path, file: &str) -> Result<(u32, u32)> {
+fn parse_lines(spec: Option<&str>, repo_root: &Path, file: &str) -> Result<(u32, u32)> {
     let Some(s) = spec else {
         // No flag: full file. Defer the file-length lookup to here so we
         // only read the file when we actually need it.
@@ -88,7 +136,7 @@ fn parse_lines(spec: Option<&str>, repo_root: &std::path::Path, file: &str) -> R
     Ok((start, end))
 }
 
-fn file_line_count(repo_root: &std::path::Path, file: &str) -> Option<u32> {
+fn file_line_count(repo_root: &Path, file: &str) -> Option<u32> {
     let on_disk = repo_root.join(file);
     let s = std::fs::read_to_string(&on_disk).ok()?;
     Some(count_lines(&s))

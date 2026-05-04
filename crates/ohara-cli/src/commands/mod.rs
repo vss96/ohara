@@ -2,11 +2,13 @@ use anyhow::{anyhow, Result};
 use ohara_core::types::RepoId;
 use std::path::{Path, PathBuf};
 
+pub mod daemon;
 pub mod explain;
 pub mod index;
 pub mod init;
 pub mod provider;
 pub mod query;
+pub mod serve;
 pub mod status;
 pub mod update;
 
