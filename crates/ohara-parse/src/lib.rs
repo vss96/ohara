@@ -189,6 +189,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn extract_atomic_symbols_dispatches_javascript_extensions() {
+        let src = "function alpha() {}\n";
+        for ext in ["js", "jsx", "mjs", "cjs"] {
+            let path = format!("a.{ext}");
+            let syms = extract_atomic_symbols(&path, src, "deadbeef").expect("dispatch");
+            assert!(
+                syms.iter().any(|s| s.name == "alpha"),
+                "{ext} did not dispatch to javascript extractor: {syms:?}"
+            );
+        }
+    }
+
+    #[test]
     fn extract_atomic_symbols_returns_pre_merge_atoms() {
         // Plan 11 Task 3.1 Step 1: atomic extractor MUST return one
         // symbol per top-level definition (not the merged super-chunk).
