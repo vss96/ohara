@@ -32,9 +32,17 @@ pub async fn read_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<u
 
 /// Write one length-prefixed frame to `writer` and flush.
 ///
-/// Returns [`EngineError::Internal`] for any I/O error.
+/// Returns [`EngineError::Internal`] if the payload exceeds the 16 MiB
+/// maximum (matching the read-side limit) or for any I/O error.
 pub async fn write_frame<W: AsyncWriteExt + Unpin>(writer: &mut W, payload: &[u8]) -> Result<()> {
-    let len = payload.len() as u32;
+    if payload.len() as u64 > MAX_FRAME_BYTES as u64 {
+        return Err(EngineError::Internal(format!(
+            "ipc frame body too large: {} bytes (max {MAX_FRAME_BYTES})",
+            payload.len()
+        )));
+    }
+    let len = u32::try_from(payload.len())
+        .map_err(|_| EngineError::Internal("frame body too large for u32".into()))?;
     writer
         .write_u32(len)
         .await
@@ -74,6 +82,20 @@ mod tests {
         assert!(
             msg.contains("too large") || msg.contains("internal"),
             "expected oversized-frame error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_rejects_oversized_frame() {
+        let (mut writer, _reader) = tokio::io::duplex(8);
+        // Construct a payload that exceeds MAX_FRAME_BYTES (16 MiB).
+        // We don't allocate the full buffer — just need len > limit.
+        let oversized = vec![0u8; (MAX_FRAME_BYTES as usize) + 1];
+        let err = write_frame(&mut writer, &oversized).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("too large") || msg.contains("internal"),
+            "expected oversized-frame write error, got: {msg}"
         );
     }
 }
