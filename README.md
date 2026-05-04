@@ -12,25 +12,23 @@ Named after Ohara, the island in One Piece whose Tree of Knowledge held 5,000
 years of accumulated history — and whose archaeologists devoted their lives to
 reading it.
 
-**Status: v0.6.** Two MCP tools shipped, plus throughput-prep
-plumbing and opt-in hardware acceleration on the indexer:
+**Status: v0.7.5.** Two MCP tools shipped (`find_pattern`, `explain_change`),
+plus an opt-in daemon, multi-repo support, and memory-efficient indexing:
 
 - **`find_pattern`** — "how was X done before?" (semantic search over git
   history with three-lane retrieval pipeline + cross-encoder rerank,
   shipped in v0.3).
 - **`explain_change`** — "why does THIS code look the way it does?"
-  Two answers: which commits introduced these lines exactly
-  (`hits[]`, blame-backed `provenance = "EXACT"`) and what nearby
-  changes shaped this area contextually (`_meta.explain.related_commits[]`,
-  file-scope neighbours `provenance = "INFERRED"`). Blame is from
-  v0.5; the contextual enrichment lands in v0.7 (plan 12).
+  Blame-backed exact provenance (`hits[]`) plus contextual commit
+  neighbours (`_meta.explain.related_commits[]`).
 
-v0.6 highlights: `--profile` per-phase wall-time JSON for the
-throughput baseline; `--embed-provider {auto,cpu,coreml,cuda}`
-auto-detect + `--resources {auto,conservative,aggressive}` policy;
-resume-crash fix in `commit::put` (DELETE-then-INSERT for
-`vec_commit` / `fts_commit`); a pinned progress bar that no longer
-scrolls off-screen when `tracing` log lines stream above it.
+v0.7.x highlights:
+
+- **v0.7.0** — eval harness + symbol attribution + rebuild safety (plans 10/11/13).
+- **v0.7.2** — perf tracing + per-method storage metrics (plan-14).
+- **v0.7.3** — memory-efficient indexing: `embed_batch` chunking + source-text cap + peak-RSS harness (plan-15).
+- **v0.7.4** — gitlink-skip fix in `file_at_commit` for uninitialized submodules.
+- **v0.7.5** — `ohara serve` daemon + `RetrievalEngine` + multi-repo support (plan-16).
 
 History: v0.1 = Plan 1 foundation + `find_pattern`; v0.2 = `ohara init`
 post-commit hook + `--incremental` fast path; v0.3 = three-lane
@@ -100,6 +98,8 @@ binaries work everywhere out of the box.
     cargo run -p ohara-cli -- query --query "retry with backoff" fixtures/tiny/repo
 
 The first run downloads the BGE-small embedding model (~80MB, one time).
+`ohara query` will auto-spawn a background daemon on first use to keep the
+embedder warm; pass `--no-daemon` to skip it, or see `ohara daemon --help`.
 
 ## Wiring into MCP clients
 
