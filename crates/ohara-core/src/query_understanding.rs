@@ -104,6 +104,16 @@ pub struct RetrievalProfile {
     /// override only when the intent benefits from a wider candidate
     /// pool (api-usage, configuration).
     pub rerank_top_k: Option<usize>,
+    /// Override for `RankingWeights::recency_weight`. `None` means
+    /// use the default from `RankingWeights`.
+    pub recency_weight: Option<f32>,
+    /// Override for `RankingWeights::recency_half_life_days`. `None`
+    /// means use the default (90.0 days). Bug-fix profiles may lower
+    /// this to surface very recent fixes faster.
+    pub recency_half_life_days: Option<f32>,
+    /// Override for `RankingWeights::lane_top_k`. `None` means use
+    /// the default gather size. Wide-pool profiles may raise this.
+    pub lane_top_k: Option<u8>,
     /// Human-readable explanation of the profile's pick. Surfaced in
     /// MCP `_meta` and CLI debug output.
     pub explanation: String,
@@ -121,6 +131,9 @@ impl RetrievalProfile {
             text_lane_enabled: true,
             symbol_lane_enabled: true,
             rerank_top_k: None,
+            recency_weight: None,
+            recency_half_life_days: None,
+            lane_top_k: None,
             explanation: "No specific intent detected — using default lane blend.".into(),
         }
     }

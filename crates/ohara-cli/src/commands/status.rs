@@ -1,8 +1,6 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
-use ohara_core::index_metadata::{
-    CompatibilityStatus, RuntimeIndexMetadata, SCHEMA_VERSION, SEMANTIC_TEXT_VERSION,
-};
+use ohara_core::index_metadata::{CompatibilityStatus, RuntimeIndexMetadata};
 use ohara_core::query::compute_index_status;
 use ohara_core::Storage;
 use std::path::PathBuf;
@@ -15,20 +13,17 @@ pub struct Args {
 }
 
 /// Build the runtime compatibility expectation from the constants
-/// owned by `ohara-embed` / `ohara-parse` / `ohara-core`. Used by
-/// `status` (and exposed as a free function so the unit tests below
-/// can compose mock stored snapshots against it without touching the
-/// disk). Does NOT load the embedder — status must stay cheap.
+/// owned by `ohara-embed` / `ohara-parse`. Does NOT load the embedder
+/// — status must stay cheap. Delegates to the canonical
+/// `ohara_core::index_metadata::runtime_metadata_from`.
 pub fn current_runtime_metadata() -> RuntimeIndexMetadata {
-    RuntimeIndexMetadata {
-        schema_version: SCHEMA_VERSION.to_string(),
-        embedding_model: ohara_embed::DEFAULT_MODEL_ID.to_string(),
-        embedding_dimension: ohara_embed::DEFAULT_DIM as u32,
-        reranker_model: ohara_embed::DEFAULT_RERANKER_ID.to_string(),
-        chunker_version: ohara_parse::CHUNKER_VERSION.to_string(),
-        semantic_text_version: SEMANTIC_TEXT_VERSION.to_string(),
-        parser_versions: ohara_parse::parser_versions(),
-    }
+    ohara_core::index_metadata::runtime_metadata_from(
+        ohara_embed::DEFAULT_MODEL_ID,
+        ohara_embed::DEFAULT_DIM as u32,
+        ohara_embed::DEFAULT_RERANKER_ID,
+        ohara_parse::CHUNKER_VERSION,
+        ohara_parse::parser_versions(),
+    )
 }
 
 /// Render `CompatibilityStatus` as a single line for `ohara status`,
@@ -141,12 +136,18 @@ mod tests {
         // pins that the helper sources every value from a constant
         // (no I/O, no model download).
         let m = current_runtime_metadata();
-        assert_eq!(m.schema_version, SCHEMA_VERSION);
+        assert_eq!(
+            m.schema_version,
+            ohara_core::index_metadata::SCHEMA_VERSION
+        );
         assert_eq!(m.embedding_model, ohara_embed::DEFAULT_MODEL_ID);
         assert_eq!(m.embedding_dimension, ohara_embed::DEFAULT_DIM as u32);
         assert_eq!(m.reranker_model, ohara_embed::DEFAULT_RERANKER_ID);
         assert_eq!(m.chunker_version, ohara_parse::CHUNKER_VERSION);
-        assert_eq!(m.semantic_text_version, SEMANTIC_TEXT_VERSION);
+        assert_eq!(
+            m.semantic_text_version,
+            ohara_core::index_metadata::SEMANTIC_TEXT_VERSION
+        );
         // Every language ohara-parse can index must appear in the map.
         for lang in ["rust", "python", "java", "kotlin"] {
             assert!(
