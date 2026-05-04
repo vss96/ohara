@@ -5,6 +5,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
 mod cache;
+pub mod client;
 mod engine;
 mod error;
 mod handle;
