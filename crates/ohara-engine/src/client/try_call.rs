@@ -19,7 +19,14 @@ pub async fn try_daemon_call(
 ) -> Option<Response> {
     let h = match discover() {
         Ok(Some(h)) => h,
-        _ => return None,
+        Ok(None) => {
+            tracing::debug!("no compatible daemon; falling back to standalone");
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "daemon discover failed; falling back to standalone");
+            return None;
+        }
     };
     match Client::connect(&h.socket_path).call(req).await {
         Ok(r) => Some(r),
