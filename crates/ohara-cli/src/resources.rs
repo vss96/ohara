@@ -69,6 +69,10 @@ pub struct ResourcePlan {
     pub commit_batch: usize,
     pub threads: usize,
     pub embed_provider: ProviderArg,
+    /// Plan 15: cap on the per-commit `embed_batch` call size.
+    /// Smaller values cap peak embedder allocation; larger values
+    /// reduce per-commit call overhead. Default 32.
+    pub embed_batch: usize,
 }
 
 /// Detect the current host. Cheap (no syscalls beyond
@@ -108,6 +112,13 @@ pub fn pick_resources(host: &Host) -> ResourcePlan {
     } else {
         512
     };
+    let embed_batch = if cores < 8 {
+        16
+    } else if cores < 16 {
+        32
+    } else {
+        64
+    };
     ResourcePlan {
         commit_batch,
         threads,
@@ -116,6 +127,7 @@ pub fn pick_resources(host: &Host) -> ResourcePlan {
         // signals `Host` collected. Re-resolving here would just hide
         // the decision in two places.
         embed_provider: ProviderArg::Auto,
+        embed_batch,
     }
 }
 
@@ -132,11 +144,13 @@ pub fn apply_intensity(base: ResourcePlan, intensity: ResourcesArg) -> ResourceP
             commit_batch: (base.commit_batch / 2).max(1),
             threads: (base.threads / 2).max(1),
             embed_provider: base.embed_provider,
+            embed_batch: (base.embed_batch / 2).max(1),
         },
         ResourcesArg::Aggressive => ResourcePlan {
             commit_batch: base.commit_batch.saturating_mul(2),
             threads: base.threads.saturating_mul(2),
             embed_provider: base.embed_provider,
+            embed_batch: base.embed_batch.saturating_mul(2),
         },
     }
 }
@@ -156,26 +170,32 @@ mod tests {
 
     #[test]
     fn lookup_table_low_core_box_picks_small_batch() {
-        // <8 cores → 128. Anchors the conservative end of the table
-        // so a future tweak that reorders the conditions stays caught.
+        // <8 cores → 128 commit_batch, 16 embed_batch. Anchors the
+        // conservative end of the table so a future tweak that reorders
+        // the conditions stays caught.
         let plan = pick_resources(&host_with(4));
         assert_eq!(plan.commit_batch, 128);
+        assert_eq!(plan.embed_batch, 16);
         assert_eq!(plan.threads, 4);
     }
 
     #[test]
     fn lookup_table_mid_core_box_picks_medium_batch() {
-        // 8..16 cores → 256. Threads track cores 1:1.
+        // 8..16 cores → 256 commit_batch, 32 embed_batch. Threads track
+        // cores 1:1.
         let plan = pick_resources(&host_with(12));
         assert_eq!(plan.commit_batch, 256);
+        assert_eq!(plan.embed_batch, 32);
         assert_eq!(plan.threads, 12);
     }
 
     #[test]
     fn lookup_table_high_core_box_picks_default_batch() {
-        // 16+ cores → 512 (matches the existing `--commit-batch` default).
+        // 16+ cores → 512 commit_batch, 64 embed_batch (matches the
+        // existing `--commit-batch` default).
         let plan = pick_resources(&host_with(32));
         assert_eq!(plan.commit_batch, 512);
+        assert_eq!(plan.embed_batch, 64);
         assert_eq!(plan.threads, 32);
     }
 
@@ -185,12 +205,14 @@ mod tests {
         // notice if a refactor flips an inequality.
         let plan = pick_resources(&host_with(8));
         assert_eq!(plan.commit_batch, 256);
+        assert_eq!(plan.embed_batch, 32);
     }
 
     #[test]
     fn lookup_table_16_core_boundary_lands_in_high_tier() {
         let plan = pick_resources(&host_with(16));
         assert_eq!(plan.commit_batch, 512);
+        assert_eq!(plan.embed_batch, 64);
     }
 
     #[test]
@@ -201,6 +223,7 @@ mod tests {
         let plan = pick_resources(&host_with(0));
         assert!(plan.threads >= 1);
         assert_eq!(plan.commit_batch, 128);
+        assert_eq!(plan.embed_batch, 16);
     }
 
     #[test]
@@ -218,10 +241,12 @@ mod tests {
             commit_batch: 256,
             threads: 8,
             embed_provider: ProviderArg::Auto,
+            embed_batch: 32,
         };
         let cons = apply_intensity(base, ResourcesArg::Conservative);
         assert_eq!(cons.commit_batch, 128);
         assert_eq!(cons.threads, 4);
+        assert_eq!(cons.embed_batch, 16);
         // Provider is intentionally untouched; intensity is a
         // throughput knob, not an accelerator knob.
         assert_eq!(cons.embed_provider, ProviderArg::Auto);
@@ -236,10 +261,12 @@ mod tests {
             commit_batch: 1,
             threads: 1,
             embed_provider: ProviderArg::Auto,
+            embed_batch: 1,
         };
         let cons = apply_intensity(base, ResourcesArg::Conservative);
         assert_eq!(cons.commit_batch, 1);
         assert_eq!(cons.threads, 1);
+        assert_eq!(cons.embed_batch, 1);
     }
 
     #[test]
@@ -248,10 +275,12 @@ mod tests {
             commit_batch: 256,
             threads: 8,
             embed_provider: ProviderArg::Auto,
+            embed_batch: 32,
         };
         let agg = apply_intensity(base, ResourcesArg::Aggressive);
         assert_eq!(agg.commit_batch, 512);
         assert_eq!(agg.threads, 16);
+        assert_eq!(agg.embed_batch, 64);
     }
 
     #[test]
@@ -264,10 +293,12 @@ mod tests {
             commit_batch: usize::MAX,
             threads: usize::MAX,
             embed_provider: ProviderArg::Auto,
+            embed_batch: usize::MAX,
         };
         let agg = apply_intensity(base, ResourcesArg::Aggressive);
         assert_eq!(agg.commit_batch, usize::MAX);
         assert_eq!(agg.threads, usize::MAX);
+        assert_eq!(agg.embed_batch, usize::MAX);
     }
 
     #[test]

@@ -43,6 +43,7 @@ async fn find_pattern_returns_retry_commit_first() {
         profile: false,
         embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
         resources: ohara_cli::resources::ResourcesArg::Auto,
+        embed_batch: None,
     };
     ohara_cli::commands::index::run(args).await.unwrap();
 

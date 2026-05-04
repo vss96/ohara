@@ -40,6 +40,7 @@ async fn smoke_index_then_status() {
         profile: false,
         embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
         resources: ohara_cli::resources::ResourcesArg::Auto,
+        embed_batch: None,
     };
     ohara_cli::commands::index::run(args).await.unwrap();
 

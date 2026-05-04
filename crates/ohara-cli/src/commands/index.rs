@@ -47,6 +47,12 @@ pub struct Args {
     /// on host core count.
     #[arg(long)]
     pub commit_batch: Option<usize>,
+    /// Plan 15: cap on the per-commit `embed_batch` call size.
+    /// Smaller values cap peak embedder allocation at the cost of
+    /// more per-commit calls. When unset, `--resources` picks a
+    /// value based on host core count.
+    #[arg(long)]
+    pub embed_batch: Option<usize>,
     /// Cap the number of threads used by the embedder's ONNX runtime.
     /// `0` means "let ort decide" (typically = CPU count). When unset,
     /// `--resources` picks a value based on host core count.
@@ -88,11 +94,13 @@ pub fn merge_with_resource_plan(
     commit_batch: Option<usize>,
     threads: Option<usize>,
     embed_provider: Option<ProviderArg>,
+    embed_batch: Option<usize>,
 ) -> ResourcePlan {
     ResourcePlan {
         commit_batch: commit_batch.unwrap_or(plan.commit_batch),
         threads: threads.unwrap_or(plan.threads),
         embed_provider: embed_provider.unwrap_or(plan.embed_provider),
+        embed_batch: embed_batch.unwrap_or(plan.embed_batch),
     }
 }
 
@@ -237,6 +245,7 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         args.commit_batch,
         args.threads,
         args.embed_provider,
+        args.embed_batch,
     );
     tracing::info!(
         commit_batch = plan.commit_batch,
@@ -323,6 +332,7 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
 
     let indexer = Indexer::new(storage.clone(), embedder.clone())
         .with_batch_commits(plan.commit_batch)
+        .with_embed_batch(plan.embed_batch)
         .with_progress(progress)
         .with_runtime_metadata(runtime_metadata)
         // Plan 11: enable ExactSpan hunk-symbol attribution by wiring
@@ -460,6 +470,7 @@ mod merge_tests {
             commit_batch,
             threads,
             embed_provider: ProviderArg::Auto,
+            embed_batch: 32,
         }
     }
 
@@ -468,7 +479,7 @@ mod merge_tests {
         // The whole point of `--resources auto` is that an
         // unconfigured invocation gets the picked plan unmodified.
         let p = plan(256, 8);
-        let out = merge_with_resource_plan(p, None, None, None);
+        let out = merge_with_resource_plan(p, None, None, None, None);
         assert_eq!(out, p);
     }
 
@@ -476,7 +487,7 @@ mod merge_tests {
     fn merge_explicit_commit_batch_overrides_plan() {
         // Override semantics from Plan 6 Task 6.2: explicit > resources.
         let p = plan(256, 8);
-        let out = merge_with_resource_plan(p, Some(64), None, None);
+        let out = merge_with_resource_plan(p, Some(64), None, None, None);
         assert_eq!(out.commit_batch, 64);
         assert_eq!(out.threads, 8, "threads still come from the plan");
         assert_eq!(out.embed_provider, ProviderArg::Auto);
@@ -485,7 +496,7 @@ mod merge_tests {
     #[test]
     fn merge_explicit_threads_overrides_plan() {
         let p = plan(256, 8);
-        let out = merge_with_resource_plan(p, None, Some(2), None);
+        let out = merge_with_resource_plan(p, None, Some(2), None, None);
         assert_eq!(out.threads, 2);
         assert_eq!(out.commit_batch, 256);
     }
@@ -496,7 +507,7 @@ mod merge_tests {
         // `Auto` for provider must still honor `--embed-provider cpu`
         // when the user passes it, so benchmarks can pin the slow path.
         let p = plan(256, 8);
-        let out = merge_with_resource_plan(p, None, None, Some(ProviderArg::Cpu));
+        let out = merge_with_resource_plan(p, None, None, Some(ProviderArg::Cpu), None);
         assert_eq!(out.embed_provider, ProviderArg::Cpu);
     }
 
@@ -504,15 +515,34 @@ mod merge_tests {
     fn merge_all_three_explicit_takes_no_plan_values() {
         // Sanity: when every override is set, the plan is irrelevant.
         let p = plan(256, 8);
-        let out = merge_with_resource_plan(p, Some(64), Some(2), Some(ProviderArg::Cpu));
+        let out = merge_with_resource_plan(p, Some(64), Some(2), Some(ProviderArg::Cpu), Some(8));
         assert_eq!(
             out,
             ResourcePlan {
                 commit_batch: 64,
                 threads: 2,
                 embed_provider: ProviderArg::Cpu,
+                embed_batch: 8,
             }
         );
+    }
+
+    #[test]
+    fn explicit_embed_batch_overrides_plan() {
+        // Plan 15: explicit --embed-batch wins over the resource-plan default.
+        let p = plan(256, 8); // embed_batch = 32
+        let merged = merge_with_resource_plan(p, None, None, None, Some(8));
+        assert_eq!(merged.embed_batch, 8);
+        assert_eq!(merged.commit_batch, 256, "other fields untouched");
+        assert_eq!(merged.threads, 8, "other fields untouched");
+    }
+
+    #[test]
+    fn unset_embed_batch_keeps_plan_default() {
+        // When no explicit flag is given, the resource-plan value passes through.
+        let p = plan(256, 8); // embed_batch = 32
+        let merged = merge_with_resource_plan(p, None, None, None, None);
+        assert_eq!(merged.embed_batch, 32);
     }
 }
 

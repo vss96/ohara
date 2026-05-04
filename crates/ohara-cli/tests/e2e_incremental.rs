@@ -73,6 +73,7 @@ async fn incremental_on_fresh_repo_indexes_everything() {
         profile: false,
         embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
         resources: ohara_cli::resources::ResourcesArg::Auto,
+        embed_batch: None,
     };
     let report = ohara_cli::commands::index::run(args).await.unwrap();
     assert_eq!(
@@ -112,6 +113,7 @@ async fn incremental_after_partial_index_only_walks_new_commits() {
         profile: false,
         embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
         resources: ohara_cli::resources::ResourcesArg::Auto,
+        embed_batch: None,
     })
     .await
     .unwrap();
@@ -145,6 +147,7 @@ async fn incremental_after_partial_index_only_walks_new_commits() {
         profile: false,
         embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
         resources: ohara_cli::resources::ResourcesArg::Auto,
+        embed_batch: None,
     })
     .await
     .unwrap();
@@ -192,6 +195,7 @@ async fn index_force_rebuilds_chunked_symbols_and_reembeds() {
         profile: false,
         embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
         resources: ohara_cli::resources::ResourcesArg::Auto,
+        embed_batch: None,
     })
     .await
     .unwrap();
@@ -212,6 +216,7 @@ async fn index_force_rebuilds_chunked_symbols_and_reembeds() {
         profile: false,
         embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
         resources: ohara_cli::resources::ResourcesArg::Auto,
+        embed_batch: None,
     })
     .await
     .unwrap();
@@ -292,6 +297,7 @@ async fn incremental_at_head_is_noop_and_skips_embedder_init() {
         profile: false,
         embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
         resources: ohara_cli::resources::ResourcesArg::Auto,
+        embed_batch: None,
     })
     .await
     .unwrap();
@@ -308,6 +314,7 @@ async fn incremental_at_head_is_noop_and_skips_embedder_init() {
         profile: false,
         embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
         resources: ohara_cli::resources::ResourcesArg::Auto,
+        embed_batch: None,
     })
     .await
     .unwrap();
