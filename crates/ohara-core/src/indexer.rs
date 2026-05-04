@@ -293,7 +293,8 @@ impl Indexer {
                     .chain(semantic_texts.iter().cloned())
                     .collect();
                 let embed_start = Instant::now();
-                let embs = self.embedder.embed_batch(&texts).await?;
+                let embs =
+                    embed_in_chunks(self.embedder.as_ref(), &texts, self.embed_batch).await?;
                 timings.embed_ms += embed_start.elapsed().as_millis() as u64;
                 // `texts` always contains at least 1 element (the commit
                 // message), so an empty `embs` here is an embedder bug, not
@@ -396,6 +397,48 @@ impl Indexer {
             phase_timings: timings,
         })
     }
+}
+
+/// Plan 15: slice `texts` into chunks of `cap` and embed each in
+/// turn, concatenating the resulting vectors so the caller sees the
+/// same `Vec<Vec<f32>>` it would have received from a single
+/// `embed_batch(&texts)` call. Bounds peak per-commit embedder
+/// allocation: a 5,000-hunk vendor drop with `cap=32` issues 157
+/// embedder calls of <= 32 strings rather than one call of 5,001.
+///
+/// `cap == 0` is treated as `cap == 1` (degenerate but safe — every
+/// text is its own chunk).
+async fn embed_in_chunks(
+    embedder: &dyn EmbeddingProvider,
+    texts: &[String],
+    cap: usize,
+) -> Result<Vec<Vec<f32>>> {
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let cap = cap.max(1);
+    let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+    for chunk in texts.chunks(cap) {
+        // We allocate `chunk_owned` here rather than passing
+        // `chunk` directly because `EmbeddingProvider::embed_batch`
+        // takes `&[String]`; it already clones internally for
+        // `spawn_blocking`, so this allocation is unavoidable
+        // without changing the trait. Keeping it inside the loop
+        // means each iteration's clone is freed before the next
+        // chunk is fetched — `cap` is the upper bound on resident
+        // copies of input text at any moment.
+        let chunk_owned: Vec<String> = chunk.to_vec();
+        let mut embs = embedder.embed_batch(&chunk_owned).await?;
+        if embs.len() != chunk_owned.len() {
+            return Err(OhraError::Embedding(format!(
+                "embed_batch returned {} vectors for {} inputs",
+                embs.len(),
+                chunk_owned.len()
+            )));
+        }
+        out.append(&mut embs);
+    }
+    Ok(out)
 }
 
 /// Count "+"-prefixed lines in a unified-diff snippet. Excludes the
@@ -825,9 +868,14 @@ mod phase_timing_tests {
             .expect_err("buggy embedder must surface an OhraError, not panic");
         match err {
             OhraError::Embedding(msg) => {
+                // embed_in_chunks catches the mismatch (0 vectors for N
+                // inputs) before split_first sees an empty Vec, so the
+                // error now says "embed_batch returned 0 vectors for …"
+                // rather than the previous "embed_batch returned empty".
+                // Both are sub-strings of "embed_batch returned".
                 assert!(
-                    msg.contains("embed_batch returned empty"),
-                    "expected embed_batch-empty diagnostic, got: {msg}"
+                    msg.contains("embed_batch returned"),
+                    "expected embed_batch-mismatch diagnostic, got: {msg}"
                 );
             }
             other => panic!("expected OhraError::Embedding, got {other:?}"),
@@ -1137,5 +1185,41 @@ mod phase_timing_tests {
         for chunk in &observed {
             assert!(*chunk <= 2, "chunk size {chunk} exceeded knob");
         }
+    }
+
+    #[tokio::test]
+    async fn embed_in_chunks_handles_empty_and_partial_final() {
+        struct EchoEmbedder {
+            calls: std::sync::Arc<Mutex<Vec<usize>>>,
+        }
+        #[async_trait]
+        impl crate::EmbeddingProvider for EchoEmbedder {
+            fn dimension(&self) -> usize {
+                1
+            }
+            fn model_id(&self) -> &str {
+                "echo"
+            }
+            async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+                self.calls.lock().unwrap().push(texts.len());
+                Ok(texts.iter().map(|_| vec![1.0_f32]).collect())
+            }
+        }
+
+        let calls = std::sync::Arc::new(Mutex::new(Vec::<usize>::new()));
+        let e = EchoEmbedder {
+            calls: calls.clone(),
+        };
+
+        // Empty input -> zero calls, empty output.
+        let out = super::embed_in_chunks(&e, &[], 4).await.unwrap();
+        assert!(out.is_empty());
+        assert!(calls.lock().unwrap().is_empty());
+
+        // 7 texts with cap 3 -> chunks of [3, 3, 1].
+        let texts: Vec<String> = (0..7).map(|i| format!("t{i}")).collect();
+        let out = super::embed_in_chunks(&e, &texts, 3).await.unwrap();
+        assert_eq!(out.len(), 7);
+        assert_eq!(*calls.lock().unwrap(), vec![3, 3, 1]);
     }
 }
