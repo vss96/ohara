@@ -2,11 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Bump the workspace's `tree-sitter` pin from `0.22` to `0.24`, upgrade the four existing grammars to versions that use the `tree-sitter-language` ABI shim, replace the abandoned `tree-sitter-kotlin 0.3.x` with `tree-sitter-kotlin-ng 1.x`, and port `crates/ohara-parse/src/languages/{rust,python,java,kotlin}.rs` to the new streaming-iterator API.
+**Goal:** Bump the workspace's `tree-sitter` pin from `0.22` to `0.25`, upgrade the four existing grammars to versions that use the `tree-sitter-language` ABI shim, replace the abandoned `tree-sitter-kotlin 0.3.x` with `tree-sitter-kotlin-ng 1.x`, and port `crates/ohara-parse/src/languages/{rust,python,java,kotlin}.rs` to the new streaming-iterator API.
 
-**Architecture:** A coordinated workspace bump that pulls every tree-sitter component onto the same modern API surface (`LanguageFn` shim + streaming `QueryCursor::matches`). The four extractors keep their per-file shape and tree-sitter queries — only the grammar handle and the iterator-driving idiom change. `tree-sitter-kotlin` is deleted and `tree-sitter-kotlin-ng` is added; the `kotlin.rs` extractor is updated to call the new crate's `LANGUAGE` constant. `parser_kotlin` version bumps to `"2"` (output may differ subtly between the abandoned upstream and the actively-maintained -ng fork). `parser_rust`, `parser_python`, `parser_java` stay at `"1"` because their grammars only changed minor versions and emit equivalent AST shape.
+**Architecture:** A coordinated workspace bump that pulls every tree-sitter component onto the same modern API surface (`LanguageFn` shim + streaming `QueryCursor::matches`). The four extractors keep their per-file shape and tree-sitter queries — only the grammar handle and the iterator-driving idiom change. `tree-sitter-kotlin` is deleted and `tree-sitter-kotlin-ng` is added; the `kotlin.rs` extractor is updated to call the new crate's `LANGUAGE` constant. All four `parser_*` versions bump to `"2"` because each grammar has a meaningful version change (rust 0.21 → 0.24, python 0.21 → 0.25, java 0.21 → 0.23, kotlin upstream → -ng fork) and assuming minor-version bumps emit identical AST is unsupported. The kotlin swap in particular moves from the abandoned upstream to the more-recently-maintained -ng fork.
 
-**Tech Stack:** Rust 2021, `tree-sitter 0.24`, `tree-sitter-language 0.1`, `tree-sitter-rust 0.24`, `tree-sitter-python 0.25`, `tree-sitter-java 0.23`, `tree-sitter-kotlin-ng 1.1`. Existing `Symbol` / `SymbolKind` types in `ohara-core::types`.
+**Tech Stack:** Rust 2021, `tree-sitter 0.25`, `tree-sitter-language 0.1`, `tree-sitter-rust 0.24`, `tree-sitter-python 0.25`, `tree-sitter-java 0.23`, `tree-sitter-kotlin-ng 1.1`. Existing `Symbol` / `SymbolKind` types in `ohara-core::types`.
+
+**Why `tree-sitter 0.25` and not `0.24`:** the current grammars (`tree-sitter-rust 0.24.x`, `tree-sitter-python 0.25.0`) emit grammar ABI 15. `tree-sitter 0.24.x` only accepts ABI 13–14 (`TREE_SITTER_LANGUAGE_VERSION 14` / `MIN_COMPATIBLE 13` in `tree-sitter-0.24.7/include/tree_sitter/api.h`), so `Parser::set_language` panics at runtime on ABI 15 — the build succeeds but tests crash. `tree-sitter 0.25.0` accepts ABI 13–15 (`TREE_SITTER_LANGUAGE_VERSION 15`), retains the `From<LanguageFn> for Language` impl, AND adds `pub use streaming_iterator::{StreamingIterator, StreamingIteratorMut};` so extractors don't need a separate workspace dep on `streaming-iterator`.
 
 **Why this is its own plan, not part of plan-17:** Plan-17 (TS/JS support) hit the wall during implementation when:
 1. `tree-sitter-javascript 0.21.x` capped `cc` at `<1.1`, cascade-downgrading the crypto stack.
@@ -15,7 +17,9 @@
 
 The right sequencing is plan-18 first (modernize everything currently in the tree), then plan-17's TS/JS extractors slot in cleanly with no API contortions.
 
-**Out of scope:** Adding new languages (TS/JS = plan-17, C# = plan-18). Bumping any non-tree-sitter dep beyond what cargo's resolver naturally pulls forward.
+**Partial-merge policy:** If any phase blocks during execution, do not merge the partially-modernized branch — either complete remaining phases or revert to main. Half-modernized state on main is worse than the current 0.22 baseline.
+
+**Out of scope:** Adding new languages (TS/JS = plan-17; C# is a future plan, number TBD). Bumping any non-tree-sitter dep beyond what cargo's resolver naturally pulls forward. A workspace version bump and `CHANGELOG.md` entry land in a separate release PR after this merges (matching the project's existing release cadence).
 
 ---
 
@@ -30,29 +34,30 @@ The right sequencing is plan-18 first (modernize everything currently in the tre
 | `crates/ohara-parse/src/languages/python.rs` | Modify | Same shape change. |
 | `crates/ohara-parse/src/languages/java.rs` | Modify | Same shape change. |
 | `crates/ohara-parse/src/languages/kotlin.rs` | Modify | Use `tree_sitter_kotlin_ng::LANGUAGE.into()`; port iterator. |
-| `crates/ohara-parse/src/lib.rs` | Modify | Bump `parser_kotlin` to `"2"` in `parser_versions()`. CHUNKER_VERSION stays. |
+| `crates/ohara-parse/src/lib.rs` | Modify | Bump all four `parser_*` versions to `"2"` in `parser_versions()`. CHUNKER_VERSION stays. |
 | `docs-book/src/architecture/languages.md` | Modify | Note kotlin grammar swap from upstream to -ng. |
 | `docs/refactor-todos/` | Optional | If anything surfaces during the port, capture it here. Don't pre-emptively create the file. |
 
 ---
 
-## Phase 1 — Workspace dep bump
+## Phase 1 — Workspace dep bump + rust extractor port (atomic)
 
-This is one atomic Cargo.toml edit + Cargo.lock regen + verification gate. Do NOT split the bumps into separate commits — the resolver coupling means individual bumps may not have a working state in between.
+This is one atomic commit: workspace Cargo.toml edit, Cargo.lock regen, AND the first extractor port (rust). The bump and the first port stay together so the branch always builds from this commit forward. The CLAUDE.md commit-granularity rule treats a non-building commit as broken master state, not a TDD red — so we don't split them.
 
-### Task 1.1: Bump all tree-sitter deps and verify
+### Task 1.1: Bump all tree-sitter deps and port rust extractor
 
 **Files:**
 - Modify: `Cargo.toml` (workspace root)
 - Modify: `Cargo.lock`
 - Modify: `crates/ohara-parse/Cargo.toml`
+- Modify: `crates/ohara-parse/src/languages/rust.rs`
 
 - [ ] **Step 1: Edit workspace `Cargo.toml`.**
 
 Replace the `tree-sitter*` block (around line 41) with:
 
 ```toml
-tree-sitter = "0.24"
+tree-sitter = "0.25"
 tree-sitter-rust = "0.24"
 tree-sitter-python = "0.25"
 tree-sitter-java = "0.23"
@@ -91,67 +96,29 @@ Expected: empty. If non-empty, STOP and report BLOCKED — investigate which new
 grep -A1 '^name = "tree-sitter"\|^name = "tree-sitter-language"' Cargo.lock | head -10
 ```
 
-Expected: `tree-sitter 0.24.x`, `tree-sitter-language 0.1.x` (the ABI shim).
+Expected: `tree-sitter 0.25.x`, `tree-sitter-language 0.1.x` (the ABI shim).
 
-- [ ] **Step 6: Build with --locked.** (Will fail because the four extractors haven't been ported yet — that's expected.)
+- [ ] **Step 6: Confirm the build is broken in the expected shape (diagnostic only).**
 
 ```sh
 cargo build -p ohara-parse --locked 2>&1 | tail -30
 ```
 
-Expected failures:
-- `error[E0277]: the trait bound 'tree_sitter::Language: From<tree_sitter_language::LanguageFn>' is not satisfied` — for the four `language()` calls. Will be fixed in Phases 2-5.
-- `error[E0277]: ... QueryMatches ... is not an iterator` (or similar) — for the four `for m in cursor.matches(...)` loops. Will be fixed in Phases 2-5.
+Expected failures (these will all be fixed inside this same commit by the rust port + Phases 2-4 by the other ports):
+- `error[E0277]: the trait bound 'tree_sitter::Language: From<tree_sitter_language::LanguageFn>' is not satisfied` — for the four `language()` calls.
+- `error[E0277]: ... QueryMatches ... is not an iterator` (or similar) — for the four `for m in cursor.matches(...)` loops.
 
 Other errors are unexpected — STOP and report BLOCKED.
 
-If the failures are exactly the expected shape (4× LanguageFn trait + 4× QueryMatches iterator), proceed.
+If the failures are exactly the expected shape (4× LanguageFn trait + 4× QueryMatches iterator), proceed to the rust port.
 
-- [ ] **Step 7: Commit the bump + lockfile.**
-
-The four extractor files are NOT yet modified at this point. The build is broken intentionally — that's the failing-test analogue for this phase. Commit anyway:
-
-```sh
-git add Cargo.toml Cargo.lock crates/ohara-parse/Cargo.toml
-git commit -m "build: bump tree-sitter to 0.24, swap kotlin grammar to -ng
-
-Bumps the workspace's tree-sitter pin from 0.22 to 0.24. Existing
-grammars move to versions that use the tree-sitter-language 0.1 ABI
-shim:
-- tree-sitter-rust 0.21 -> 0.24
-- tree-sitter-python 0.21 -> 0.25
-- tree-sitter-java 0.21 -> 0.23
-- tree-sitter-kotlin 0.3 -> tree-sitter-kotlin-ng 1.1 (different crate)
-
-The build is INTENTIONALLY broken at this commit. Phases 2-5 of
-plan-18 port the four extractors (rust/python/java/kotlin) to the
-new LANGUAGE.into() form and the streaming QueryCursor::matches
-iterator. Each language gets its own commit so a regression in
-one extractor's tests doesn't gate the others.
-
-Crypto stack pinnings preserved (verified via lockfile diff)."
-```
-
-(One-line summary on first line per Conventional Commits, body follows.)
-
----
-
-## Phase 2 — Port rust extractor
-
-The pattern below is identical for python/java/kotlin. Port one extractor at a time so tests give granular signal.
-
-### Task 2.1: Port rust.rs
-
-**Files:**
-- Modify: `crates/ohara-parse/src/languages/rust.rs`
-
-- [ ] **Step 1: Read the current `rust.rs` to understand the existing test fixture.**
+- [ ] **Step 7: Read the current `rust.rs` to understand the existing test fixture.**
 
 Run: `cargo test -p ohara-parse --lib languages::rust -- --list 2>&1 | head`
 
-Note which tests exist; you don't need to add new ones — porting must keep them passing.
+Note which tests exist; **do not add new tests in this phase**. The port is a no-op refactor — adding tests would muddy the "API port is mechanical" assertion. If you spot test coverage gaps, capture them in `docs/refactor-todos/` and address in a follow-up PR.
 
-- [ ] **Step 2: Make the API substitutions.**
+- [ ] **Step 8: Make the API substitutions in `crates/ohara-parse/src/languages/rust.rs`.**
 
 Two surgical changes inside `extract`:
 
@@ -167,7 +134,7 @@ let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
 parser.set_language(&language).context("set rust language")?;
 ```
 
-(The `tree_sitter_language::LanguageFn -> tree_sitter::Language` conversion is provided by `tree-sitter 0.24+`. The `LANGUAGE` constant has type `tree_sitter_language::LanguageFn`.)
+(The `tree_sitter_language::LanguageFn -> tree_sitter::Language` conversion is provided by `tree-sitter 0.25`. The `LANGUAGE` constant has type `tree_sitter_language::LanguageFn`.)
 
 **Change B** — port the streaming iterator:
 
@@ -186,9 +153,9 @@ while let Some(m) = matches.next() {
 
 The body of the loop (the `for cap in m.captures` inner loop and everything else) stays IDENTICAL. Only the iteration style changes. `m` and `m.captures` have the same shape as before.
 
-You'll need `use tree_sitter::QueryMatches;` or `use streaming_iterator::StreamingIterator;` if `next()` doesn't resolve — `tree-sitter 0.24` re-exports the streaming-iterator trait. If neither resolves, check `cargo doc -p tree-sitter` for the exact import.
+Add `use tree_sitter::StreamingIterator;` at the top of the extractor file. `tree-sitter 0.25` re-exports the trait via `pub use streaming_iterator::{StreamingIterator, StreamingIteratorMut};`, so no extra workspace dep is needed.
 
-- [ ] **Step 3: Run the rust extractor tests.**
+- [ ] **Step 9: Run the rust extractor tests.**
 
 ```sh
 cargo test -p ohara-parse --lib languages::rust
@@ -196,35 +163,56 @@ cargo test -p ohara-parse --lib languages::rust
 
 Expected: all existing tests pass with no source changes other than the two API substitutions above. If a test fails for a reason that isn't an API issue (e.g., the new tree-sitter-rust 0.24 grammar emits different node names), STOP and report BLOCKED with the diff. Don't paper over query mismatches.
 
-- [ ] **Step 4: Run clippy.**
+- [ ] **Step 10: Run clippy.**
 
 ```sh
 cargo clippy -p ohara-parse --lib -- -D warnings
 ```
 
-Expected: clean.
+Expected: clean. (The other three extractors still won't build — that's fine; clippy on `--lib` will only succeed once they're ported in Phases 2-4. If clippy fails on rust.rs specifically, fix; if it fails because python/java/kotlin haven't been ported yet, that's expected and the bar for this commit is `cargo build -p ohara-parse --tests` failing only on those three files.)
 
-- [ ] **Step 5: Commit.**
+- [ ] **Step 11: Commit the bump + rust port atomically.**
 
 ```sh
-git add crates/ohara-parse/src/languages/rust.rs
-git commit -m "refactor(parse): port rust extractor to tree-sitter 0.24 API
+git add Cargo.toml Cargo.lock crates/ohara-parse/Cargo.toml crates/ohara-parse/src/languages/rust.rs
+git commit -m "build: bump tree-sitter to 0.25, swap kotlin grammar to -ng, port rust extractor
 
-Uses tree_sitter_rust::LANGUAGE.into() and the streaming
-QueryCursor::matches iterator. No behavior change — same query,
-same Symbol shape, same test fixtures pass."
+Bumps the workspace's tree-sitter pin from 0.22 to 0.25. Existing
+grammars move to versions that use the tree-sitter-language 0.1 ABI
+shim:
+- tree-sitter-rust 0.21 -> 0.24
+- tree-sitter-python 0.21 -> 0.25
+- tree-sitter-java 0.21 -> 0.23
+- tree-sitter-kotlin 0.3 -> tree-sitter-kotlin-ng 1.1 (different crate)
+
+tree-sitter 0.25 (not 0.24) is required because the modern grammars
+emit ABI 15 and 0.24 only accepts 13-14; 0.25 accepts 13-15 and
+re-exports streaming_iterator::StreamingIterator so no extra dep
+is needed.
+
+The rust extractor is ported in this same commit so the workspace
+stays buildable from this point forward. Phases 2-4 of plan-18
+port the remaining python/java/kotlin extractors in their own
+commits so a regression in one extractor's tests doesn't gate
+the others.
+
+Crypto stack pinnings preserved (verified via lockfile diff)."
 ```
+
+(One-line summary on first line per Conventional Commits, body follows.)
 
 ---
 
-## Phase 3 — Port python extractor
+## Phase 2 — Port python extractor
 
-### Task 3.1: Port python.rs
+The pattern below is identical for java/kotlin. Port one extractor at a time so tests give granular signal. **Do not add new tests in these port phases** — each is a no-op refactor.
+
+### Task 2.1: Port python.rs
 
 **Files:**
 - Modify: `crates/ohara-parse/src/languages/python.rs`
 
-- [ ] **Step 1: Apply the same two changes as Task 2.1**, but for python:
+- [ ] **Step 1: Apply the same two changes as Phase 1's rust port**, but for python. **Do not add new tests in this phase** — the port is a no-op refactor. If you spot test coverage gaps, capture them in `docs/refactor-todos/` and address in a follow-up PR.
 
 ```rust
 let language: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
@@ -236,6 +224,8 @@ while let Some(m) = matches.next() {
     // ...identical body...
 }
 ```
+
+(Add `use tree_sitter::StreamingIterator;` at the top of the file if `next()` doesn't resolve.)
 
 - [ ] **Step 2: Run the python extractor tests.**
 
@@ -255,21 +245,21 @@ cargo clippy -p ohara-parse --lib -- -D warnings
 
 ```sh
 git add crates/ohara-parse/src/languages/python.rs
-git commit -m "refactor(parse): port python extractor to tree-sitter 0.24 API
+git commit -m "refactor(parse): port python extractor to tree-sitter 0.25 API
 
 LANGUAGE.into() + streaming iterator. No behavior change."
 ```
 
 ---
 
-## Phase 4 — Port java extractor
+## Phase 3 — Port java extractor
 
-### Task 4.1: Port java.rs
+### Task 3.1: Port java.rs
 
 **Files:**
 - Modify: `crates/ohara-parse/src/languages/java.rs`
 
-- [ ] **Step 1: Apply the same two changes**, but for java:
+- [ ] **Step 1: Apply the same two changes**, but for java. **Do not add new tests in this phase** — the port is a no-op refactor. If you spot test coverage gaps, capture them in `docs/refactor-todos/` and address in a follow-up PR.
 
 ```rust
 let language: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
@@ -281,6 +271,8 @@ while let Some(m) = matches.next() {
     // ...identical body...
 }
 ```
+
+(Add `use tree_sitter::StreamingIterator;` at the top of the file if `next()` doesn't resolve.)
 
 - [ ] **Step 2: Run the java extractor tests.**
 
@@ -295,24 +287,24 @@ Expected: all pass.
 ```sh
 cargo clippy -p ohara-parse --lib -- -D warnings
 git add crates/ohara-parse/src/languages/java.rs
-git commit -m "refactor(parse): port java extractor to tree-sitter 0.24 API
+git commit -m "refactor(parse): port java extractor to tree-sitter 0.25 API
 
 LANGUAGE.into() + streaming iterator. No behavior change."
 ```
 
 ---
 
-## Phase 5 — Port kotlin extractor (with grammar swap)
+## Phase 4 — Port kotlin extractor (with grammar swap)
 
-This is more involved than Phases 2-4 because the crate name changed (`tree-sitter-kotlin` → `tree-sitter-kotlin-ng`).
+This is more involved than Phases 1-3 because the crate name changed (`tree-sitter-kotlin` → `tree-sitter-kotlin-ng`). **Do not add new tests in this phase** — fixture changes (covered below) are not the same as new test coverage; capture any coverage gaps in `docs/refactor-todos/` instead.
 
-### Task 5.1: Port kotlin.rs
+### Task 4.1: Port kotlin.rs
 
 **Files:**
 - Modify: `crates/ohara-parse/src/languages/kotlin.rs`
 - Modify: `crates/ohara-parse/queries/kotlin.scm` (possibly — the -ng grammar may have renamed nodes)
 
-- [ ] **Step 1: Apply the API substitutions**, with the crate name swap:
+- [ ] **Step 1: Apply the API substitutions**, with the crate name swap. **Do not add new tests in this phase** — capture any coverage gaps in `docs/refactor-todos/` instead.
 
 ```rust
 let language: tree_sitter::Language = tree_sitter_kotlin_ng::LANGUAGE.into();
@@ -327,6 +319,8 @@ while let Some(m) = matches.next() {
 }
 ```
 
+(Add `use tree_sitter::StreamingIterator;` at the top of the file if `next()` doesn't resolve.)
+
 - [ ] **Step 2: Run the kotlin extractor tests.**
 
 ```sh
@@ -336,7 +330,10 @@ cargo test -p ohara-parse --lib languages::kotlin
 Possible outcomes:
 - **All pass:** the -ng grammar's node names match the legacy grammar's. Proceed to Step 5.
 - **Some fail with `Query::new` errors mentioning unrecognized node names:** the -ng grammar renamed some nodes. The kotlin.scm query needs updating to match. Open the query and the test fixture, run `tree-sitter parse <fixture>` against the new grammar (or read the registry source for `tree-sitter-kotlin-ng-1.1.0/src/grammar.json`) to find the new node names, edit `crates/ohara-parse/queries/kotlin.scm`, re-run.
-- **Tests fail because extracted symbols differ:** the -ng grammar parses kotlin slightly differently. This is expected for some inputs (the whole reason the -ng fork exists is to fix bugs in the abandoned upstream). Update test fixtures to match the new (presumably more correct) output. Document each fixture change in the commit message.
+- **Tests fail because extracted symbols differ:** the -ng grammar parses kotlin slightly differently. For each fixture mismatch, do NOT silently rewrite the fixture. Instead:
+  1. Diff the kotlin-ng grammar's `grammar.json` against the abandoned upstream's, or read the kotlin-ng release notes / changelog (the repo at `tree-sitter-grammars/tree-sitter-kotlin` has releases on GitHub).
+  2. For each fixture change, name the specific grammar-rule difference that justifies it in the commit body.
+  3. If a fixture difference can't be tied to a documented grammar change, treat it as a regression and STOP — do not commit it. Escalate.
 
 - [ ] **Step 3: Run clippy.**
 
@@ -361,32 +358,35 @@ If the query or test fixtures changed:
 
 ```sh
 git add crates/ohara-parse/src/languages/kotlin.rs crates/ohara-parse/queries/kotlin.scm
+git add -u crates/ohara-parse/
 git commit -m "refactor(parse): port kotlin extractor to tree-sitter-kotlin-ng
 
 API substitutions as above, plus query updates for -ng grammar:
 - <list each query change with rationale>"
 ```
 
+(`-u` stages updates to tracked files only — confirm `git status` first if you've added new fixture files.)
+
 ---
 
-## Phase 6 — Bump parser_kotlin version + final verification
+## Phase 5 — Bump parser versions + final verification
 
-### Task 6.1: Bump parser_kotlin in `parser_versions()`
+### Task 5.1: Bump all four parsers in `parser_versions()`
 
 **Files:**
 - Modify: `crates/ohara-parse/src/lib.rs`
 
 - [ ] **Step 1: Update parser_versions().**
 
-In `parser_versions()` (around line 53), bump kotlin to `"2"`:
+In `parser_versions()` (around line 53), bump all four to `"2"`:
 
 ```rust
 pub fn parser_versions() -> BTreeMap<String, String> {
     [
-        ("rust", "1"),
-        ("python", "1"),
-        ("java", "1"),
-        ("kotlin", "2"),  // bumped: grammar swapped to tree-sitter-kotlin-ng
+        ("rust", "2"),     // bumped: tree-sitter-rust 0.21 -> 0.24 may emit subtly different AST
+        ("python", "2"),   // bumped: tree-sitter-python 0.21 -> 0.25
+        ("java", "2"),     // bumped: tree-sitter-java 0.21 -> 0.23
+        ("kotlin", "2"),   // bumped: grammar swapped to tree-sitter-kotlin-ng
     ]
     .into_iter()
     .map(|(lang, ver)| (lang.to_string(), ver.to_string()))
@@ -409,17 +409,17 @@ Expected: all pass.
 
 ```sh
 git add crates/ohara-parse/src/lib.rs
-git commit -m "feat(parse): bump parser_kotlin to v2 for grammar swap
+git commit -m "feat(parse): bump all parser_versions to v2 for grammar bumps
 
-The kotlin grammar swap from tree-sitter-kotlin (abandoned) to
-tree-sitter-kotlin-ng (active fork) may produce slightly different
-extracted symbols on edge-case inputs. Bumping parser_kotlin to
-\"2\" surfaces the change in plan-13's compatibility verdict, so
-indexes built before this lands report query_compatible_needs_refresh
-and prompt the user to run 'ohara index --force'."
+All four parsers bump to v2 because each has a meaningful grammar
+version change (rust 0.21 -> 0.24, python 0.21 -> 0.25, java 0.21
+-> 0.23, kotlin upstream -> -ng fork); assuming minor versions
+emit identical AST is unsupported. Existing indexes report
+query_compatible_needs_refresh and 'ohara index --force'
+repopulates derived rows (cheap; no vector rebuild needed)."
 ```
 
-### Task 6.2: Workspace lint + test + fmt
+### Task 5.2: Workspace lint + test + fmt
 
 **Files:** none (verification only)
 
@@ -464,13 +464,25 @@ cargo run -p ohara-cli -- query --query "retry with backoff" fixtures/tiny/repo
 
 Expected: index completes; query returns hits. The fixture is small enough that this runs in seconds.
 
+The tiny fixture only verifies the binary boots and queries return non-empty — not that extraction quality is preserved.
+
 If the smoke test fails, that's a regression — STOP and report BLOCKED.
+
+- [ ] **Step 5 (preferred): index a real-world repo per language and assert hit count is non-decreasing vs main.**
+
+```sh
+# Index this very repo for the rust path:
+cargo run -p ohara-cli -- index .
+cargo run -p ohara-cli -- query --query "retry with backoff" .
+```
+
+Hit count should be ≥ 1. If a `fixtures/build_medium.sh` script exists, run it and index that fixture as well. Capture the hit count for a tracked query before merge and confirm it's non-decreasing post-merge. If `fixtures/build_medium.sh` doesn't exist on the branch, just use the project root; a single language being smoke-checked is better than zero.
 
 ---
 
-## Phase 7 — Docs + PR
+## Phase 6 — Docs + PR
 
-### Task 7.1: Update language doc
+### Task 6.1: Update language doc
 
 **Files:**
 - Modify: `docs-book/src/architecture/languages.md`
@@ -479,7 +491,7 @@ If the smoke test fails, that's a regression — STOP and report BLOCKED.
 
 Run: `grep -n "kotlin\|tree-sitter-kotlin" docs-book/src/architecture/languages.md`
 
-Update mentions of `tree-sitter-kotlin` to `tree-sitter-kotlin-ng` (active fork by `tree-sitter-grammars` org). Add a brief sentence noting the swap was driven by upstream stagnation and the parser_kotlin version bump.
+Update mentions of `tree-sitter-kotlin` to `tree-sitter-kotlin-ng` (more-recently-maintained fork by `tree-sitter-grammars` org). Add a brief sentence noting the swap was driven by upstream stagnation, plus the broader parser_versions bump (all four parsers move to v2 for the grammar bumps).
 
 - [ ] **Step 2: Build the docs.**
 
@@ -493,39 +505,41 @@ Expected: clean build.
 
 ```sh
 git add docs-book/src/architecture/languages.md
-git commit -m "docs(arch): note kotlin grammar swap to tree-sitter-kotlin-ng"
+git commit -m "docs(arch): note kotlin grammar swap to tree-sitter-kotlin-ng and parser_versions bumps"
 ```
 
-### Task 7.2: Open the PR
+### Task 6.2: Open the PR
 
 - [ ] **Step 1: Push the branch.**
 
 ```sh
-git push -u origin plan/tree-sitter-modernization
+git push -u origin <implementation-branch-name>
 ```
+
+(Suggested name: `feat/tree-sitter-modernization` — different from this docs PR's `plan/tree-sitter-modernization` to keep the planning artifact and the code-change PR separate.)
 
 - [ ] **Step 2: Open PR.**
 
 Use `gh pr create` with a body that includes:
 - Summary — modernizes tree-sitter integration to unblock plan-17 (TS/JS).
 - Per-phase commit list.
-- Compatibility note: parser_kotlin v1 → v2 means existing indexes will get a `query_compatible_needs_refresh` verdict; users run `ohara index --force` to repopulate.
-- Test plan — every test in the existing suite continues to pass; smoke test of `ohara index` + `ohara query` against the tiny fixture passes.
+- Compatibility note: all four `parser_*` versions bump v1 → v2, so existing indexes will get a `query_compatible_needs_refresh` verdict; users run `ohara index --force` to repopulate (cheap; no vector rebuild needed).
+- Test plan — every test in the existing suite continues to pass; smoke test of `ohara index` + `ohara query` against the tiny fixture passes; real-repo hit count non-decreasing.
 
 ---
 
 ## Self-review
 
 **1. Spec coverage.** This plan turns "modernize tree-sitter integration" into:
-- Workspace dep bump (Phase 1)
-- Port the four existing extractors to the streaming-iterator API + LANGUAGE.into() (Phases 2-5)
-- Bump parser_kotlin version for the grammar swap (Phase 6.1)
-- Verify (Phase 6.2)
-- Docs + PR (Phase 7)
+- Workspace dep bump + rust extractor port, atomic (Phase 1)
+- Port the python/java/kotlin extractors to the streaming-iterator API + LANGUAGE.into() (Phases 2-4)
+- Bump all four parser_versions for the grammar bumps (Phase 5.1)
+- Verify (Phase 5.2)
+- Docs + PR (Phase 6)
 
-No requirement is left as a placeholder. The "what if the -ng grammar parses differently" branch (Task 5.1 Step 2) describes the three concrete outcomes and the action for each.
+No requirement is left as a placeholder. The "what if the -ng grammar parses differently" branch (Task 4.1 Step 2) describes the three concrete outcomes and the action for each.
 
-**2. Placeholder scan.** No "TBD"/"implement later"/"add error handling". The only "iterate against reality" step is Task 5.1's query/fixture handling, and that's framed with three explicit branches.
+**2. Placeholder scan.** No "TBD"/"implement later"/"add error handling". The only "iterate against reality" step is Task 4.1's query/fixture handling, and that's framed with three explicit branches.
 
 **3. Type consistency.** `tree_sitter::Language`, `tree_sitter_language::LanguageFn`, `LANGUAGE.into()` are used consistently across all four ports. `parser_versions()` shape matches the existing pattern.
 
@@ -534,7 +548,7 @@ No requirement is left as a placeholder. The "what if the -ng grammar parses dif
 ## Follow-up: resume plan-17
 
 After plan-18 merges:
-1. Rebase the `feat/ts-js-language-support` branch (which has plan-17's Phase 1 commits at `ef86df4`) onto the new main.
-2. Drop the `7baa0b2` commit ("bump tree-sitter grammars to 0.23 to free cc constraint") — its "deviation note" content is no longer needed since plan-18 has already moved the workspace forward.
-3. Drop the `ef86df4` commit (Task 2.1's failing test) — the implementer can re-create it inside Task 2.2's flow.
+1. Rebase the `feat/ts-js-language-support` branch (which has Phase 1's last scaffolding commit on `feat/ts-js-language-support`) onto the new main.
+2. Drop the `build(parse): bump tree-sitter grammars to 0.23 to free cc constraint` commit — its "deviation note" content is no longer needed since plan-18 has already moved the workspace forward.
+3. Drop the Task 2.1 failing-test commit (the one whose subject is `test(parse): javascript function_declaration extraction (failing)`) — the implementer can re-create it inside Task 2.2's flow.
 4. Resume plan-17 from Task 2.2 against the modernized workspace. The plan body's `tree_sitter_javascript::language()` calls become `tree_sitter_javascript::LANGUAGE.into()` (already noted in plan-17's deviation paragraph) and the iterator loops follow the streaming idiom from plan-18.
