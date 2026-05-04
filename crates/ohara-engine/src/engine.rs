@@ -527,4 +527,22 @@ pub(crate) mod tests {
             "open_repo must return the cached Arc, not a fresh handle"
         );
     }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn invalidate_repo_drops_handle_and_meta() {
+        let _g = env_lock();
+        let ohara_home = tempfile::tempdir().unwrap();
+        std::env::set_var("OHARA_HOME", ohara_home.path());
+        let tmp = tempfile::tempdir().unwrap();
+        build_test_repo(tmp.path());
+        let engine = make_test_engine();
+        let h1 = engine.open_repo(tmp.path()).await.expect("first open");
+        engine.invalidate_repo(tmp.path()).await.expect("invalidate");
+        let h2 = engine.open_repo(tmp.path()).await.expect("second open");
+        assert!(
+            !Arc::ptr_eq(&h1, &h2),
+            "invalidated handle must be re-opened, got the same Arc"
+        );
+    }
 }
