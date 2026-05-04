@@ -276,6 +276,42 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn embed_query_uses_cache_on_repeat_call() {
+        use std::sync::Mutex;
+        struct Counting {
+            calls: Mutex<usize>,
+        }
+        #[async_trait::async_trait]
+        impl ohara_core::EmbeddingProvider for Counting {
+            fn dimension(&self) -> usize {
+                384
+            }
+            fn model_id(&self) -> &str {
+                "counting"
+            }
+            async fn embed_batch(
+                &self,
+                texts: &[String],
+            ) -> ohara_core::Result<Vec<Vec<f32>>> {
+                *self.calls.lock().expect("not poisoned") += 1;
+                Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
+            }
+        }
+        let counting = std::sync::Arc::new(Counting {
+            calls: Mutex::new(0),
+        });
+        let engine =
+            RetrievalEngine::new(counting.clone(), std::sync::Arc::new(DummyReranker));
+        let _ = engine.embed_query("hello").await.expect("first");
+        let _ = engine.embed_query("hello").await.expect("second");
+        assert_eq!(
+            *counting.calls.lock().expect("not poisoned"),
+            1,
+            "second call must hit cache"
+        );
+    }
+
+    #[tokio::test]
     async fn find_pattern_returns_empty_hits_on_empty_index() {
         let ohara_home = tempfile::tempdir().unwrap();
         let tmp = tempfile::tempdir().unwrap();
