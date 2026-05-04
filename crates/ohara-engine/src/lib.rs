@@ -8,6 +8,7 @@ mod cache;
 mod engine;
 mod error;
 mod handle;
+pub mod ipc;
 
 pub use cache::EmbeddingCache;
 pub use cache::MetaCache;
