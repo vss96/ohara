@@ -49,7 +49,7 @@ pub fn find_or_spawn_daemon(
             spawned: false,
         }));
     }
-    let sd = spawn_daemon(ohara_binary, &runtime_dir(), ohara_version)?;
+    let sd = spawn_daemon(ohara_binary, &runtime_dir(), ohara_version, registry_path)?;
     let record = DaemonRecord {
         pid: sd.pid,
         socket_path: sd.socket_path.clone(),

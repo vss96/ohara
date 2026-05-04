@@ -12,6 +12,7 @@ pub fn spawn_daemon(
     ohara_binary: &Path,
     runtime_dir: &Path,
     ohara_version: &str,
+    registry_path: &Path,
 ) -> crate::Result<SpawnedDaemon> {
     std::fs::create_dir_all(runtime_dir)
         .map_err(|e| EngineError::Internal(format!("mkdir runtime: {e}")))?;
@@ -28,6 +29,8 @@ pub fn spawn_daemon(
         .arg(&pid_file)
         .arg("--readiness-file")
         .arg(&ready_file)
+        .arg("--registry-path")
+        .arg(registry_path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .stdin(std::process::Stdio::null());
@@ -108,7 +111,9 @@ mod tests {
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let result = spawn_daemon(&script, runtime.path(), "0.7.4").expect("spawn within 10s");
+        let registry = runtime.path().join("registry.json");
+        let result = spawn_daemon(&script, runtime.path(), "0.7.4", &registry)
+            .expect("spawn within 10s");
         // Cleanup: kill the spawned child.
         unsafe { libc::kill(result.pid as i32, libc::SIGTERM) };
         assert!(result.pid > 0);
