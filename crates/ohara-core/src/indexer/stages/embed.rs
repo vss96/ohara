@@ -1,6 +1,133 @@
 //! Output type and stage implementation for the embed stage.
 
 use super::attribute::AttributedHunk;
+use crate::embed::EmbeddingProvider;
+use crate::{OhraError, Result};
+use std::sync::Arc;
+
+/// The embed stage: calls `EmbeddingProvider::embed_batch` in chunks
+/// of at most `embed_batch` texts, concatenates the results, and
+/// returns one `EmbeddedHunk` per input `AttributedHunk`.
+///
+/// The commit-message embedding is produced in the same batch (as
+/// element 0) and returned via `commit_embedding` in `EmbedOutput`
+/// so the coordinator can store it alongside the commit row.
+///
+/// This is the only stage that holds a constructor-time configuration
+/// value (`embed_batch`). Default: 32.
+pub struct EmbedStage {
+    embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
+    embed_batch: usize,
+}
+
+/// Output of the embed stage for a single commit.
+pub struct EmbedOutput {
+    /// Embedding vector for the commit message (element 0 of the full
+    /// text batch).
+    pub commit_embedding: Vec<f32>,
+    /// One `EmbeddedHunk` per input `AttributedHunk`, in the same
+    /// order.
+    pub hunks: Vec<EmbeddedHunk>,
+}
+
+impl EmbedStage {
+    /// Construct a new embed stage wrapping `embedder` with the
+    /// default `embed_batch` of 32.
+    pub fn new(embedder: Arc<dyn EmbeddingProvider + Send + Sync>) -> Self {
+        Self {
+            embedder,
+            embed_batch: 32,
+        }
+    }
+
+    /// Override the per-commit embed batch size. `0` is normalised to
+    /// `1`. Smaller values cap peak allocator pressure at the cost of
+    /// more `embed_batch` calls per commit.
+    pub fn with_embed_batch(mut self, n: usize) -> Self {
+        self.embed_batch = n.max(1);
+        self
+    }
+
+    /// Run the embed stage for a single commit.
+    ///
+    /// `commit_message` is placed at index 0 of the text batch;
+    /// `attributed_hunks[i].effective_semantic_text()` occupies indices
+    /// 1..=n. The returned `EmbedOutput::hunks` is in the same order as
+    /// `attributed_hunks`.
+    pub async fn run(
+        &self,
+        commit_message: &str,
+        attributed_hunks: &[AttributedHunk],
+    ) -> Result<EmbedOutput> {
+        if attributed_hunks.is_empty() {
+            // Still embed the commit message alone.
+            let embs = self
+                .embedder
+                .embed_batch(&[commit_message.to_owned()])
+                .await?;
+            let commit_embedding = embs
+                .into_iter()
+                .next()
+                .ok_or_else(|| OhraError::Embedding("embed_batch returned empty".into()))?;
+            return Ok(EmbedOutput {
+                commit_embedding,
+                hunks: vec![],
+            });
+        }
+
+        // Build the full text list: commit message first, then hunks.
+        let mut texts: Vec<String> = Vec::with_capacity(attributed_hunks.len() + 1);
+        texts.push(commit_message.to_owned());
+        for ah in attributed_hunks {
+            texts.push(ah.effective_semantic_text().to_owned());
+        }
+
+        // Chunked embedding (plan-15 knob).
+        let all_embs = self.embed_in_chunks(&texts).await?;
+
+        let (commit_vec, hunk_vecs) = all_embs.split_first().ok_or_else(|| {
+            OhraError::Embedding("embed_batch returned empty for non-empty input".into())
+        })?;
+
+        let hunks = attributed_hunks
+            .iter()
+            .zip(hunk_vecs.iter())
+            .map(|(ah, emb)| EmbeddedHunk {
+                attributed: ah.clone(),
+                embedding: emb.clone(),
+            })
+            .collect();
+
+        Ok(EmbedOutput {
+            commit_embedding: commit_vec.clone(),
+            hunks,
+        })
+    }
+
+    /// Slice `texts` into chunks of `self.embed_batch`, embed each
+    /// chunk, and concatenate results. Keeps peak-embed allocation
+    /// bounded regardless of commit size.
+    async fn embed_in_chunks(
+        &self,
+        texts: &[String],
+    ) -> Result<Vec<Vec<f32>>> {
+        let cap = self.embed_batch.max(1);
+        let mut out = Vec::with_capacity(texts.len());
+        for chunk in texts.chunks(cap) {
+            let chunk_owned: Vec<String> = chunk.to_vec();
+            let mut embs = self.embedder.embed_batch(&chunk_owned).await?;
+            if embs.len() != chunk_owned.len() {
+                return Err(OhraError::Embedding(format!(
+                    "embed_batch returned {} vectors for {} inputs",
+                    embs.len(),
+                    chunk_owned.len()
+                )));
+            }
+            out.append(&mut embs);
+        }
+        Ok(out)
+    }
+}
 
 /// An `AttributedHunk` extended with its embedding vector, produced by
 /// the embed stage.
