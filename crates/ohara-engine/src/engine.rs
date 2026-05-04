@@ -2,16 +2,22 @@
 //! and per-repo handles.
 
 use crate::cache::EmbeddingCache;
+use crate::cache::MetaCache;
 use crate::error::EngineError;
 use crate::handle::RepoHandle;
 use ohara_core::embed::RerankProvider;
 use ohara_core::explain::ExplainQuery;
+use ohara_core::index_metadata::{
+    CompatibilityStatus, RuntimeIndexMetadata, SCHEMA_VERSION, SEMANTIC_TEXT_VERSION,
+};
 use ohara_core::query::{PatternQuery, ResponseMeta};
 use ohara_core::types::RepoId;
 use ohara_core::EmbeddingProvider;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 /// Result returned by [`RetrievalEngine::find_pattern`].
@@ -43,6 +49,8 @@ pub struct RetrievalEngine {
     reranker: Arc<dyn RerankProvider>,
     repos: RwLock<HashMap<RepoId, Arc<RepoHandle>>>,
     embed_cache: EmbeddingCache,
+    meta_cache: MetaCache,
+    meta_hit_count: AtomicU64,
 }
 
 impl RetrievalEngine {
@@ -53,7 +61,19 @@ impl RetrievalEngine {
             reranker,
             repos: RwLock::new(HashMap::new()),
             embed_cache: EmbeddingCache::new(model_id, 256),
+            meta_cache: MetaCache::new(Duration::from_secs(5)),
+            meta_hit_count: AtomicU64::new(0),
         }
+    }
+
+    /// Returns the number of times `find_pattern` served `ResponseMeta`
+    /// from the in-memory [`MetaCache`] (i.e. skipped storage).
+    ///
+    /// Exposed only under `#[cfg(test)]` so unit tests can assert caching
+    /// behaviour without touching internal fields.
+    #[cfg(test)]
+    pub fn meta_hits(&self) -> u64 {
+        self.meta_hit_count.load(Ordering::Relaxed)
     }
 
     /// Embed `text`, returning a cached `Arc<Vec<f32>>` on repeat calls.
@@ -147,8 +167,9 @@ impl RetrievalEngine {
     /// retriever's three-lane pipeline (vector KNN + BM25 text + BM25
     /// symbol → RRF → optional cross-encoder rerank → recency multiplier).
     ///
-    /// Returns [`FindPatternResult`] with the ranked hits and empty meta.
-    /// Meta is wired in Task B.4 (MetaCache).
+    /// `ResponseMeta` is served from [`MetaCache`] when a fresh entry
+    /// exists (TTL = 5 s). On a miss the meta is computed via
+    /// [`compose_response_meta`] and stored in the cache before returning.
     pub async fn find_pattern(
         &self,
         repo_path: impl AsRef<Path>,
@@ -161,11 +182,20 @@ impl RetrievalEngine {
             .find_pattern_with_profile(&handle.repo_id, &query, now_unix)
             .await
             .map_err(EngineError::from)?;
-        Ok(FindPatternResult {
-            hits,
-            // Meta wired in Task B.4 (MetaCache)
-            meta: ResponseMeta::default(),
-        })
+
+        let meta = match self.meta_cache.get(&handle.repo_id) {
+            Some(cached) => {
+                self.meta_hit_count.fetch_add(1, Ordering::Relaxed);
+                cached
+            }
+            None => {
+                let fresh = compose_response_meta(&handle).await?;
+                self.meta_cache.put(handle.repo_id.clone(), fresh.clone());
+                fresh
+            }
+        };
+
+        Ok(FindPatternResult { hits, meta })
     }
 
     /// Blame-based explain for a file + line range in a repo's git history.
@@ -194,6 +224,89 @@ impl RetrievalEngine {
         .map_err(EngineError::from)?;
         Ok(ExplainResult { hits, meta })
     }
+}
+
+/// Build the [`RuntimeIndexMetadata`] expected by the current binary.
+///
+/// Uses the constants from `ohara-embed` (model id, dimension, reranker id)
+/// and `ohara-parse` (chunker version, parser versions). Mirrored in
+/// `ohara_mcp::server::current_runtime_metadata` — the duplicate is intentional
+/// until Phase G.1 rewires MCP to use this engine version.
+fn current_runtime_metadata() -> RuntimeIndexMetadata {
+    RuntimeIndexMetadata {
+        schema_version: SCHEMA_VERSION.to_string(),
+        embedding_model: ohara_embed::DEFAULT_MODEL_ID.to_string(),
+        embedding_dimension: ohara_embed::DEFAULT_DIM as u32,
+        reranker_model: ohara_embed::DEFAULT_RERANKER_ID.to_string(),
+        chunker_version: ohara_parse::CHUNKER_VERSION.to_string(),
+        semantic_text_version: SEMANTIC_TEXT_VERSION.to_string(),
+        parser_versions: ohara_parse::parser_versions(),
+    }
+}
+
+/// Compose a hint string from freshness state and the compatibility verdict.
+///
+/// Mirrored from `ohara_mcp::server::compose_hint` — the duplicate is intentional
+/// until Phase G.1 rewires MCP to use this engine version.
+fn compose_hint(
+    st: &ohara_core::query::IndexStatus,
+    compatibility: &CompatibilityStatus,
+) -> Option<String> {
+    let freshness_hint = if st.last_indexed_commit.is_none() {
+        Some("Index not built. Run `ohara index` in this repo.".to_string())
+    } else if st.commits_behind_head > 50 {
+        Some(format!(
+            "Index is {} commits behind HEAD. Run `ohara index`.",
+            st.commits_behind_head
+        ))
+    } else {
+        None
+    };
+    let compat_hint = match compatibility {
+        CompatibilityStatus::Compatible => None,
+        CompatibilityStatus::QueryCompatibleNeedsRefresh { reason } => Some(format!(
+            "Index is query-compatible but stale ({reason}). Run `ohara index --force` to refresh."
+        )),
+        CompatibilityStatus::NeedsRebuild { reason } => Some(format!(
+            "Index needs rebuild ({reason}). Run `ohara index --rebuild` — find_pattern will refuse to run until then."
+        )),
+        CompatibilityStatus::Unknown { missing_components } => Some(format!(
+            "Index has no recorded metadata for {}. Run `ohara index --force` to record current versions.",
+            missing_components.join(", ")
+        )),
+    };
+    match (freshness_hint, compat_hint) {
+        (None, None) => None,
+        (Some(f), None) => Some(f),
+        (None, Some(c)) => Some(c),
+        (Some(f), Some(c)) => Some(format!("{f} {c}")),
+    }
+}
+
+/// Compute a fresh [`ResponseMeta`] for `handle` by querying storage for
+/// index status and metadata, then assessing compatibility.
+///
+/// Called on a MetaCache miss inside [`RetrievalEngine::find_pattern`].
+async fn compose_response_meta(handle: &RepoHandle) -> crate::Result<ResponseMeta> {
+    let behind = ohara_git::GitCommitsBehind::open(&handle.repo_path)
+        .map_err(|e| EngineError::Git(format!("commits_behind open: {e}")))?;
+    let st =
+        ohara_core::query::compute_index_status(handle.storage.as_ref(), &handle.repo_id, &behind)
+            .await
+            .map_err(EngineError::from)?;
+    let runtime = current_runtime_metadata();
+    let stored = handle
+        .storage
+        .get_index_metadata(&handle.repo_id)
+        .await
+        .map_err(EngineError::from)?;
+    let compatibility = CompatibilityStatus::assess(&runtime, &stored);
+    let hint = compose_hint(&st, &compatibility);
+    Ok(ResponseMeta {
+        index_status: st,
+        hint,
+        compatibility: Some(compatibility),
+    })
 }
 
 #[cfg(test)]

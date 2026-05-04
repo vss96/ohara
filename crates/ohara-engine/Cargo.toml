@@ -10,6 +10,7 @@ ohara-core = { path = "../ohara-core" }
 ohara-storage = { path = "../ohara-storage" }
 ohara-embed = { path = "../ohara-embed" }
 ohara-git = { path = "../ohara-git" }
+ohara-parse = { path = "../ohara-parse" }
 blake3.workspace = true
 chrono.workspace = true
 lru.workspace = true
@@ -22,7 +23,6 @@ tracing.workspace = true
 tempfile.workspace = true
 git2.workspace = true
 async-trait.workspace = true
-ohara-parse = { path = "../ohara-parse" }
 
 [features]
 default = []
