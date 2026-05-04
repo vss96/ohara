@@ -151,10 +151,13 @@ async fn dispatch(engine: &RetrievalEngine, req: Request) -> Response {
                 Err(e) => Err(e),
             }
         }
-        // Stubs — fleshed out in Phase F (status) / Phase E (metrics).
-        RequestMethod::IndexStatus | RequestMethod::Metrics => {
-            Ok(serde_json::json!({"todo": "next phase"}))
-        }
+        // Not yet implemented — callers should fall back to in-process logic.
+        RequestMethod::IndexStatus => Err(EngineError::NotImplemented {
+            method: "index_status",
+        }),
+        RequestMethod::Metrics => Err(EngineError::NotImplemented {
+            method: "metrics",
+        }),
     };
     match result {
         Ok(v) => Response {
@@ -185,6 +188,7 @@ fn engine_error_to_payload(e: EngineError) -> ErrorPayload {
     let (code, message) = match &e {
         EngineError::NoIndex { .. } => (ErrorCode::NotIndexed, e.to_string()),
         EngineError::NeedsRebuild { .. } => (ErrorCode::NeedsRebuild, e.to_string()),
+        EngineError::NotImplemented { .. } => (ErrorCode::NotImplemented, e.to_string()),
         _ => (ErrorCode::Internal, e.to_string()),
     };
     ErrorPayload { code, message }
@@ -279,5 +283,75 @@ mod tests {
         join_result
             .expect("task must not panic")
             .expect("serve_unix must return Ok");
+    }
+
+    /// Shared helper: spin up a listener, send `req`, return the response,
+    /// then cancel the listener.
+    async fn round_trip(req: Request) -> Response {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("rt.sock");
+        let engine = Arc::new(make_test_engine());
+        let stop = tokio_util::sync::CancellationToken::new();
+        let task = {
+            let s = sock.clone();
+            let stop2 = stop.clone();
+            tokio::spawn(async move { serve_unix(engine, &s, stop2).await })
+        };
+        for _ in 0..50 {
+            if sock.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let mut conn = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        let body = serde_json::to_vec(&req).unwrap();
+        crate::ipc::write_frame(&mut conn, &body).await.unwrap();
+        let resp_body = crate::ipc::read_frame(&mut conn).await.unwrap();
+        let resp: Response = serde_json::from_slice(&resp_body).unwrap();
+        stop.cancel();
+        let _ = task.await;
+        resp
+    }
+
+    #[tokio::test]
+    async fn index_status_returns_not_implemented_error() {
+        let req = Request {
+            id: 10,
+            repo_path: None,
+            method: RequestMethod::IndexStatus,
+        };
+        let resp = round_trip(req).await;
+        assert!(
+            resp.result.is_none(),
+            "IndexStatus must not return a result: {resp:?}"
+        );
+        let err = resp.error.expect("IndexStatus must return an error");
+        assert_eq!(
+            err.code,
+            ErrorCode::NotImplemented,
+            "code must be not_implemented, got {:?}",
+            err.code
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_returns_not_implemented_error() {
+        let req = Request {
+            id: 11,
+            repo_path: None,
+            method: RequestMethod::Metrics,
+        };
+        let resp = round_trip(req).await;
+        assert!(
+            resp.result.is_none(),
+            "Metrics must not return a result: {resp:?}"
+        );
+        let err = resp.error.expect("Metrics must return an error");
+        assert_eq!(
+            err.code,
+            ErrorCode::NotImplemented,
+            "code must be not_implemented, got {:?}",
+            err.code
+        );
     }
 }

@@ -6,6 +6,10 @@ pub enum EngineError {
     NoIndex { path: String },
     #[error("index needs rebuild: {reason}")]
     NeedsRebuild { reason: String },
+    /// The requested IPC method is not yet implemented in this daemon version.
+    /// Callers should fall back to in-process logic; this is not an internal error.
+    #[error("not implemented: {method}")]
+    NotImplemented { method: &'static str },
     /// Errors from ohara-core. ohara-core's own `Other` variant wraps `anyhow::Error`;
     /// this is an inherited surface and ohara-engine does not itself add `anyhow` to its
     /// dep list. Cleaning up `OhraError::Other` is tracked separately.

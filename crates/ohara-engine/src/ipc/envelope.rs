@@ -36,6 +36,10 @@ pub enum ErrorCode {
     NeedsRebuild,
     Internal,
     InvalidRequest,
+    /// The requested method is recognised but not yet implemented in this
+    /// version of the daemon. Callers should fall back to in-process logic
+    /// rather than treating this as an unrecoverable error.
+    NotImplemented,
 }
 
 /// Error payload embedded in a failed [`Response`].
