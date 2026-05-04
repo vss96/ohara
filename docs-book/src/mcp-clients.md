@@ -36,6 +36,11 @@ what was current at the time of writing.
 
 ### Claude Code / Claude Desktop
 
+The recommended path is the [Claude Code plugin](./claude-code-plugin.md) —
+one command installs the MCP server, registers two skills, and
+auto-downloads the binary. Manual wiring (below) is the fallback for
+custom setups or older Claude Code builds without `/plugin` support.
+
 - **Global:** `~/.claude/claude_desktop_config.json`
 - **Per-repo:** `.mcp.json` or `.claude/mcp.json` in the repo root
 - **CLI shortcut:** `claude mcp add ohara /absolute/path/to/ohara-mcp`
