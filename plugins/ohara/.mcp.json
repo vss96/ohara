@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ohara": {
+      "command": "ohara-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}
