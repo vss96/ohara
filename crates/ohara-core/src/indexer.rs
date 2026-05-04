@@ -88,7 +88,6 @@ pub struct Indexer {
     batch_commits: usize,
     /// Reserved knob for capping per-batch embedder calls; not yet wired into
     /// the loop (the inner per-commit batch is bounded by hunk count today).
-    #[allow(dead_code)]
     embed_batch: usize,
     progress: Arc<dyn ProgressSink>,
     /// Plan 13: optional runtime metadata recorded at the end of a
@@ -128,6 +127,18 @@ impl Indexer {
     /// but use more RAM. Default 512.
     pub fn with_batch_commits(mut self, n: usize) -> Self {
         self.batch_commits = n.max(1);
+        self
+    }
+
+    /// Plan 15 Task B.1: cap the per-commit embedder call size.
+    /// `Indexer::run` slices each commit's text inputs (commit
+    /// message + every hunk's `semantic_text`) into chunks of at
+    /// most `n`, calls `embed_batch` once per chunk, and concatenates
+    /// the results. `n=0` is normalised to `1` (degenerate but
+    /// safe). Default 32; lower values cap peak embedder allocation
+    /// at the cost of more `embed_batch` calls per commit.
+    pub fn with_embed_batch(mut self, n: usize) -> Self {
+        self.embed_batch = n.max(1);
         self
     }
 
@@ -1059,5 +1070,72 @@ mod phase_timing_tests {
             !storage.commit_exists("gamma").await.unwrap(),
             "unseen sha must report absent"
         );
+    }
+
+    /// Plan 15 Task B.1: when `with_embed_batch(N)` is set, the
+    /// indexer must slice each commit's `embed_batch` input into
+    /// chunks of at most N strings. Verifies (a) call count
+    /// matches ceil(total_texts / N), (b) every chunk size is
+    /// <= N. Reuses the module's existing `fake_commit` /
+    /// `fake_hunk` helpers so the test doesn't drift from
+    /// `CommitMeta` / `Hunk` field changes.
+    #[tokio::test]
+    async fn embed_batch_chunks_input_per_knob() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ChunkRecordingEmbedder {
+            calls: std::sync::Arc<Mutex<Vec<usize>>>,
+            #[allow(dead_code)]
+            total: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl crate::EmbeddingProvider for ChunkRecordingEmbedder {
+            fn dimension(&self) -> usize {
+                4
+            }
+            fn model_id(&self) -> &str {
+                "chunk-recorder"
+            }
+            async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+                self.calls.lock().unwrap().push(texts.len());
+                self.total.fetch_add(texts.len(), Ordering::SeqCst);
+                Ok(texts.iter().map(|_| vec![0.0_f32; 4]).collect())
+            }
+        }
+
+        // Five hunks + one commit message = six texts. With
+        // embed_batch=2, expect chunks of [2, 2, 2].
+        let hunks: Vec<Hunk> = (0..5)
+            .map(|i| fake_hunk("deadbeef", &format!("+x{i}\n")))
+            .collect();
+        let cs = FakeCommitSource {
+            commits: vec![fake_commit("deadbeef")],
+            hunks: hunks.clone(),
+            sleep_per_call: std::time::Duration::ZERO,
+        };
+        let ss = FakeSymbolSource {
+            symbols: vec![],
+            sleep: std::time::Duration::ZERO,
+        };
+        let calls = std::sync::Arc::new(Mutex::new(Vec::<usize>::new()));
+        let embedder = std::sync::Arc::new(ChunkRecordingEmbedder {
+            calls: calls.clone(),
+            total: AtomicUsize::new(0),
+        });
+        let storage = std::sync::Arc::new(FakeStorage::new(std::time::Duration::ZERO));
+        let indexer = Indexer::new(storage, embedder).with_embed_batch(2);
+        let id = RepoId::from_parts("deadbeef", "/x");
+        indexer.run(&id, &cs, &ss).await.unwrap();
+
+        let observed = calls.lock().unwrap().clone();
+        assert_eq!(
+            observed,
+            vec![2, 2, 2],
+            "expected three chunks of size 2, got {observed:?}"
+        );
+        for chunk in &observed {
+            assert!(*chunk <= 2, "chunk size {chunk} exceeded knob");
+        }
     }
 }
