@@ -30,7 +30,11 @@ pub fn find_or_spawn_daemon(
     if no_daemon {
         return Ok(None);
     }
-    if std::env::var_os("CI").is_some() && std::env::var_os("OHARA_FORCE_DAEMON").is_none() {
+    let in_ci = std::env::var("CI")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
+        .unwrap_or(false);
+    if in_ci && std::env::var_os("OHARA_FORCE_DAEMON").is_none() {
         return Ok(None);
     }
     let reg = Registry::open(registry_path)
