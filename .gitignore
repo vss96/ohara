@@ -2,6 +2,9 @@
 **/*.rs.bk
 .DS_Store
 
+# Git worktrees for parallel branch work
+/.worktrees/
+
 # Build artifacts under fixtures (the repos themselves are scripted, not committed)
 /fixtures/*/repo
 fixtures/medium/repo/
