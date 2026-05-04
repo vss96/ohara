@@ -10,6 +10,7 @@ mod error;
 mod handle;
 
 pub use cache::EmbeddingCache;
+pub use cache::MetaCache;
 pub use engine::ExplainResult;
 pub use engine::FindPatternResult;
 pub use engine::RetrievalEngine;
