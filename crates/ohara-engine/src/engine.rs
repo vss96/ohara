@@ -1,6 +1,7 @@
 //! `RetrievalEngine` — long-lived holder of the embedder, reranker,
 //! and per-repo handles.
 
+use crate::cache::EmbeddingCache;
 use crate::error::EngineError;
 use crate::handle::RepoHandle;
 use ohara_core::embed::RerankProvider;
@@ -41,15 +42,40 @@ pub struct RetrievalEngine {
     embedder: Arc<dyn EmbeddingProvider>,
     reranker: Arc<dyn RerankProvider>,
     repos: RwLock<HashMap<RepoId, Arc<RepoHandle>>>,
+    embed_cache: EmbeddingCache,
 }
 
 impl RetrievalEngine {
     pub fn new(embedder: Arc<dyn EmbeddingProvider>, reranker: Arc<dyn RerankProvider>) -> Self {
+        let model_id = embedder.model_id().to_string();
         Self {
             embedder,
             reranker,
             repos: RwLock::new(HashMap::new()),
+            embed_cache: EmbeddingCache::new(model_id, 256),
         }
+    }
+
+    /// Embed `text`, returning a cached `Arc<Vec<f32>>` on repeat calls.
+    ///
+    /// On a cache miss the embedder is called once and the result is stored
+    /// before returning.  Subsequent calls with the same text string bypass
+    /// the embedder entirely.
+    pub async fn embed_query(&self, text: &str) -> crate::Result<Arc<Vec<f32>>> {
+        if let Some(hit) = self.embed_cache.get(text) {
+            return Ok(hit);
+        }
+        let mut out = self
+            .embedder
+            .embed_batch(&[text.to_string()])
+            .await
+            .map_err(EngineError::from)?;
+        let v = Arc::new(
+            out.pop()
+                .ok_or_else(|| EngineError::Embed("embed_batch returned no vectors".into()))?,
+        );
+        self.embed_cache.put(text, v.clone());
+        Ok(v)
     }
 
     pub fn embedder(&self) -> Arc<dyn EmbeddingProvider> {
@@ -289,10 +315,7 @@ pub(crate) mod tests {
             fn model_id(&self) -> &str {
                 "counting"
             }
-            async fn embed_batch(
-                &self,
-                texts: &[String],
-            ) -> ohara_core::Result<Vec<Vec<f32>>> {
+            async fn embed_batch(&self, texts: &[String]) -> ohara_core::Result<Vec<Vec<f32>>> {
                 *self.calls.lock().expect("not poisoned") += 1;
                 Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
             }
@@ -300,8 +323,7 @@ pub(crate) mod tests {
         let counting = std::sync::Arc::new(Counting {
             calls: Mutex::new(0),
         });
-        let engine =
-            RetrievalEngine::new(counting.clone(), std::sync::Arc::new(DummyReranker));
+        let engine = RetrievalEngine::new(counting.clone(), std::sync::Arc::new(DummyReranker));
         let _ = engine.embed_query("hello").await.expect("first");
         let _ = engine.embed_query("hello").await.expect("second");
         assert_eq!(
