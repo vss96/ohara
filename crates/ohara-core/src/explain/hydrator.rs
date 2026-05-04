@@ -243,3 +243,246 @@ pub(crate) async fn collect_related_commits(
     }
     Ok((out, None))
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::explain::{BlameRange, ExplainQuery};
+    use crate::index_metadata::StoredIndexMetadata;
+    use crate::query::IndexStatus;
+    use crate::storage::{CommitRecord, HunkHit, HunkRecord, StorageMetricsSnapshot};
+    use crate::types::{ChangeKind, CommitMeta, Hunk, HunkSymbol, RepoId, Symbol};
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+
+    /// Minimal storage fake: knows about two commits, no hunks (diff
+    /// excerpt path skipped by include_diff=false).
+    struct TwoCommitStorage {
+        commits: HashMap<String, CommitMeta>,
+    }
+
+    impl TwoCommitStorage {
+        fn with(pairs: &[(&str, i64, &str)]) -> Self {
+            let mut commits = HashMap::new();
+            for &(sha, ts, msg) in pairs {
+                commits.insert(
+                    sha.to_string(),
+                    CommitMeta {
+                        commit_sha: sha.into(),
+                        parent_sha: None,
+                        is_merge: false,
+                        author: None,
+                        ts,
+                        message: msg.into(),
+                    },
+                );
+            }
+            Self { commits }
+        }
+    }
+
+    #[async_trait]
+    impl crate::storage::Storage for TwoCommitStorage {
+        async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn get_index_status(&self, _: &RepoId) -> crate::Result<IndexStatus> {
+            unreachable!()
+        }
+        async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn commit_exists(&self, _: &str) -> crate::Result<bool> {
+            unreachable!()
+        }
+        async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn clear_head_symbols(&self, _: &RepoId) -> crate::Result<()> {
+            unreachable!()
+        }
+        async fn knn_hunks(
+            &self,
+            _: &RepoId,
+            _: &[f32],
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> crate::Result<Vec<HunkHit>> {
+            unreachable!()
+        }
+        async fn bm25_hunks_by_text(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> crate::Result<Vec<HunkHit>> {
+            unreachable!()
+        }
+        async fn bm25_hunks_by_semantic_text(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> crate::Result<Vec<HunkHit>> {
+            unreachable!()
+        }
+        async fn bm25_hunks_by_symbol_name(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> crate::Result<Vec<HunkHit>> {
+            unreachable!()
+        }
+        async fn bm25_hunks_by_historical_symbol(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> crate::Result<Vec<HunkHit>> {
+            unreachable!()
+        }
+        async fn get_hunk_symbols(
+            &self,
+            _: &RepoId,
+            _: crate::storage::HunkId,
+        ) -> crate::Result<Vec<HunkSymbol>> {
+            unreachable!()
+        }
+        async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
+            Ok(false)
+        }
+        async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn get_commit(
+            &self,
+            _: &RepoId,
+            sha: &str,
+        ) -> crate::Result<Option<CommitMeta>> {
+            Ok(self.commits.get(sha).cloned())
+        }
+        async fn get_hunks_for_file_in_commit(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: &str,
+        ) -> crate::Result<Vec<Hunk>> {
+            Ok(Vec::new()) // include_diff=false, so never called
+        }
+        async fn get_neighboring_file_commits(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: &str,
+            _: u8,
+            _: u8,
+        ) -> crate::Result<Vec<(u32, CommitMeta)>> {
+            Ok(Vec::new())
+        }
+        async fn get_index_metadata(
+            &self,
+            _: &RepoId,
+        ) -> crate::Result<StoredIndexMetadata> {
+            Ok(StoredIndexMetadata::default())
+        }
+        async fn put_index_metadata(
+            &self,
+            _: &RepoId,
+            _: &[(String, String)],
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn hydrate_blame_results_returns_two_hits_and_full_coverage() {
+        // Plan 21 Task C.2: synthetic Vec<BlameRange> covering 2 SHAs
+        // (both indexed) → hits.len() == 2, coverage == 1.0, no limitation.
+        let storage = TwoCommitStorage::with(&[
+            ("sha1", 1_000, "first commit"),
+            ("sha2", 2_000, "second commit"),
+        ]);
+        let ranges = vec![
+            BlameRange {
+                commit_sha: "sha1".into(),
+                lines: vec![1, 2],
+            },
+            BlameRange {
+                commit_sha: "sha2".into(),
+                lines: vec![3, 4],
+            },
+        ];
+        let query = ExplainQuery {
+            file: "src/a.rs".into(),
+            line_start: 1,
+            line_end: 4,
+            k: 5,
+            include_diff: false,
+            include_related: false,
+        };
+        let repo_id = RepoId::from_parts("aaa", "/r");
+        let h = hydrate_blame_results(&storage, ranges, &query, &repo_id)
+            .await
+            .unwrap();
+
+        assert_eq!(h.hits.len(), 2);
+        assert!(
+            (h.coverage - 1.0_f32).abs() < 1e-6,
+            "full coverage when all SHAs are indexed"
+        );
+        assert!(h.limitation.is_none(), "no limitation when nothing is skipped");
+        assert!(h.enrichment_limitation.is_none());
+    }
+
+    #[tokio::test]
+    async fn hydrate_blame_results_partial_coverage_sets_limitation() {
+        // One SHA indexed, one not — coverage 0.5, limitation present.
+        let storage = TwoCommitStorage::with(&[("known", 1_000, "known")]);
+        let ranges = vec![
+            BlameRange {
+                commit_sha: "known".into(),
+                lines: vec![1, 2],
+            },
+            BlameRange {
+                commit_sha: "unknown".into(),
+                lines: vec![3, 4],
+            },
+        ];
+        let query = ExplainQuery {
+            file: "src/a.rs".into(),
+            line_start: 1,
+            line_end: 4,
+            k: 5,
+            include_diff: false,
+            include_related: false,
+        };
+        let repo_id = RepoId::from_parts("aaa", "/r");
+        let h = hydrate_blame_results(&storage, ranges, &query, &repo_id)
+            .await
+            .unwrap();
+
+        assert_eq!(h.hits.len(), 1);
+        assert!(
+            (h.coverage - 0.5_f32).abs() < 1e-6,
+            "half the lines are indexed"
+        );
+        assert!(h.limitation.is_some());
+    }
+}
