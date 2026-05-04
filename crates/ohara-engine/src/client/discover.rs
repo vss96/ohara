@@ -3,6 +3,9 @@ use crate::error::EngineError;
 use crate::registry::{DaemonRecord, Registry};
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use libc;
+
 /// A live or newly-spawned daemon the client can connect to.
 pub struct DaemonHandle {
     pub socket_path: PathBuf,
@@ -43,7 +46,7 @@ pub fn find_or_spawn_daemon(
         }));
     }
     let sd = spawn_daemon(ohara_binary, &runtime_dir(), ohara_version)?;
-    reg.register(DaemonRecord {
+    let record = DaemonRecord {
         pid: sd.pid,
         socket_path: sd.socket_path.clone(),
         ohara_version: ohara_version.into(),
@@ -51,8 +54,23 @@ pub fn find_or_spawn_daemon(
         started_at_unix: now_unix(),
         last_health_unix: now_unix(),
         busy: false,
-    })
-    .map_err(|e| EngineError::Internal(format!("registry register: {e}")))?;
+    };
+    if let Err(register_err) = reg.register(record) {
+        tracing::warn!(
+            pid = sd.pid,
+            error = %register_err,
+            "register failed; killing orphan daemon"
+        );
+        #[cfg(unix)]
+        // SAFETY: SIGTERM is delivered to the child we just spawned.
+        // The pid is fresh from spawn_daemon and has not been reused.
+        unsafe {
+            libc::kill(sd.pid as libc::pid_t, libc::SIGTERM);
+        }
+        return Err(EngineError::Internal(format!(
+            "registry register: {register_err}"
+        )));
+    }
     Ok(Some(DaemonHandle {
         socket_path: sd.socket_path,
         pid: sd.pid,
