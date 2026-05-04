@@ -150,4 +150,16 @@ mod tests {
         let bar = syms.iter().find(|s| s.name == "bar").unwrap();
         assert!(matches!(bar.kind, ohara_core::types::SymbolKind::Method));
     }
+
+    #[test]
+    fn extracts_arrow_function_const() {
+        let src = "const handle = (req, res) => { return res.json({}); };\n\
+                   export const greet = name => `hi ${name}`;\n";
+        let syms = extract("a.js", src, "deadbeef").unwrap();
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"handle"), "handle missing: {names:?}");
+        assert!(names.contains(&"greet"), "greet missing: {names:?}");
+        let handle = syms.iter().find(|s| s.name == "handle").unwrap();
+        assert!(matches!(handle.kind, ohara_core::types::SymbolKind::Function));
+    }
 }
