@@ -107,12 +107,21 @@ impl CommitSource for GitCommitSource {
                 Ok(e) => e,
                 Err(_) => return Ok(None),
             };
+            // Gitlinks (submodule pointers) reference a commit oid that
+            // lives in the submodule's repo, not ours. When the submodule
+            // isn't initialized that oid won't be in the local odb and
+            // to_object below would fail with Odb NotFound, aborting the
+            // whole index pass. Symbol attribution doesn't apply to
+            // submodule references anyway, so short-circuit to Ok(None).
+            if entry.kind() == Some(git2::ObjectType::Commit) {
+                return Ok(None);
+            }
             let object = entry
                 .to_object(&guard)
                 .map_err(|e| ohara_core::OhraError::Git(format!("entry to_object: {e}")))?;
             let blob = match object.into_blob() {
                 Ok(b) => b,
-                Err(_) => return Ok(None), // not a blob (submodule, etc.)
+                Err(_) => return Ok(None), // not a blob (symlink, etc.)
             };
             // Binary content -> None; symbol attribution is text-only.
             match std::str::from_utf8(blob.content()) {
