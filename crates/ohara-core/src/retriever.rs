@@ -130,9 +130,7 @@ impl Retriever {
             recency_half_life_days: profile
                 .recency_half_life_days
                 .unwrap_or(self.weights.recency_half_life_days),
-            rerank_top_k: profile
-                .rerank_top_k
-                .unwrap_or(self.weights.rerank_top_k),
+            rerank_top_k: profile.rerank_top_k.unwrap_or(self.weights.rerank_top_k),
             lane_top_k: profile.lane_top_k.unwrap_or(self.weights.lane_top_k),
         };
 

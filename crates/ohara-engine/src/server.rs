@@ -155,9 +155,7 @@ async fn dispatch(engine: &RetrievalEngine, req: Request) -> Response {
         RequestMethod::IndexStatus => Err(EngineError::NotImplemented {
             method: "index_status",
         }),
-        RequestMethod::Metrics => Err(EngineError::NotImplemented {
-            method: "metrics",
-        }),
+        RequestMethod::Metrics => Err(EngineError::NotImplemented { method: "metrics" }),
     };
     match result {
         Ok(v) => Response {

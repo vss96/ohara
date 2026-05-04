@@ -112,8 +112,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let registry = runtime.path().join("registry.json");
-        let result = spawn_daemon(&script, runtime.path(), "0.7.4", &registry)
-            .expect("spawn within 10s");
+        let result =
+            spawn_daemon(&script, runtime.path(), "0.7.4", &registry).expect("spawn within 10s");
         // Cleanup: kill the spawned child.
         unsafe { libc::kill(result.pid as i32, libc::SIGTERM) };
         assert!(result.pid > 0);
