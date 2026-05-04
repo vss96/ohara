@@ -17,6 +17,7 @@ The workspace is organised as a set of focused crates under `crates/`:
 | `ohara-embed` | Embedding model providers (fastembed) | Library |
 | `ohara-git` | Git interaction (libgit2) | Library |
 | `ohara-parse` | Tree-sitter parsing | Library |
+| `ohara-engine` | RetrievalEngine + per-repo handle cache + daemon IPC + registry; thin extraction of `ohara-mcp::OharaServer` so the daemon (`ohara serve`) and MCP server share the same in-process engine | Library |
 | `ohara-cli` | End-user CLI binary | Binary |
 | `ohara-mcp` | MCP server binary | Binary |
 | `tests/perf` | Performance benchmarks | Test crate |

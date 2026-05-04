@@ -3,7 +3,7 @@
     "explain": {
       "blame_coverage": 0.0,
       "commits_unique": 0,
-      "limitation": "1 commit(s) older than the local index watermark were skipped: [3940e2b661cbff17f461a774afc658e1004b4a72]; range covered: 1..=1",
+      "limitation": "1 commit(s) older than the local index watermark were skipped: [4e0ea0b37eb2c66eda0a5410b616f3ac4e50259b]; range covered: 1..=1",
       "lines_queried": [
         1,
         1
