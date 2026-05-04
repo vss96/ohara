@@ -1,5 +1,46 @@
 //! Unix-socket client transport for the `ohara serve` daemon.
 
+use crate::error::EngineError;
+use crate::ipc::{read_frame, write_frame, Request, Response};
+use std::path::Path;
+use tokio::net::UnixStream;
+
+/// A one-shot Unix-socket client for the `ohara serve` daemon.
+///
+/// Each [`call`][Client::call] opens a fresh connection, sends one request,
+/// reads one response, and closes the stream.
+pub struct Client {
+    socket: std::path::PathBuf,
+}
+
+impl Client {
+    /// Create a client pointed at `socket`.
+    ///
+    /// No I/O is performed here; the connection is established inside [`call`].
+    pub fn connect(socket: impl AsRef<Path>) -> Self {
+        Self {
+            socket: socket.as_ref().to_path_buf(),
+        }
+    }
+
+    /// Send `req` to the daemon and return the parsed [`Response`].
+    ///
+    /// Opens a fresh connection per call, writes one length-prefixed frame,
+    /// reads one length-prefixed frame back, and closes the connection.
+    pub async fn call(&self, req: Request) -> crate::Result<Response> {
+        let mut conn = UnixStream::connect(&self.socket)
+            .await
+            .map_err(|e| EngineError::Internal(format!("connect {:?}: {e}", self.socket)))?;
+        let body =
+            serde_json::to_vec(&req).map_err(|e| EngineError::Internal(format!("encode: {e}")))?;
+        write_frame(&mut conn, &body).await?;
+        let resp_body = read_frame(&mut conn).await?;
+        let resp: Response = serde_json::from_slice(&resp_body)
+            .map_err(|e| EngineError::Internal(format!("decode response: {e}")))?;
+        Ok(resp)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
