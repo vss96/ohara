@@ -47,3 +47,33 @@ pub fn current_git_sha(root: &Path) -> String {
         .expect("git rev-parse");
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
+
+#[cfg(test)]
+mod peak_rss_tests {
+    use super::peak_rss_bytes;
+
+    #[test]
+    fn peak_rss_bytes_returns_nonzero() {
+        let n = peak_rss_bytes().expect("rss readable");
+        assert!(n > 0, "peak rss must be positive, got {n}");
+        // Sanity: any running test process is at least 1 MiB.
+        assert!(n > 1024 * 1024, "rss looked too small: {n}");
+    }
+
+    #[test]
+    fn peak_rss_bytes_grows_after_large_alloc() {
+        let before = peak_rss_bytes().unwrap();
+        // Touch every page so the OS actually maps it (don't let the
+        // optimiser drop the alloc).
+        let mut buf: Vec<u8> = vec![0; 64 * 1024 * 1024];
+        for i in (0..buf.len()).step_by(4096) {
+            buf[i] = (i & 0xff) as u8;
+        }
+        let after = peak_rss_bytes().unwrap();
+        std::hint::black_box(buf);
+        assert!(
+            after >= before,
+            "peak rss must be monotonic across observations: before={before} after={after}"
+        );
+    }
+}
