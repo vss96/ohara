@@ -136,12 +136,18 @@ mod tests {
         // pins that the helper sources every value from a constant
         // (no I/O, no model download).
         let m = current_runtime_metadata();
-        assert_eq!(m.schema_version, SCHEMA_VERSION);
+        assert_eq!(
+            m.schema_version,
+            ohara_core::index_metadata::SCHEMA_VERSION
+        );
         assert_eq!(m.embedding_model, ohara_embed::DEFAULT_MODEL_ID);
         assert_eq!(m.embedding_dimension, ohara_embed::DEFAULT_DIM as u32);
         assert_eq!(m.reranker_model, ohara_embed::DEFAULT_RERANKER_ID);
         assert_eq!(m.chunker_version, ohara_parse::CHUNKER_VERSION);
-        assert_eq!(m.semantic_text_version, SEMANTIC_TEXT_VERSION);
+        assert_eq!(
+            m.semantic_text_version,
+            ohara_core::index_metadata::SEMANTIC_TEXT_VERSION
+        );
         // Every language ohara-parse can index must appear in the map.
         for lang in ["rust", "python", "java", "kotlin"] {
             assert!(
