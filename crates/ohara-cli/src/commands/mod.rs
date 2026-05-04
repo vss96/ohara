@@ -7,6 +7,7 @@ pub mod index;
 pub mod init;
 pub mod provider;
 pub mod query;
+pub mod serve;
 pub mod status;
 pub mod update;
 

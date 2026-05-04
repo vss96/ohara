@@ -2199,12 +2199,14 @@ dependencies = [
  "indicatif",
  "ohara-core",
  "ohara-embed",
+ "ohara-engine",
  "ohara-git",
  "ohara-parse",
  "ohara-storage",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-indicatif",
  "tracing-subscriber",
@@ -2260,6 +2262,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -3753,6 +3756,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

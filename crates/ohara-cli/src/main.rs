@@ -38,6 +38,8 @@ enum Cmd {
     Explain(commands::explain::Args),
     /// Self-update the ohara binary by checking GitHub Releases.
     Update(commands::update::Args),
+    /// Run the retrieval engine as a long-lived Unix-socket daemon.
+    Serve(commands::serve::ServeArgs),
 }
 
 #[tokio::main]
@@ -56,6 +58,7 @@ async fn main() -> Result<()> {
         Cmd::Status(a) => commands::status::run(a).await,
         Cmd::Explain(a) => commands::explain::run(a).await,
         Cmd::Update(a) => commands::update::run(a).await,
+        Cmd::Serve(a) => commands::serve::run(a).await,
     };
     if let Some(acc) = perf_acc {
         acc.print_summary_to_stderr();
