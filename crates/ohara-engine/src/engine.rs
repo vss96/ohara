@@ -333,6 +333,39 @@ pub(crate) mod tests {
         );
     }
 
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn find_pattern_meta_cached_within_ttl() {
+        let ohara_home = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = env_lock();
+        std::env::set_var("OHARA_HOME", ohara_home.path());
+        build_test_repo(tmp.path());
+        let engine = make_test_engine();
+        let q = ohara_core::query::PatternQuery {
+            query: "hello".into(),
+            k: 5,
+            language: None,
+            since_unix: None,
+            no_rerank: false,
+        };
+        let _r1 = engine
+            .find_pattern(tmp.path(), q.clone())
+            .await
+            .expect("first call");
+        let hits_before = engine.meta_hits();
+        let _r2 = engine
+            .find_pattern(tmp.path(), q)
+            .await
+            .expect("second call");
+        let hits_after = engine.meta_hits();
+        assert_eq!(
+            hits_after - hits_before,
+            1,
+            "second call must hit MetaCache"
+        );
+    }
+
     #[tokio::test]
     async fn find_pattern_returns_empty_hits_on_empty_index() {
         let ohara_home = tempfile::tempdir().unwrap();
