@@ -1,3 +1,47 @@
+//! Plan 20 — cross-encoder rerank refiner.
+
+use super::ScoreRefiner;
+use crate::embed::RerankProvider;
+use crate::storage::HunkHit;
+use async_trait::async_trait;
+use std::sync::Arc;
+
+/// Reranks candidates with an injected `RerankProvider` (BGE-reranker-base
+/// in production). The refiner does not own a semaphore — the caller
+/// (coordinator or daemon) holds one around the full pipeline step if
+/// needed, as it does today.
+pub struct CrossEncoderRefiner {
+    reranker: Arc<dyn RerankProvider>,
+}
+
+impl CrossEncoderRefiner {
+    pub fn new(reranker: Arc<dyn RerankProvider>) -> Self {
+        Self { reranker }
+    }
+}
+
+#[async_trait]
+impl ScoreRefiner for CrossEncoderRefiner {
+    async fn refine(
+        &self,
+        query_text: &str,
+        hits: Vec<HunkHit>,
+    ) -> crate::Result<Vec<HunkHit>> {
+        if hits.is_empty() {
+            return Ok(hits);
+        }
+        let candidates: Vec<&str> = hits.iter().map(|h| h.hunk.diff_text.as_str()).collect();
+        let scores = self.reranker.rerank(query_text, &candidates).await?;
+        // Zip hits with scores, sort descending by score, discard scores.
+        let mut scored: Vec<(HunkHit, f32)> = hits.into_iter().zip(scores).collect();
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(scored.into_iter().map(|(h, _)| h).collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
