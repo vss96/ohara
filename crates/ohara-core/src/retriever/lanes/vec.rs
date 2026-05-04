@@ -1,3 +1,80 @@
+//! Plan 20 — vector-KNN retrieval lane.
+
+use super::{LaneId, RetrievalLane};
+use crate::embed::EmbeddingProvider;
+use crate::query::PatternQuery;
+use crate::query_understanding::RetrievalProfile;
+use crate::storage::{HunkHit, Storage};
+use crate::types::RepoId;
+use async_trait::async_trait;
+use std::sync::Arc;
+
+/// Retrieval lane: vector KNN on hunk embeddings.
+///
+/// Embeds the query text once per `search` call using the injected
+/// `EmbeddingProvider`. The embed step is inside the lane so the
+/// coordinator does not need to know which lanes require embeddings.
+pub struct VecLane {
+    storage: Arc<dyn Storage>,
+    embedder: Arc<dyn EmbeddingProvider>,
+}
+
+impl VecLane {
+    pub fn new(storage: Arc<dyn Storage>, embedder: Arc<dyn EmbeddingProvider>) -> Self {
+        Self { storage, embedder }
+    }
+
+    /// Profile-parameterised search, used in unit tests to inject
+    /// an explicit `RetrievalProfile` without going through `parse_query`.
+    pub async fn search_with_profile(
+        &self,
+        query: &PatternQuery,
+        repo_id: &RepoId,
+        k: usize,
+        profile: &RetrievalProfile,
+    ) -> crate::Result<Vec<HunkHit>> {
+        if !profile.is_lane_enabled(LaneId::Vec) {
+            return Ok(vec![]);
+        }
+        let q_text = vec![query.query.clone()];
+        let mut embs = self.embedder.embed_batch(&q_text).await?;
+        let q_emb = embs
+            .pop()
+            .ok_or_else(|| crate::OhraError::Embedding("embed_batch returned empty".into()))?;
+        let since_unix = query
+            .since_unix
+            .or_else(|| crate::query_understanding::parse_query(&query.query).since_unix);
+        self.storage
+            .knn_hunks(
+                repo_id,
+                &q_emb,
+                u8::try_from(k).unwrap_or(u8::MAX),
+                query.language.as_deref(),
+                since_unix,
+            )
+            .await
+    }
+}
+
+#[async_trait]
+impl RetrievalLane for VecLane {
+    fn id(&self) -> LaneId {
+        LaneId::Vec
+    }
+
+    async fn search(
+        &self,
+        query: &PatternQuery,
+        repo_id: &RepoId,
+        k: usize,
+    ) -> crate::Result<Vec<HunkHit>> {
+        let profile = crate::query_understanding::RetrievalProfile::for_intent(
+            crate::query_understanding::parse_query(&query.query).intent,
+        );
+        self.search_with_profile(query, repo_id, k, &profile).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,7 +196,7 @@ mod tests {
         let profile = RetrievalProfile {
             name: "test".into(),
             recency_multiplier: 1.0,
-            vec_lane_enabled: false,      // <-- disabled
+            vec_lane_enabled: false, // <-- disabled
             text_lane_enabled: true,
             symbol_lane_enabled: true,
             rerank_top_k: None,
