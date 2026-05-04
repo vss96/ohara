@@ -1,0 +1,18 @@
+{
+  "name": "ohara-plugin",
+  "version": "0.7.4",
+  "description": "Claude Code plugin for ohara — local-first git-history lineage engine",
+  "private": true,
+  "bin": {
+    "ohara-mcp": "./bin/ohara-mcp"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vss96/ohara",
+    "directory": "plugins/ohara"
+  }
+}

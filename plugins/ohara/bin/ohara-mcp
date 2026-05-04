@@ -1,0 +1,131 @@
+#!/usr/bin/env node
+// ohara-mcp wrapper.
+//
+// Locates or downloads the ohara-mcp release binary for this platform and
+// exec's it with stdio inherited (it is a stdio MCP server). Cached at
+// ~/.cache/ohara-plugin/v<version>/ so subsequent starts are instant.
+//
+// The binary URL pattern assumes ohara publishes per-target tarballs to its
+// GitHub releases (cargo-dist style). If the release artifact naming differs,
+// update OHARA_VERSION / archiveName below.
+
+'use strict';
+
+const { spawn, execFileSync } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+const https = require('node:https');
+const os = require('node:os');
+
+const OHARA_VERSION = process.env.OHARA_PLUGIN_VERSION || '0.7.4';
+const RELEASE_HOST = 'https://github.com/vss96/ohara/releases/download';
+const CACHE_ROOT = path.join(os.homedir(), '.cache', 'ohara-plugin');
+const CACHE_DIR = path.join(CACHE_ROOT, `v${OHARA_VERSION}`);
+
+function targetTriple() {
+  const { platform, arch } = process;
+  if (platform === 'darwin' && arch === 'arm64') return 'aarch64-apple-darwin';
+  if (platform === 'darwin' && arch === 'x64') return 'x86_64-apple-darwin';
+  if (platform === 'linux' && arch === 'x64') return 'x86_64-unknown-linux-gnu';
+  if (platform === 'linux' && arch === 'arm64') return 'aarch64-unknown-linux-gnu';
+  // Windows is intentionally omitted from ohara releases — ort_sys
+  // (transitive via fastembed) fails to link against MSVC's CRT on the
+  // standard runners. WSL users should use the Linux x86_64 binary.
+  throw new Error(
+    `unsupported platform ${platform}-${arch}. Build ohara-mcp from source ` +
+    `(see https://github.com/vss96/ohara) and ensure it is on PATH.`
+  );
+}
+
+function archiveName(triple) {
+  return `ohara-mcp-${triple}.tar.xz`;
+}
+
+function downloadFollowing(url, dest) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, (res) => {
+      const status = res.statusCode || 0;
+      if (status >= 300 && status < 400 && res.headers.location) {
+        res.resume();
+        return downloadFollowing(res.headers.location, dest).then(resolve, reject);
+      }
+      if (status !== 200) {
+        res.resume();
+        return reject(new Error(`HTTP ${status} fetching ${url}`));
+      }
+      const file = fs.createWriteStream(dest);
+      res.pipe(file);
+      file.on('finish', () => file.close((err) => (err ? reject(err) : resolve())));
+      file.on('error', reject);
+    });
+    req.on('error', reject);
+  });
+}
+
+function findBinary(dir, name) {
+  const stack = [dir];
+  while (stack.length) {
+    const current = stack.pop();
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isFile() && entry.name === name) return full;
+      if (entry.isDirectory()) stack.push(full);
+    }
+  }
+  return null;
+}
+
+function extract(archivePath, intoDir) {
+  // execFileSync avoids the shell entirely — args are passed as a vector,
+  // never interpolated into a command string. macOS and Linux ship `tar`
+  // with xz support out of the box.
+  execFileSync('tar', ['-xf', archivePath, '-C', intoDir], { stdio: 'inherit' });
+}
+
+async function ensureBinary() {
+  const binName = 'ohara-mcp';
+  const cachedSentinel = path.join(CACHE_DIR, '.resolved-path');
+  if (fs.existsSync(cachedSentinel)) {
+    const cached = fs.readFileSync(cachedSentinel, 'utf8').trim();
+    if (cached && fs.existsSync(cached)) return cached;
+  }
+
+  fs.mkdirSync(CACHE_DIR, { recursive: true });
+  const triple = targetTriple();
+  const archive = archiveName(triple);
+  const url = `${RELEASE_HOST}/v${OHARA_VERSION}/${archive}`;
+  const archivePath = path.join(CACHE_DIR, archive);
+
+  process.stderr.write(`[ohara-plugin] downloading ${url}\n`);
+  await downloadFollowing(url, archivePath);
+  extract(archivePath, CACHE_DIR);
+  fs.unlinkSync(archivePath);
+
+  const resolved = findBinary(CACHE_DIR, binName);
+  if (!resolved) {
+    throw new Error(
+      `extracted ${archive} but could not find ${binName} inside ${CACHE_DIR}`
+    );
+  }
+  fs.chmodSync(resolved, 0o755);
+  fs.writeFileSync(cachedSentinel, resolved);
+  return resolved;
+}
+
+async function main() {
+  const bin = await ensureBinary();
+  const child = spawn(bin, process.argv.slice(2), { stdio: 'inherit' });
+  child.on('exit', (code, signal) => {
+    if (signal) process.kill(process.pid, signal);
+    process.exit(code == null ? 1 : code);
+  });
+  child.on('error', (err) => {
+    process.stderr.write(`[ohara-plugin] failed to spawn ${bin}: ${err.message}\n`);
+    process.exit(1);
+  });
+}
+
+main().catch((err) => {
+  process.stderr.write(`[ohara-plugin] ${err && err.message ? err.message : err}\n`);
+  process.exit(1);
+});
