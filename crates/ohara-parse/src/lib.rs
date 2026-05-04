@@ -52,10 +52,10 @@ pub const CHUNKER_VERSION: &str = "2";
 /// output semantics change.
 pub fn parser_versions() -> BTreeMap<String, String> {
     [
-        ("rust", "1"),
-        ("python", "1"),
-        ("java", "1"),
-        ("kotlin", "1"),
+        ("rust", "2"),   // bumped: tree-sitter-rust 0.21 -> 0.24 may emit subtly different AST
+        ("python", "2"), // bumped: tree-sitter-python 0.21 -> 0.25
+        ("java", "2"),   // bumped: tree-sitter-java 0.21 -> 0.23
+        ("kotlin", "2"), // bumped: grammar swapped to tree-sitter-kotlin-ng
     ]
     .into_iter()
     .map(|(lang, ver)| (lang.to_string(), ver.to_string()))
