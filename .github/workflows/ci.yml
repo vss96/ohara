@@ -3,11 +3,10 @@
 # Runs the four checks every change must pass per CONTRIBUTING.md §13:
 #   1. cargo fmt --all -- --check       (formatting clean)
 #   2. cargo clippy ... -- -D warnings  (lint clean, all targets, all features)
-#   3. cargo build --workspace          (compiles without features-only paths)
-#   4. cargo test --workspace           (default tests pass; #[ignore]'d perf tests skipped)
+#   3. cargo nextest run --workspace    (tests pass; #[ignore]'d perf tests skipped)
 #
 # Heavy-by-design tests (the perf harnesses in tests/perf/) are #[ignore]'d
-# and excluded from `cargo test --workspace`, so this job stays fast and
+# and excluded from `cargo nextest run --workspace`, so this job stays fast and
 # does not need fastembed model downloads or the medium ripgrep fixture.
 #
 # Security note: this workflow does not consume user-controlled inputs
@@ -50,16 +49,10 @@ jobs:
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           rustup default stable
 
-      - name: Cache cargo registry + target
-        uses: actions/cache@v4
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-ci-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-ci-
+          shared-key: ci
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -67,8 +60,8 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-      - name: cargo build
-        run: cargo build --workspace --all-features
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
 
-      - name: cargo test
-        run: cargo test --workspace --all-features
+      - name: cargo nextest
+        run: cargo nextest run --workspace --all-features
