@@ -1,5 +1,7 @@
 # ohara plan-15 — memory-efficient indexing
 
+> **Status:** complete (shipped in v0.7.3, commit fc06c9d).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task.

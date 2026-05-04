@@ -31,7 +31,7 @@ ohara is a local-first context lineage engine, written in Rust, that exposes thi
 - Reranker model — basic recency + similarity ranking only.
 - File-watch / live working-tree awareness.
 - The shared-index server itself (we design *for* it; we don't build it).
-- Multi-repo indexing in a single instance.
+- ~~Multi-repo indexing in a single instance.~~ *(Shipped in v0.7.5 — see plan-16.)*
 - IDE plugin, slash-command skill (post-v1).
 - LLM-based intent extraction from commit messages.
 
@@ -94,7 +94,7 @@ ohara/
 - **`ohara-mcp` is read-only.** It never indexes, never mutates SQLite. If the index is stale, it surfaces that fact in tool responses but does not try to fix it itself. Indexing in the MCP request path would blow latency budgets unpredictably and create lock contention.
 - **Indexing happens via the CLI, period.** Triggered by user, by git hooks, or by a future cron / shared-index server. One write path; simpler concurrency story.
 - **`<repo-id>` is `hash(first_commit_sha + canonical_path)`.** Stable across renames; unique across multiple clones of the same repo on the same machine.
-- **No daemon process in v1.** The MCP server lives only as long as Claude Code keeps it spawned. Indexing is one-shot CLI invocations.
+- **Originally no daemon (v1).** The MCP server lived only as long as Claude Code kept it spawned. As of v0.7.5 / plan-16, `ohara serve` provides an optional Unix-socket daemon that keeps the embedder and per-repo storage warm; indexing remains one-shot CLI invocations. See plan-16 for the daemon design and shipping commit (21bc1af).
 
 ### Concurrency model
 
