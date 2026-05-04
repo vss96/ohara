@@ -3,8 +3,11 @@
 /// A single JSON file (default `~/.ohara/daemons.json`) stores every live
 /// daemon record. Access is serialised via an `fs2` exclusive file-lock so
 /// multiple CLI processes can safely read/write concurrently.
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -44,7 +47,6 @@ pub struct DaemonRecord {
 
 // ── Internal file envelope ────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct RegistryFile {
     pub(crate) daemons: Vec<DaemonRecord>,
@@ -54,29 +56,107 @@ pub(crate) struct RegistryFile {
 
 /// Handle to the on-disk daemon registry.
 pub struct Registry {
-    #[allow(dead_code)]
     path: PathBuf,
 }
 
 impl Registry {
     /// Open (or create) the registry at `path`.
-    pub fn open(_path: impl AsRef<Path>) -> Result<Self> {
-        todo!("D.1: not yet implemented")
+    ///
+    /// If the file does not exist its parent directories are created and the
+    /// file is initialised with an empty daemon list.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        if !path.exists() {
+            let mut f = File::create(&path)?;
+            f.write_all(b"{\"daemons\":[]}")?;
+        }
+
+        Ok(Self { path })
     }
 
     /// Return a snapshot of all registered daemon records.
     pub fn list(&self) -> Result<Vec<DaemonRecord>> {
-        todo!("D.1: not yet implemented")
+        self.with_locked(|rf| rf.daemons.clone())
     }
 
     /// Add or update `rec` in the registry (keyed by `pid`).
-    pub fn register(&self, _rec: DaemonRecord) -> Result<()> {
-        todo!("D.1: not yet implemented")
+    ///
+    /// If a record with the same PID already exists it is replaced, making
+    /// this call idempotent on re-register.
+    pub fn register(&self, rec: DaemonRecord) -> Result<()> {
+        self.mutate(|rf| {
+            rf.daemons.retain(|r| r.pid != rec.pid);
+            rf.daemons.push(rec);
+        })
     }
 
     /// Remove the record with the given PID from the registry.
-    pub fn unregister(&self, _pid: u32) -> Result<()> {
-        todo!("D.1: not yet implemented")
+    pub fn unregister(&self, pid: u32) -> Result<()> {
+        self.mutate(|rf| {
+            rf.daemons.retain(|r| r.pid != pid);
+        })
+    }
+
+    // ── Internal helpers ──────────────────────────────────────────────────
+
+    /// Open the file, acquire an exclusive lock, deserialise, run `f`,
+    /// return the result, then unlock.
+    fn with_locked<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&RegistryFile) -> T,
+    {
+        let mut file = OpenOptions::new().read(true).write(true).open(&self.path)?;
+        file.lock_exclusive()?;
+
+        let mut contents = String::new();
+        let result = file
+            .read_to_string(&mut contents)
+            .map_err(RegistryError::from)
+            .and_then(|_| serde_json::from_str::<RegistryFile>(&contents).map_err(Into::into))
+            .map(|rf| f(&rf));
+
+        // Always unlock — even on error.
+        // `fs2::FileExt::unlock` is stable since Rust 1.89; suppress the MSRV
+        // lint because we own both sides of this API surface.
+        #[allow(clippy::incompatible_msrv)]
+        let _ = file.unlock();
+
+        result
+    }
+
+    fn mutate<F>(&self, f: F) -> Result<()>
+    where
+        F: FnOnce(&mut RegistryFile),
+    {
+        let mut file = OpenOptions::new().read(true).write(true).open(&self.path)?;
+        file.lock_exclusive()?;
+
+        let result = (|| -> Result<()> {
+            let mut contents = String::new();
+            file.read_to_string(&mut contents)?;
+            let mut rf: RegistryFile = serde_json::from_str(&contents)?;
+
+            f(&mut rf);
+
+            let serialised = serde_json::to_vec(&rf)?;
+            // Truncate before writing so stale bytes from a longer previous
+            // payload are not left at the end of the file.
+            file.set_len(0)?;
+            file.seek(SeekFrom::Start(0))?;
+            file.write_all(&serialised)?;
+            file.flush()?;
+            Ok(())
+        })();
+
+        #[allow(clippy::incompatible_msrv)]
+        let _ = file.unlock();
+
+        result
     }
 }
 
