@@ -1,6 +1,6 @@
 # ohara CLI / MCP performance design
 
-**Status:** Spec — ready to plan. Plan: TBD (`docs/superpowers/plans/`).
+**Status:** Phase 3 shipped in v0.7.5 via plan-16; Phase 2 / Phase 4 remain TBD.
 
 **Goal:** make `ohara query` and `ohara explain` (CLI) and `find_pattern` /
 `explain_change` (MCP) feel "blazingly fast" — sub-second cold path on the
@@ -195,6 +195,8 @@ on a primed model cache. Floor is the embedder mmap; the daemon path
 in Phase 3 takes it to <50ms.
 
 ## Phase 3 — `ohara serve` daemon (Gradle-inspired)
+
+> **Implementation:** plan-16, shipped v0.7.5.
 
 ### Crate layout change
 
