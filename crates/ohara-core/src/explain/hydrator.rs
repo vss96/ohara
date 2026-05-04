@@ -45,6 +45,22 @@ pub struct HydratedBlame {
 ///
 /// Uses `Storage::get_commits_by_sha` (Task B.1) to resolve all SHAs
 /// in a single batched storage call.
+///
+/// # Coupling notice
+///
+/// This function is `pub` — not `pub(crate)` — because it is called from
+/// two distinct sites that cannot share a crate-internal boundary:
+///
+/// 1. **`ohara-core::explain` orchestrator** (cache-miss path) — drives the
+///    full `blame_range` → `hydrate_blame_results` → `ExplainHit` flow.
+/// 2. **`ohara-engine::RetrievalEngine::explain_change`** (cache-hit path) —
+///    retrieves already-computed `BlameRange`s from `BlameCache` and calls
+///    this function directly, skipping the blamer entirely.
+///
+/// This is a deliberate coupling surface, not a general public API.  Any
+/// signature change here requires coordinated updates at **both** call sites.
+/// Consumers outside `ohara-core` and `ohara-engine` MUST NOT depend on this
+/// function — its stability is not guaranteed across releases.
 pub async fn hydrate_blame_results(
     storage: &dyn Storage,
     blame_ranges: Vec<super::BlameRange>,
