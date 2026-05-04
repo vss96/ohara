@@ -14,3 +14,7 @@
   (variable_declarator
     name: (identifier) @arrow_name
     value: (function_expression))) @def_arrow
+
+(interface_declaration name: (type_identifier) @class_name) @def_class
+(type_alias_declaration name: (type_identifier) @class_name) @def_class
+(enum_declaration name: (identifier) @class_name) @def_class
