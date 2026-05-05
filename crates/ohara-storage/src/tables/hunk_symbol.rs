@@ -207,11 +207,7 @@ pub fn get_for_hunks(
     let mut acc: std::collections::HashMap<i64, Vec<HunkSymbol>> =
         hunk_ids.iter().map(|id| (*id, Vec::new())).collect();
 
-    let placeholders = hunk_ids
-        .iter()
-        .map(|_| "?")
-        .collect::<Vec<_>>()
-        .join(", ");
+    let placeholders = hunk_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
     let sql = format!(
         "SELECT hunk_id, symbol_kind, symbol_name, qualified_name, attribution_kind \
          FROM hunk_symbol \

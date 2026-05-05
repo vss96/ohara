@@ -999,15 +999,15 @@ mod tests {
 
         let calls = storage.calls.lock().unwrap().clone();
         assert!(
-            !calls.iter().any(|c| *c == "knn"),
+            !calls.contains(&"knn"),
             "vec lane disabled: knn_hunks must not run; calls = {calls:?}"
         );
         assert!(
-            !calls.iter().any(|c| *c == "fts_sym" || *c == "fts_hist_sym"),
+            !calls.contains(&"fts_sym") && !calls.contains(&"fts_hist_sym"),
             "symbol lane disabled: fts_sym / fts_hist_sym must not run; calls = {calls:?}"
         );
         assert!(
-            calls.iter().any(|c| *c == "fts_text"),
+            calls.contains(&"fts_text"),
             "text lane enabled: fts_text MUST run; calls = {calls:?}"
         );
 
