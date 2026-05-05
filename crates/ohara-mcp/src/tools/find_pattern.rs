@@ -286,8 +286,12 @@ fn parse_since(s: Option<&str>) -> anyhow::Result<Option<i64>> {
         return Ok(Some(chrono::Utc::now().timestamp() - n * 86400));
     }
     let dt = chrono::DateTime::parse_from_rfc3339(s).or_else(|_| {
-        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-            .map(|d| d.and_hms_opt(0, 0, 0).unwrap().and_utc().fixed_offset())
+        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map(|d| {
+            d.and_hms_opt(0, 0, 0)
+                .expect("invariant: 0,0,0 is a valid HMS")
+                .and_utc()
+                .fixed_offset()
+        })
     })?;
     Ok(Some(dt.timestamp()))
 }
