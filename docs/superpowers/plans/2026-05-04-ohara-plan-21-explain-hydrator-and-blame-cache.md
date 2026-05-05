@@ -1,6 +1,6 @@
 # ohara plan-21 — Explain hydrator + ContentHash + BlameCache wiring
 
-> **Status:** draft
+> **Status:** merged in 8127ac0
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or
