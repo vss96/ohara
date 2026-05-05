@@ -102,4 +102,24 @@ mod tests {
         assert_eq!(parsed.k, 3);
         assert!(!parsed.include_diff);
     }
+
+    #[test]
+    fn explain_change_input_requires_file() {
+        let raw = r#"{ "line_start": 1 }"#;
+        assert!(serde_json::from_str::<ExplainChangeInput>(raw).is_err());
+    }
+
+    #[test]
+    fn explain_change_input_rejects_negative_lines() {
+        // line_start / line_end are u32 — negative values fail at the
+        // schema layer, before the handler's clamp logic ever runs.
+        let raw = r#"{ "file": "x.rs", "line_start": -1 }"#;
+        assert!(serde_json::from_str::<ExplainChangeInput>(raw).is_err());
+    }
+
+    #[test]
+    fn explain_change_input_rejects_oversized_k() {
+        let raw = r#"{ "file": "x.rs", "k": 1000 }"#;
+        assert!(serde_json::from_str::<ExplainChangeInput>(raw).is_err());
+    }
 }
