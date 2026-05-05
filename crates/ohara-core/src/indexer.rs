@@ -119,7 +119,7 @@ pub struct Indexer {
     /// Plan 13: optional runtime metadata recorded at the end of a
     /// successful index pass. Left unset by tests that don't care about
     /// compatibility tracking; the CLI / MCP wire it from
-    /// `RuntimeIndexMetadata::current(...)`.
+    /// `index_metadata::runtime_metadata_from(...)`.
     runtime_metadata: Option<RuntimeIndexMetadata>,
     /// Plan 11: per-file atomic-symbol extractor used to derive
     /// ExactSpan hunk-symbol attribution. Defaults to the

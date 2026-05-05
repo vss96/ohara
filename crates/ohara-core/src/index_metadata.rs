@@ -16,7 +16,6 @@
 //! whole history.
 
 use crate::query::IndexStatus;
-use crate::EmbeddingProvider;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -54,33 +53,6 @@ pub struct RuntimeIndexMetadata {
 }
 
 impl RuntimeIndexMetadata {
-    /// Build the current runtime metadata from the live embedder
-    /// handle plus caller-supplied derived-component versions. The
-    /// embedder is the only source of truth for `embedding_model` and
-    /// `embedding_dimension`; the rest comes from constants owned by
-    /// the crate that hosts the relevant code.
-    ///
-    /// Callers in the CLI / MCP wire `chunker_version`,
-    /// `parser_versions` from `ohara_parse::CHUNKER_VERSION` /
-    /// `ohara_parse::parser_versions()`, and `reranker_model` from
-    /// `FastEmbedReranker::model_id()`.
-    pub fn current(
-        embedder: &dyn EmbeddingProvider,
-        reranker_model: impl Into<String>,
-        chunker_version: impl Into<String>,
-        parser_versions: BTreeMap<String, String>,
-    ) -> Self {
-        Self {
-            schema_version: SCHEMA_VERSION.to_string(),
-            embedding_model: embedder.model_id().to_string(),
-            embedding_dimension: u32::try_from(embedder.dimension()).unwrap_or(u32::MAX),
-            reranker_model: reranker_model.into(),
-            chunker_version: chunker_version.into(),
-            semantic_text_version: SEMANTIC_TEXT_VERSION.to_string(),
-            parser_versions,
-        }
-    }
-
     /// Flatten this metadata into the `(component, version)` pair list
     /// expected by `Storage::put_index_metadata`. Field order is
     /// stable across runs (BTreeMap iteration + a fixed prefix).

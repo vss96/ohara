@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use clap::Args as ClapArgs;
 use ohara_core::query::CommitsBehind;
-use ohara_core::{Indexer, IndexerReport, PhaseTimings, Storage};
+use ohara_core::{EmbeddingProvider, Indexer, IndexerReport, PhaseTimings, Storage};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -323,8 +323,9 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
     // chunker / parser versions" alongside its hunks. The snapshot
     // sources truth from the live embedder handle (model + dim) plus
     // the constants owned by ohara-embed / ohara-parse / ohara-core.
-    let runtime_metadata = ohara_core::RuntimeIndexMetadata::current(
-        embedder.as_ref(),
+    let runtime_metadata = ohara_core::index_metadata::runtime_metadata_from(
+        embedder.model_id(),
+        u32::try_from(embedder.dimension()).unwrap_or(u32::MAX),
         ohara_embed::DEFAULT_RERANKER_ID,
         ohara_parse::CHUNKER_VERSION,
         ohara_parse::parser_versions(),
