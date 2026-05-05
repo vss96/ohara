@@ -41,7 +41,7 @@ preserved in `source_text` for Spring-friendly retrieval); v0.5 =
 `ohara update`. The full per-release breakdown lives in the
 [changelog](https://vss96.github.io/ohara/changelog.html).
 
-Languages: **Rust, Python, Java, Kotlin.** Class- and method-level
+Languages: **Rust, TypeScript, JavaScript, Python, Java, Kotlin.** Class- and method-level
 annotations (`@RestController`, `@Service`, `@Component`,
 `@SpringBootApplication`, etc.) stay inside `source_text`, so
 embeddings and BM25 pick up Spring-style markers without any new query
