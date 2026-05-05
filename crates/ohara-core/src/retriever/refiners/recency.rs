@@ -40,10 +40,18 @@ impl ScoreRefiner for RecencyRefiner {
         }
         let mut scored: Vec<(HunkHit, f32)> = hits
             .into_iter()
-            .map(|h| {
+            .map(|mut h| {
                 let age_days = ((self.now_unix - h.commit.ts).max(0) as f32) / 86_400.0;
                 let recency = (-age_days / self.weights.recency_half_life_days).exp();
                 let combined = h.similarity * (1.0 + self.weights.recency_weight * recency);
+                // Plan 22: write the combined score back into
+                // `similarity` so downstream consumers (mod.rs maps it
+                // into `PatternHit::combined_score`) report the actual
+                // post-recency rank base — not the raw rerank input.
+                // The retriever's contract since plan 20 is "the
+                // coordinator already applied recency"; this line
+                // makes that comment true.
+                h.similarity = combined;
                 (h, combined)
             })
             .collect();

@@ -1,4 +1,11 @@
-//! Plan 20 — BM25-by-head-symbol retrieval lane.
+//! Plan 25 — BM25-by-semantic-text retrieval lane.
+//!
+//! This is the 4th BM25 lane: it queries `bm25_hunks_by_semantic_text`
+//! (FTS5 over `hunk.semantic_text`, the contextual preamble + added-
+//! lines blob built at index time by `hunk_text::build`). It runs in
+//! parallel with the existing `bm25_text` (raw `diff_text`),
+//! `bm25_hist_sym`, and `bm25_head_sym` lanes; its hits fuse into the
+//! same RRF call so no separate ranking knob is needed.
 
 use super::{LaneId, RetrievalLane};
 use crate::perf_trace::timed_phase;
@@ -9,11 +16,11 @@ use crate::types::RepoId;
 use async_trait::async_trait;
 use std::sync::Arc;
 
-pub struct Bm25HeadSymLane {
+pub struct Bm25SemTextLane {
     storage: Arc<dyn Storage>,
 }
 
-impl Bm25HeadSymLane {
+impl Bm25SemTextLane {
     pub fn new(storage: Arc<dyn Storage>) -> Self {
         Self { storage }
     }
@@ -25,15 +32,15 @@ impl Bm25HeadSymLane {
         k: usize,
         profile: &RetrievalProfile,
     ) -> crate::Result<Vec<HunkHit>> {
-        if !profile.is_lane_enabled(LaneId::Bm25HeadSym) {
+        if !profile.is_lane_enabled(LaneId::Bm25SemText) {
             return Ok(vec![]);
         }
         let since_unix = query
             .since_unix
             .or_else(|| crate::query_understanding::parse_query(&query.query).since_unix);
         timed_phase(
-            "lane_fts_sym_head",
-            self.storage.bm25_hunks_by_symbol_name(
+            "lane_fts_semantic",
+            self.storage.bm25_hunks_by_semantic_text(
                 repo_id,
                 &query.query,
                 u8::try_from(k).unwrap_or(u8::MAX),
@@ -46,9 +53,9 @@ impl Bm25HeadSymLane {
 }
 
 #[async_trait]
-impl RetrievalLane for Bm25HeadSymLane {
+impl RetrievalLane for Bm25SemTextLane {
     fn id(&self) -> LaneId {
-        LaneId::Bm25HeadSym
+        LaneId::Bm25SemText
     }
 
     async fn search(
@@ -73,11 +80,14 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::Arc;
 
-    struct HeadSymStorage(Vec<HunkHit>);
+    /// Minimal storage that returns scripted hits from
+    /// `bm25_hunks_by_semantic_text` and unreachable from every other
+    /// method.
+    struct SemStorage(Vec<HunkHit>);
 
     #[async_trait]
-    impl crate::Storage for HeadSymStorage {
-        async fn bm25_hunks_by_symbol_name(
+    impl crate::Storage for SemStorage {
+        async fn bm25_hunks_by_semantic_text(
             &self,
             _: &RepoId,
             _: &str,
@@ -147,7 +157,7 @@ mod tests {
         ) -> crate::Result<Vec<HunkHit>> {
             Ok(vec![])
         }
-        async fn bm25_hunks_by_semantic_text(
+        async fn bm25_hunks_by_symbol_name(
             &self,
             _: &RepoId,
             _: &str,
@@ -233,31 +243,32 @@ mod tests {
         HunkHit {
             hunk_id: id,
             hunk: Hunk {
-                commit_sha: "ddd".into(),
-                file_path: "src/main.rs".into(),
+                commit_sha: "ccc".into(),
+                file_path: "src/lib.rs".into(),
                 language: Some("rust".into()),
                 change_kind: ChangeKind::Modified,
-                diff_text: "+fn qux(){}".into(),
+                diff_text: "+fn baz() {}".into(),
             },
             commit: CommitMeta {
-                commit_sha: "ddd".into(),
+                commit_sha: "ccc".into(),
                 parent_sha: None,
                 is_merge: false,
-                author: Some("diana".into()),
+                author: Some("c".into()),
                 ts: 1_700_000_000,
-                message: "add qux".into(),
+                message: "add baz".into(),
             },
-            similarity: 0.5,
+            similarity: 0.6,
         }
     }
 
     #[tokio::test]
-    async fn bm25_head_sym_lane_returns_hits() {
-        let hit = make_hit(30);
-        let storage: Arc<dyn crate::Storage> = Arc::new(HeadSymStorage(vec![hit]));
-        let lane = Bm25HeadSymLane::new(storage);
+    async fn bm25_sem_text_lane_returns_fts_hits() {
+        let hit = make_hit(20);
+        let storage: Arc<dyn crate::Storage> = Arc::new(SemStorage(vec![hit.clone()]));
+        let lane = Bm25SemTextLane::new(storage);
+
         let q = PatternQuery {
-            query: "qux".into(),
+            query: "retry backoff".into(),
             k: 5,
             language: None,
             since_unix: None,
@@ -266,27 +277,22 @@ mod tests {
         let repo_id = RepoId::from_parts("sha", "/repo");
         let hits = lane.search(&q, &repo_id, 10).await.unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].hunk_id, 30);
+        assert_eq!(hits[0].hunk_id, 20);
     }
 
     #[tokio::test]
-    async fn bm25_head_sym_lane_self_skips_when_symbol_disabled() {
+    async fn bm25_sem_text_lane_self_skips_when_disabled() {
         use crate::query_understanding::RetrievalProfile;
-        let hit = make_hit(31);
-        let storage: Arc<dyn crate::Storage> = Arc::new(HeadSymStorage(vec![hit]));
-        let lane = Bm25HeadSymLane::new(storage);
+        let hit = make_hit(21);
+        let storage: Arc<dyn crate::Storage> = Arc::new(SemStorage(vec![hit]));
+        let lane = Bm25SemTextLane::new(storage);
+
         let profile = RetrievalProfile {
-            name: "test".into(),
-            recency_multiplier: 1.0,
-            vec_lane_enabled: true,
-            text_lane_enabled: true,
-            symbol_lane_enabled: false,
-            rerank_top_k: None,
-            explanation: "test".into(),
+            semantic_text_lane_enabled: false,
             ..RetrievalProfile::default_unknown()
         };
         let q = PatternQuery {
-            query: "qux".into(),
+            query: "retry".into(),
             k: 5,
             language: None,
             since_unix: None,

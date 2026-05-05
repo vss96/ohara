@@ -6,6 +6,28 @@ use crate::storage::HunkHit;
 use async_trait::async_trait;
 use std::sync::Arc;
 
+/// Numerically-stable logistic sigmoid, mapping `(-∞, +∞) → (0, 1)`.
+///
+/// Plan 22: `bge-reranker-base` returns raw signed logits (negative for
+/// low-relevance pairs). Downstream refiners — notably
+/// [`crate::retriever::refiners::recency::RecencyRefiner`] —
+/// multiply by a positive recency factor, and
+/// `negative * (1 + small) > negative * (1 + large)` flips the
+/// expected "more recent ⇒ higher combined score" ordering. Sigmoid-
+/// bounding the rerank score into `(0, 1)` before it lands in
+/// `HunkHit::similarity` removes the sign ambiguity for every
+/// downstream multiplicative composition. The branch on
+/// `is_sign_positive()` avoids `exp` overflow for large-magnitude
+/// inputs in either direction.
+fn sigmoid(x: f32) -> f32 {
+    if x.is_sign_positive() {
+        1.0 / (1.0 + (-x).exp())
+    } else {
+        let e = x.exp();
+        e / (1.0 + e)
+    }
+}
+
 /// Reranks candidates with an injected `RerankProvider` (BGE-reranker-base
 /// in production). The refiner does not own a semaphore — the caller
 /// (coordinator or daemon) holds one around the full pipeline step if
@@ -28,14 +50,21 @@ impl ScoreRefiner for CrossEncoderRefiner {
         }
         let candidates: Vec<&str> = hits.iter().map(|h| h.hunk.diff_text.as_str()).collect();
         let scores = self.reranker.rerank(query_text, &candidates).await?;
-        // Zip hits with scores, write reranker score into similarity so
-        // downstream refiners (e.g. RecencyRefiner) use it as the base.
+        // Plan 22: sigmoid-normalise the raw cross-encoder logit before
+        // writing it into `similarity`. Downstream `RecencyRefiner`
+        // does `similarity * (1 + α * recency)`; without the sigmoid,
+        // two equally-bad candidates with negative logits would order
+        // older-above-newer because `negative * (1 + small)` is less
+        // negative than `negative * (1 + large)`. Sorting still uses
+        // the normalised score so ordering is monotonic with the raw
+        // logit (sigmoid is strictly increasing).
         let mut scored: Vec<(HunkHit, f32)> = hits
             .into_iter()
             .zip(scores)
             .map(|(mut h, s)| {
-                h.similarity = s;
-                (h, s)
+                let s_norm = sigmoid(s);
+                h.similarity = s_norm;
+                (h, s_norm)
             })
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));

@@ -102,7 +102,7 @@ impl Retriever {
         use crate::retriever::coordinator;
         use crate::retriever::lanes::{
             bm25_head_sym::Bm25HeadSymLane, bm25_hist_sym::Bm25HistSymLane,
-            bm25_text::Bm25TextLane, vec::VecLane, RetrievalLane,
+            bm25_sem_text::Bm25SemTextLane, bm25_text::Bm25TextLane, vec::VecLane, RetrievalLane,
         };
         use crate::retriever::refiners::{
             cross_encoder::CrossEncoderRefiner, recency::RecencyRefiner, ScoreRefiner,
@@ -127,9 +127,13 @@ impl Retriever {
         let rerank_top_k = effective_weights.rerank_top_k;
 
         // Build lanes (profile-gating is inside each lane via is_lane_enabled).
+        // Plan 25: 5 lanes now — vec / bm25_text (raw diff_text) /
+        // bm25_sem_text (contextual hunk.semantic_text) / bm25_hist_sym
+        // / bm25_head_sym. All five fuse into the same RRF call.
         let lanes: Vec<Box<dyn RetrievalLane>> = vec![
             Box::new(VecLane::new(self.storage.clone(), self.embedder.clone())),
             Box::new(Bm25TextLane::new(self.storage.clone())),
+            Box::new(Bm25SemTextLane::new(self.storage.clone())),
             Box::new(Bm25HistSymLane::new(self.storage.clone())),
             Box::new(Bm25HeadSymLane::new(self.storage.clone())),
         ];
@@ -159,15 +163,25 @@ impl Retriever {
         }
 
         // Hydrate per-hunk symbol attribution rows.
+        //
+        // Plan 24: one batch call replacing the N sequential per-hit
+        // round-trips. Storage seeds every requested hunk_id in the
+        // returned map (with an empty Vec when no attribution rows
+        // exist), so the post-filter `is_empty` check below preserves
+        // the legacy "absent ⇒ no related_head_symbols" behaviour.
+        let hunk_ids: Vec<HunkId> = raw_hits.iter().map(|h| h.hunk_id).collect();
         let symbols_by_hunk: HashMap<HunkId, Vec<String>> = timed_phase("hydrate_symbols", async {
-            let mut acc: HashMap<HunkId, Vec<String>> = HashMap::new();
-            for h in &raw_hits {
-                let attrs = self.storage.get_hunk_symbols(repo_id, h.hunk_id).await?;
-                if !attrs.is_empty() {
-                    acc.insert(h.hunk_id, attrs.into_iter().map(|a| a.name).collect());
-                }
-            }
-            Ok::<_, crate::OhraError>(acc)
+            let attrs_map = self
+                .storage
+                .get_hunk_symbols_batch(repo_id, &hunk_ids)
+                .await?;
+            Ok::<_, crate::OhraError>(
+                attrs_map
+                    .into_iter()
+                    .filter(|(_, v)| !v.is_empty())
+                    .map(|(id, v)| (id, v.into_iter().map(|a| a.name).collect()))
+                    .collect(),
+            )
         })
         .await?;
 

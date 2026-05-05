@@ -1,0 +1,6 @@
+{"pool_size":20,"cases":8,"recall_at_1":0.875,"recall_at_5":1.0,"mrr":0.9375,"p50_ms":902.67896,"p95_ms":1205.9967}
+{"pool_size":50,"cases":8,"recall_at_1":0.875,"recall_at_5":1.0,"mrr":0.9375,"p50_ms":930.4999,"p95_ms":1238.7817}
+{"pool_size":100,"cases":8,"recall_at_1":0.875,"recall_at_5":1.0,"mrr":0.9375,"p50_ms":1037.5471,"p95_ms":1322.3518}
+{"pool_size":150,"cases":8,"recall_at_1":0.875,"recall_at_5":1.0,"mrr":0.9375,"p50_ms":1011.8283,"p95_ms":1263.6075}
+{"pool_size":200,"cases":8,"recall_at_1":0.875,"recall_at_5":1.0,"mrr":0.9375,"p50_ms":961.2213,"p95_ms":1294.1798}
+{"policy":"smallest pool with recall_at_5 within 1% of best AND p95_ms within 1.5x of smallest","recommended_pool_size":20}
