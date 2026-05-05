@@ -16,11 +16,33 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Numerically-stable logistic sigmoid, mapping `(-∞, +∞) → (0, 1)`.
+///
+/// Used to bound the cross-encoder's raw logit so the multiplicative
+/// recency factor in `find_pattern_with_profile` always boosts in the
+/// expected direction (more recent ⇒ higher combined score). The
+/// branch on `x.is_sign_positive()` avoids `exp` overflow for large-
+/// magnitude inputs in either direction.
+fn sigmoid(x: f32) -> f32 {
+    if x.is_sign_positive() {
+        1.0 / (1.0 + (-x).exp())
+    } else {
+        let e = x.exp();
+        e / (1.0 + e)
+    }
+}
+
 /// Tunable knobs for the retrieval pipeline.
 #[derive(Debug, Clone)]
 pub struct RankingWeights {
     /// Multiplier on the recency factor in the final score:
-    /// `final = rerank * (1.0 + recency_weight * exp(-age_days / half_life_days))`.
+    /// `final = sigmoid(rerank) * (1.0 + recency_weight * exp(-age_days / half_life_days))`.
+    ///
+    /// `sigmoid(rerank)` bounds the cross-encoder's signed logit into
+    /// `(0, 1)` so the multiplicative recency factor always boosts in
+    /// the expected direction (more recent ⇒ higher combined score).
+    /// See plan-22 for the bug this fixed.
+    ///
     /// Default 0.05 — small enough to act as a tie-breaker without
     /// overpowering rerank quality.
     pub recency_weight: f32,
@@ -311,7 +333,18 @@ impl Retriever {
             .map(|(h, s)| {
                 let age_days = ((now_unix - h.commit.ts).max(0) as f32) / 86400.0;
                 let recency = (-age_days / effective_weights.recency_half_life_days).exp();
-                let combined = s * (1.0 + effective_recency_weight * recency);
+                // plan-22: sigmoid the rerank logit so the multiplicative
+                // recency factor preserves "newer ⇒ higher combined
+                // score" for every score sign. `bge-reranker-base` emits
+                // raw, signed logits; without the sigmoid, two equally-
+                // bad candidates would order older-above-newer because
+                // `negative * (1 + small)` is less negative than
+                // `negative * (1 + larger)`. Degraded-mode 1.0 (fed in
+                // by `no_rerank` paths) sigmoids to ~0.731 — every
+                // candidate scales by the same factor so the existing
+                // recency-only ordering test still passes.
+                let s_norm = sigmoid(s);
+                let combined = s_norm * (1.0 + effective_recency_weight * recency);
                 // Bogus ts (out-of-range i64) falls back to "" — PatternHit.commit_date
                 // is informational, not a contract, so an empty string is acceptable.
                 let date = DateTime::<Utc>::from_timestamp(h.commit.ts, 0)
