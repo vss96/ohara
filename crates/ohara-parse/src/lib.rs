@@ -1,4 +1,18 @@
-//! tree-sitter symbol extraction for supported languages.
+//! tree-sitter chunker and symbol extraction for the languages ohara
+//! indexes: Rust, TypeScript, JavaScript, Python, Java, Kotlin.
+//!
+//! Two responsibilities:
+//! - [`chunker`]: AST sibling-merge into <=`CHUNK_MAX_TOKENS` chunks for
+//!   embedding. Annotated definitions (e.g. Java methods with their
+//!   annotations, Rust fns with their attribute macros) stay whole so a
+//!   query for the annotation surfaces the right hunk.
+//! - [`languages`]: per-language tree-sitter grammars and the symbol
+//!   walkers that extract `Symbol`s for the FTS5 symbol-name lane.
+//!
+//! [`TreeSitterAtomicExtractor`] is the entry point ohara-core's
+//! indexer wires through `Indexer::with_atomic_symbol_extractor`.
+//! Parse failures swallow to an empty `Vec<Symbol>` — one unparseable
+//! file must not abort the whole index pass.
 
 pub mod chunker;
 pub mod languages;
