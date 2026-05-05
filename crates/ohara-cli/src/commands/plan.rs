@@ -6,11 +6,13 @@
 //! so it's checked into the repo and shared across the team like
 //! `.gitignore`.
 
-#![allow(unused_imports)]
-
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
+use ohara_git::GitWalker;
+use std::io::Write;
 use std::path::PathBuf;
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -29,8 +31,107 @@ pub struct Args {
     pub replace: bool,
 }
 
-pub async fn run(_args: Args) -> Result<()> {
-    Err(anyhow::anyhow!("plan-26: `ohara plan` not yet implemented"))
+pub async fn run(args: Args) -> Result<()> {
+    let canonical = std::fs::canonicalize(&args.path)
+        .with_context(|| format!("canonicalize {}", args.path.display()))?;
+
+    println!("walking commit history (paths only)…");
+    let walker = GitWalker::open(&canonical).context("open git repo")?;
+
+    let start = std::time::Instant::now();
+    let mut agg = HotmapAggregator::default();
+    walker.for_each_commit_paths(|_meta, paths| {
+        agg.record(paths);
+        Ok(())
+    })?;
+    let elapsed = start.elapsed();
+    println!(
+        "walked {} commits in {:.1}s",
+        agg.total_commits(),
+        elapsed.as_secs_f64()
+    );
+
+    print_hotmap(&agg);
+    let suggestions = suggest_patterns(&agg);
+    print_suggestions(&suggestions, agg.total_commits());
+    print_gpu_hint();
+
+    if args.no_write {
+        return Ok(());
+    }
+
+    let target = canonical.join(".oharaignore");
+    let new_section = render_oharaignore_body(&suggestions, VERSION);
+
+    let final_text = if args.replace || !target.exists() {
+        new_section
+    } else {
+        let existing = std::fs::read_to_string(&target)
+            .with_context(|| format!("read {}", target.display()))?;
+        merge_oharaignore(&existing, &new_section)?
+    };
+
+    if !args.yes {
+        print!("write {}? [y/N] ", target.display());
+        std::io::stdout().flush().ok();
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .context("stdin read")?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("aborted; no file written");
+            return Ok(());
+        }
+    }
+
+    std::fs::write(&target, final_text).with_context(|| format!("write {}", target.display()))?;
+    println!("wrote {}", target.display());
+    Ok(())
+}
+
+/// Print the top-N directories by commit share.
+fn print_hotmap(agg: &HotmapAggregator) {
+    let total = agg.total_commits().max(1);
+    let mut top: Vec<(&String, &u64)> = agg
+        .counts()
+        .iter()
+        .filter(|(k, _)| {
+            let slash_count = k.matches('/').count();
+            slash_count == 1 && k.ends_with('/')
+        })
+        .collect();
+    top.sort_by(|a, b| b.1.cmp(a.1));
+    println!("\ntop-level directories by commit share:");
+    for (k, count) in top.iter().take(20) {
+        let share = (**count as f64 / total as f64) * 100.0;
+        println!("  {:<40} {:>7} ({:>4.1}%)", k, count, share);
+    }
+}
+
+fn print_suggestions(suggestions: &[String], total: u64) {
+    println!("\nproposed auto-generated section:");
+    if suggestions.is_empty() {
+        println!("  (no high-share top-level directories — nothing suggested)");
+    }
+    for s in suggestions {
+        println!("  {s}");
+    }
+    println!("\ntotal commits surveyed: {total}");
+}
+
+fn print_gpu_hint() {
+    let coreml = cfg!(feature = "coreml");
+    let cuda = cfg!(feature = "cuda");
+    if coreml || cuda {
+        println!(
+            "\nnote: ohara is built with --features {} ; embedding will use the accelerator.",
+            if coreml { "coreml" } else { "cuda" }
+        );
+    } else {
+        println!(
+            "\nnote: rebuild with --features coreml (Apple) or --features cuda (NVIDIA) for ~3-5x embed speedup."
+        );
+    }
 }
 
 use std::collections::BTreeMap;
