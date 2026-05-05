@@ -739,6 +739,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn find_pattern_negative_rerank_still_ranks_recent_above_old() {
+        // Regression for plan-22: when the cross-encoder returns negative
+        // logits for low-relevance candidates (which `bge-reranker-base`
+        // routinely does), the multiplicative recency formula must still
+        // place the more recent hit above the older one. Pre-fix the
+        // ordering inverts because `negative * (1 + small_positive)` is
+        // *more* negative than `negative * (1 + larger_positive)`.
+        let now = 1_700_000_000_i64;
+        let day = 86_400_i64;
+
+        // Both candidates land in disjoint single-element lanes (RRF rank
+        // 1 in their lane, absent from the others) so RRF gives them
+        // equal fused scores and ordering is dictated entirely by
+        // `combined = f(rerank, recency)`.
+        let knn = vec![fake_hit(1, "old", now - 365 * day, 0.5, "diff-bad-old")];
+        let fts_text = vec![fake_hit(2, "new", now - day, 0.5, "diff-bad-new")];
+        let storage = Arc::new(FakeStorage::new(knn, fts_text, vec![]));
+        let embedder = Arc::new(FakeEmbedder);
+
+        // Reranker assigns the *same* negative logit to both candidates.
+        // Identical bases, so only the recency multiplier differentiates,
+        // and pre-fix it differentiates in the wrong direction.
+        let scores: HashMap<String, f32> = HashMap::from([
+            ("diff-bad-old".to_string(), -2.0),
+            ("diff-bad-new".to_string(), -2.0),
+        ]);
+        let reranker: Arc<dyn RerankProvider> = Arc::new(ScriptedReranker { scores });
+
+        let r = Retriever::new(storage, embedder).with_reranker(reranker);
+        let q = PatternQuery {
+            query: "anything".into(),
+            k: 5,
+            language: None,
+            since_unix: None,
+            no_rerank: false,
+        };
+        let id = RepoId::from_parts("x", "/y");
+        let out = r.find_pattern(&id, &q, now).await.unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out[0].commit_sha,
+            "new",
+            "newer commit MUST outrank older when rerank scores are tied, \
+             even when both are negative; got order {:?}",
+            out.iter().map(|h| h.commit_sha.as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            out[0].combined_score > out[1].combined_score,
+            "combined_score must be monotone with sort order; got new={} old={}",
+            out[0].combined_score,
+            out[1].combined_score
+        );
+    }
+
+    #[tokio::test]
     async fn find_pattern_recency_multiplier_breaks_ties_when_no_rerank() {
         // Both candidates have RRF score equal (they appear in disjoint
         // single-element lanes). With no reranker, every score is 1.0;
