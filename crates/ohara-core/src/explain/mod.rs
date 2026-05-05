@@ -169,7 +169,12 @@ pub async fn explain_change(
 
     let hydrated = timed_phase(
         "hydrate_explain",
-        hydrator::hydrate_blame_results(storage, raw_blame, query, repo_id),
+        hydrator::hydrate_blame_results(hydrator::HydrateInputs {
+            storage,
+            blame_ranges: raw_blame,
+            query,
+            repo_id,
+        }),
     )
     .await?;
 

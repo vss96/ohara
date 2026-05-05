@@ -286,8 +286,12 @@ fn parse_since(s: Option<&str>) -> anyhow::Result<Option<i64>> {
         return Ok(Some(chrono::Utc::now().timestamp() - n * 86400));
     }
     let dt = chrono::DateTime::parse_from_rfc3339(s).or_else(|_| {
-        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-            .map(|d| d.and_hms_opt(0, 0, 0).unwrap().and_utc().fixed_offset())
+        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map(|d| {
+            d.and_hms_opt(0, 0, 0)
+                .expect("invariant: 0,0,0 is a valid HMS")
+                .and_utc()
+                .fixed_offset()
+        })
     })?;
     Ok(Some(dt.timestamp()))
 }
@@ -310,5 +314,65 @@ mod tests {
     fn parse_since_none() {
         assert!(parse_since(None).unwrap().is_none());
         assert!(parse_since(Some("")).unwrap().is_none());
+    }
+
+    // The `since` field reaches the public MCP `find_pattern` handler at
+    // line ~93, where any error is surfaced as `rmcp::Error::invalid_params`
+    // back to the agent. These cases lock in the inputs that MUST be
+    // rejected so we never regress that envelope.
+    #[test]
+    fn parse_since_rejects_garbage() {
+        assert!(parse_since(Some("garbage")).is_err());
+    }
+
+    #[test]
+    fn parse_since_rejects_malformed_days_suffix() {
+        assert!(parse_since(Some("abcd")).is_err());
+        assert!(parse_since(Some("1.5d")).is_err());
+        assert!(parse_since(Some("d")).is_err());
+    }
+
+    #[test]
+    fn parse_since_rejects_invalid_iso_date() {
+        assert!(parse_since(Some("2024-13-01")).is_err());
+        assert!(parse_since(Some("2024-02-30")).is_err());
+        assert!(parse_since(Some("not-a-date-at-all")).is_err());
+    }
+
+    #[test]
+    fn parse_since_accepts_rfc3339() {
+        let out = parse_since(Some("2024-06-15T12:00:00Z")).unwrap().unwrap();
+        assert!(out > 1_700_000_000 && out < 1_800_000_000);
+    }
+
+    #[test]
+    fn find_pattern_input_default_k_is_five() {
+        let raw = r#"{"query":"x"}"#;
+        let parsed: FindPatternInput = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.k, 5);
+        assert!(parsed.language.is_none());
+        assert!(parsed.since.is_none());
+        assert!(!parsed.no_rerank);
+    }
+
+    #[test]
+    fn find_pattern_input_rejects_negative_k() {
+        let raw = r#"{"query":"x","k":-1}"#;
+        assert!(serde_json::from_str::<FindPatternInput>(raw).is_err());
+    }
+
+    #[test]
+    fn find_pattern_input_rejects_oversized_k() {
+        // k is u8, so a value > 255 fails at deserialization. The 1..=20
+        // clamp inside the handler is for in-range-but-extreme values; this
+        // test guards the schema-level rejection that happens before that.
+        let raw = r#"{"query":"x","k":1000}"#;
+        assert!(serde_json::from_str::<FindPatternInput>(raw).is_err());
+    }
+
+    #[test]
+    fn find_pattern_input_requires_query() {
+        let raw = r#"{"k":3}"#;
+        assert!(serde_json::from_str::<FindPatternInput>(raw).is_err());
     }
 }

@@ -1,6 +1,6 @@
 //! Little-endian f32 byte codec for sqlite-vec virtual table values.
 //!
-//! `vec_commit`, `vec_hunk`, and `vec_symbol` columns store FLOAT[N] embeddings
+//! `vec_commit`, `vec_hunk`, and `vec_symbol` columns store `FLOAT[N]` embeddings
 //! as raw bytes. These helpers handle the platform-deterministic LE encoding.
 
 pub fn vec_to_bytes(v: &[f32]) -> Vec<u8> {

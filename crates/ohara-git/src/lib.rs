@@ -1,4 +1,13 @@
-//! git2 wrapper: walk commits, extract per-file diffs.
+//! libgit2 wrapper: walk commits, diff, blame.
+//!
+//! Three public entry points:
+//! - [`GitWalker`]: revwalk + per-commit metadata, used by the indexer
+//!   to enumerate work.
+//! - [`Blamer`]: range-blame for `explain_change` — maps
+//!   `(file, start, end)` to the commits that last touched those lines.
+//! - [`GitCommitSource`]: the async [`ohara_core::indexer::CommitSource`]
+//!   impl that the indexer drives; offloads libgit2 calls to
+//!   `spawn_blocking` so revwalk doesn't stall the runtime.
 
 pub mod blame;
 pub mod diff;
@@ -13,12 +22,23 @@ use ohara_core::query::CommitsBehind;
 use ohara_core::types::{CommitMeta, Hunk};
 use std::sync::{Arc, Mutex};
 
+/// Async [`CommitSource`] backed by a single shared `git2::Repository`.
+///
+/// libgit2 is fundamentally synchronous, so every method offloads its
+/// repo work to `tokio::task::spawn_blocking`. The `Repository` itself
+/// is held behind an `Arc<Mutex<…>>` because revwalk borrows mutably;
+/// methods that need a fresh revwalk open a new [`GitWalker`] instead
+/// of contending on the shared handle.
 pub struct GitCommitSource {
     repo_path: std::path::PathBuf,
     repo: Arc<Mutex<git2::Repository>>,
 }
 
 impl GitCommitSource {
+    /// Discover the repo containing `path` and validate that a
+    /// [`GitWalker`] can also open it. Returns an error if `path` is
+    /// not inside a git working tree, or if libgit2 can't read its
+    /// `.git/`.
     pub fn open<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
         let canonical = path.as_ref().to_path_buf();
         let repo = git2::Repository::discover(&canonical)
@@ -31,6 +51,8 @@ impl GitCommitSource {
         })
     }
 
+    /// Path the repo was opened at — the `git discover`'d working-tree
+    /// root, not the original `path` argument.
     pub fn repo_path(&self) -> &std::path::Path {
         &self.repo_path
     }
