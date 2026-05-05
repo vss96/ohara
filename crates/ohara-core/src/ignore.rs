@@ -219,4 +219,43 @@ mod tests {
         let f = LayeredIgnore::from_strings(BUILT_IN_DEFAULTS, attrs, "");
         assert!(!f.is_ignored("src/foo.rs"));
     }
+
+    #[test]
+    fn user_pattern_ignores_path() {
+        // Plan 26 Task A.5: a pattern in the user `.oharaignore` must
+        // ignore matching paths.
+        let user = "drivers/\n";
+        let f = LayeredIgnore::from_strings(BUILT_IN_DEFAULTS, "", user);
+        assert!(f.is_ignored("drivers/staging/foo.c"));
+    }
+
+    #[test]
+    fn user_negate_overrides_builtin() {
+        // Plan 26 Task A.5: user `!Cargo.lock` must un-ignore a path
+        // that the BUILT_IN_DEFAULTS would ignore. The `!` negation has
+        // to win over the builtin layer.
+        let user = "!Cargo.lock\n";
+        let f = LayeredIgnore::from_strings(BUILT_IN_DEFAULTS, "", user);
+        assert!(!f.is_ignored("Cargo.lock"));
+    }
+
+    #[test]
+    fn user_negate_overrides_gitattributes() {
+        // Plan 26 Task A.5: same precedence story for the gitattributes
+        // layer — user `!` wins.
+        let attrs = "generated.rs linguist-generated=true\n";
+        let user = "!generated.rs\n";
+        let f = LayeredIgnore::from_strings(BUILT_IN_DEFAULTS, attrs, user);
+        assert!(!f.is_ignored("generated.rs"));
+    }
+
+    #[test]
+    fn comments_and_blank_lines_in_user_file_are_skipped() {
+        let user = "# comment\n\n   \nlibs/\n";
+        let f = LayeredIgnore::from_strings(BUILT_IN_DEFAULTS, "", user);
+        assert!(f.is_ignored("libs/foo.rs"));
+        // The blank/comment lines must not have produced any matchers
+        // that affect unrelated paths.
+        assert!(!f.is_ignored("src/main.rs"));
+    }
 }
