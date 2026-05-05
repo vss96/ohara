@@ -310,3 +310,20 @@ async fn coordinator_resume_from_attributed_hunks_directly() {
         "partial-pipeline run must persist the hunk"
     );
 }
+
+#[tokio::test]
+async fn coordinator_with_ignore_filter_field_is_set() {
+    // Plan 26 Task C.1: Coordinator must accept an optional
+    // IgnoreFilter via builder and stash it. We don't yet wire the
+    // filter into the loop — that's Task C.2.
+    use crate::ignore::LayeredIgnore;
+
+    let storage = Arc::new(SpyStorage::default());
+    let embedder = Arc::new(ZeroEmbedder { dim: 4 });
+
+    let filter: Arc<dyn crate::IgnoreFilter> = Arc::new(LayeredIgnore::builtins_only());
+    let coord = Coordinator::new(storage, embedder).with_ignore_filter(filter);
+    // Smoke test: builder type-checks, returns Self. Behaviour is
+    // exercised in C.2/C.3.
+    let _ = coord;
+}

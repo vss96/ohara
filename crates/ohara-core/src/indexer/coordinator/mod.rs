@@ -56,6 +56,8 @@ pub struct Coordinator {
     embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
     embed_batch: usize,
     progress: Arc<dyn ProgressSink>,
+    #[allow(dead_code)]
+    ignore_filter: Option<Arc<dyn crate::IgnoreFilter>>,
 }
 
 impl Coordinator {
@@ -70,6 +72,7 @@ impl Coordinator {
             embedder,
             embed_batch: 32,
             progress: Arc::new(NullProgress),
+            ignore_filter: None,
         }
     }
 
@@ -84,6 +87,16 @@ impl Coordinator {
     /// pipeline. Defaults to [`NullProgress`].
     pub fn with_progress(mut self, progress: Arc<dyn ProgressSink>) -> Self {
         self.progress = progress;
+        self
+    }
+
+    /// Wire a [`crate::ignore::LayeredIgnore`] (or any `IgnoreFilter`
+    /// impl). When set, the per-commit pipeline drops `HunkRecord`s
+    /// whose path matches the filter, and skips a commit entirely when
+    /// 100% of its changed paths matched (advancing the watermark in
+    /// either case). Plumbing-only in C.1; behaviour added in C.2.
+    pub fn with_ignore_filter(mut self, f: Arc<dyn crate::IgnoreFilter>) -> Self {
+        self.ignore_filter = Some(f);
         self
     }
 
