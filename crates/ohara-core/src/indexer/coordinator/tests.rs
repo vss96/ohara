@@ -61,6 +61,8 @@ impl EmbeddingProvider for ZeroEmbedder {
 struct SpyStorage {
     put_commit_calls: Mutex<Vec<String>>,
     put_hunk_totals: Mutex<Vec<usize>>,
+    /// Every `file_path` from every `put_hunks` call, in order.
+    put_hunk_paths: Mutex<Vec<String>>,
     watermark: Mutex<Option<String>>,
     seen_commits: Mutex<Vec<String>>,
 }
@@ -99,6 +101,10 @@ impl Storage for SpyStorage {
     }
     async fn put_hunks(&self, _: &RepoId, rows: &[StorageHunkRecord]) -> Result<()> {
         self.put_hunk_totals.lock().unwrap().push(rows.len());
+        let mut paths = self.put_hunk_paths.lock().unwrap();
+        for row in rows {
+            paths.push(row.hunk.file_path.clone());
+        }
         Ok(())
     }
     async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> Result<()> {
@@ -326,4 +332,64 @@ async fn coordinator_with_ignore_filter_field_is_set() {
     // Smoke test: builder type-checks, returns Self. Behaviour is
     // exercised in C.2/C.3.
     let _ = coord;
+}
+
+#[tokio::test]
+async fn ignored_paths_drop_from_hunk_records_before_persist() {
+    // Plan 26 Task C.2: when the filter ignores `vendor/foo.c`, the
+    // pipeline must NOT persist a hunk for that path. The same
+    // commit's `src/main.rs` hunk must still be persisted.
+    use crate::ignore::LayeredIgnore;
+    use crate::types::ChangeKind;
+
+    let storage = Arc::new(SpyStorage::default());
+    let embedder = Arc::new(ZeroEmbedder { dim: 4 });
+
+    // Two hunks in one commit: one real, one vendor.
+    let source = SingleCommitSource {
+        sha: "abc".into(),
+        hunks: vec![
+            Hunk {
+                commit_sha: "abc".into(),
+                file_path: "src/main.rs".into(),
+                language: None,
+                change_kind: ChangeKind::Added,
+                diff_text: "+fn main() {}\n".into(),
+            },
+            Hunk {
+                commit_sha: "abc".into(),
+                file_path: "vendor/foo.c".into(),
+                language: None,
+                change_kind: ChangeKind::Added,
+                diff_text: "+int main(void) { return 0; }\n".into(),
+            },
+        ],
+    };
+
+    // Filter that ignores `vendor/` paths.
+    let filter: Arc<dyn crate::IgnoreFilter> =
+        Arc::new(LayeredIgnore::from_strings(&[], "", "vendor/\n"));
+    let coord = Coordinator::new(storage.clone(), embedder).with_ignore_filter(filter);
+
+    let repo = RepoId::from_parts("sha", "/repo");
+    coord.run(&repo, &source, &NoopSymbolSource).await.unwrap();
+
+    // Commit must still be persisted (non-ignored hunk survived).
+    assert_eq!(
+        *storage.put_commit_calls.lock().unwrap(),
+        vec!["abc"],
+        "commit must be persisted when at least one hunk survives the filter"
+    );
+
+    // Exactly one hunk must reach storage, and it must be src/main.rs.
+    let paths = storage.put_hunk_paths.lock().unwrap().clone();
+    assert_eq!(
+        paths.len(),
+        1,
+        "only one hunk must survive the ignore filter"
+    );
+    assert_eq!(
+        paths[0], "src/main.rs",
+        "the surviving hunk must be src/main.rs, not vendor/foo.c"
+    );
 }

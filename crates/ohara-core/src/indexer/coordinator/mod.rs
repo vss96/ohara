@@ -56,7 +56,6 @@ pub struct Coordinator {
     embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
     embed_batch: usize,
     progress: Arc<dyn ProgressSink>,
-    #[allow(dead_code)]
     ignore_filter: Option<Arc<dyn crate::IgnoreFilter>>,
 }
 
@@ -230,8 +229,24 @@ impl Coordinator {
     ) -> Result<()> {
         // Stage 2: hunk chunk (timed).
         let extract_start = Instant::now();
-        let records = HunkChunkStage::run(commit_source, commit).await?;
+        let mut records = HunkChunkStage::run(commit_source, commit).await?;
         result.timings.diff_extract_ms += extract_start.elapsed().as_millis() as u64;
+
+        // Plan 26 Task C.2: drop ignored paths before downstream stages.
+        // Mixed commits keep their non-ignored hunks; pure-ignored
+        // commits are caught by the `paths_kept == 0` branch below.
+        let paths_total = records.len();
+        if let Some(filter) = self.ignore_filter.as_ref() {
+            records.retain(|r| !filter.is_ignored(&r.file_path));
+        }
+        let paths_kept = records.len();
+        if paths_total > 0 && paths_kept == 0 {
+            tracing::debug!(
+                sha = %commit.commit_sha,
+                "plan-26: commit has 100% ignored paths; skipping (watermark advances)"
+            );
+            return Ok(());
+        }
 
         // Accumulate diff metrics for inflation-ratio diagnostic.
         for rec in &records {
