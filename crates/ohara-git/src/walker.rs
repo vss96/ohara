@@ -34,6 +34,46 @@ impl GitWalker {
         Ok(commit.id().to_string())
     }
 
+    /// Stream `(CommitMeta, changed-paths)` pairs to a callback in
+    /// topological-reverse (oldest-first) order. Used by `ohara plan`
+    /// for the diff-only pre-flight walk on giant repos. Memory-bounded:
+    /// no full Vec materialised.
+    ///
+    /// "Changed paths" = paths in the diff of the commit vs its first
+    /// parent. Initial commits diff against the empty tree.
+    pub fn for_each_commit_paths<F>(&self, mut callback: F) -> Result<()>
+    where
+        F: FnMut(&CommitMeta, &[String]) -> Result<()>,
+    {
+        let mut walk = self.repo.revwalk()?;
+        walk.set_sorting(Sort::TOPOLOGICAL | Sort::REVERSE)?;
+        walk.push_head()?;
+
+        let mut paths_buf: Vec<String> = Vec::with_capacity(16);
+        for oid in walk {
+            let oid = oid?;
+            let c = self.repo.find_commit(oid)?;
+            let parent_sha = if c.parent_count() > 0 {
+                c.parent(0).ok().map(|p| p.id().to_string())
+            } else {
+                None
+            };
+            let meta = CommitMeta {
+                commit_sha: oid.to_string(),
+                parent_sha: parent_sha.clone(),
+                is_merge: c.parent_count() > 1,
+                author: Some(c.author().name().unwrap_or("").to_string()).filter(|s| !s.is_empty()),
+                ts: c.time().seconds(),
+                message: c.message().unwrap_or("").to_string(),
+            };
+
+            paths_buf.clear();
+            collect_changed_paths(&self.repo, &c, &mut paths_buf)?;
+            callback(&meta, &paths_buf)?;
+        }
+        Ok(())
+    }
+
     pub fn list_commits(&self, since: Option<&str>) -> Result<Vec<CommitMeta>> {
         let mut walk = self.repo.revwalk()?;
         walk.set_sorting(Sort::TOPOLOGICAL | Sort::REVERSE)?;
@@ -63,6 +103,46 @@ impl GitWalker {
         }
         Ok(out)
     }
+}
+
+fn collect_changed_paths(
+    repo: &Repository,
+    commit: &git2::Commit<'_>,
+    out: &mut Vec<String>,
+) -> Result<()> {
+    let new_tree = commit.tree().context("commit tree")?;
+    let old_tree = if commit.parent_count() > 0 {
+        Some(
+            commit
+                .parent(0)
+                .context("first parent")?
+                .tree()
+                .context("parent tree")?,
+        )
+    } else {
+        None
+    };
+
+    // Path-only diff: skip binary check, no untracked.
+    let mut opts = git2::DiffOptions::new();
+    opts.skip_binary_check(true).include_untracked(false);
+    let diff = repo
+        .diff_tree_to_tree(old_tree.as_ref(), Some(&new_tree), Some(&mut opts))
+        .context("diff_tree_to_tree paths-only")?;
+
+    diff.foreach(
+        &mut |delta, _progress| {
+            if let Some(p) = delta.new_file().path().or_else(|| delta.old_file().path()) {
+                out.push(p.to_string_lossy().into_owned());
+            }
+            true
+        },
+        None,
+        None,
+        None,
+    )
+    .context("diff foreach")?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -105,6 +185,52 @@ mod tests {
         assert_eq!(cs.len(), 3);
         assert_eq!(cs[0].message.trim(), "a");
         assert_eq!(cs[2].message.trim(), "c");
+    }
+
+    #[test]
+    fn for_each_commit_paths_visits_all_commits_in_topo_order() {
+        // Plan 26 Task B.1: stream commit-path pairs to a callback in
+        // topological-reverse order (oldest first). Each commit's path
+        // list reflects the files changed in that commit.
+        let dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commits(dir.path(), &["c1", "c2", "c3"]);
+        let walker = GitWalker::open(dir.path()).unwrap();
+
+        let mut seen_msgs: Vec<String> = Vec::new();
+        let mut seen_paths: Vec<Vec<String>> = Vec::new();
+        walker
+            .for_each_commit_paths(|meta, paths| {
+                seen_msgs.push(meta.message.trim().to_string());
+                seen_paths.push(paths.to_vec());
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(seen_msgs, vec!["c1", "c2", "c3"]);
+        // init_repo_with_commits writes f0.txt, f1.txt, f2.txt — one
+        // per commit. Each commit changes exactly one file (no overlap).
+        assert_eq!(seen_paths.len(), 3);
+        assert!(seen_paths[0].iter().any(|p| p == "f0.txt"));
+        assert!(seen_paths[1].iter().any(|p| p == "f1.txt"));
+        assert!(seen_paths[2].iter().any(|p| p == "f2.txt"));
+    }
+
+    #[test]
+    fn for_each_commit_paths_callback_error_aborts() {
+        let dir = tempfile::tempdir().unwrap();
+        let _repo = init_repo_with_commits(dir.path(), &["c1", "c2", "c3"]);
+        let walker = GitWalker::open(dir.path()).unwrap();
+        let mut visited = 0;
+        let res = walker.for_each_commit_paths(|_, _| {
+            visited += 1;
+            if visited == 2 {
+                Err(anyhow::anyhow!("stop"))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(res.is_err(), "expected callback error to propagate");
+        assert_eq!(visited, 2, "must stop after callback error");
     }
 
     #[test]
