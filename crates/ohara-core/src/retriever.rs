@@ -260,8 +260,27 @@ impl Retriever {
                 false => (None.into(), None.into()),
             };
 
-        let (vec_opt, fts_opt, hist_sym_opt, head_sym_opt) =
-            tokio::join!(vec_fut, fts_fut, hist_sym_fut, head_sym_fut);
+        // Plan 25: contextual-BM25 lane over `hunk.semantic_text`
+        // (built at index time by `hunk_text::build`). Runs in
+        // parallel with the four existing lanes; its hits fuse into
+        // the same RRF call so no separate ranking knob is needed.
+        let sem_fut: OptionFuture<_> = match profile.semantic_text_lane_enabled {
+            true => Some(timed_phase(
+                "lane_fts_semantic",
+                self.storage.bm25_hunks_by_semantic_text(
+                    repo_id,
+                    &query.query,
+                    effective_weights.lane_top_k,
+                    language_filter,
+                    since_unix,
+                ),
+            ))
+            .into(),
+            false => None.into(),
+        };
+
+        let (vec_opt, fts_opt, hist_sym_opt, head_sym_opt, sem_opt) =
+            tokio::join!(vec_fut, fts_fut, hist_sym_fut, head_sym_fut, sem_fut);
 
         // Each `_opt` is `Option<Result<Vec<HunkHit>>>`. None ⇒ lane
         // disabled (skip silently); Some(Err) ⇒ lane errored (propagate);
@@ -270,6 +289,7 @@ impl Retriever {
         let fts_hits: Vec<HunkHit> = fts_opt.transpose()?.unwrap_or_default();
         let hist_sym_hits: Vec<HunkHit> = hist_sym_opt.transpose()?.unwrap_or_default();
         let head_sym_hits: Vec<HunkHit> = head_sym_opt.transpose()?.unwrap_or_default();
+        let sem_hits: Vec<HunkHit> = sem_opt.transpose()?.unwrap_or_default();
 
         // Plan 11 Task 4.1 Step 3: prefer historical attribution when
         // the index has it, fall back to HEAD-symbol-name otherwise.
@@ -301,12 +321,25 @@ impl Retriever {
             ranking_sym.push(h.hunk_id);
             by_id.entry(h.hunk_id).or_insert_with(|| h.clone());
         }
+        // Plan 25: per-id ranking for the contextual-BM25 lane,
+        // contributed alongside the existing three rankings to RRF.
+        let mut ranking_sem: Vec<HunkId> = Vec::with_capacity(sem_hits.len());
+        for h in &sem_hits {
+            ranking_sem.push(h.hunk_id);
+            by_id.entry(h.hunk_id).or_insert_with(|| h.clone());
+        }
 
         // 4. Reciprocal Rank Fusion (k = 60, Cormack 2009 default) →
         //    truncate to rerank_top_k before the expensive cross-encoder.
         //    Plan 12 Task 2.1: profile may widen the rerank pool.
+        //    Plan 25: 4 ranked sources now (vec / text / symbol /
+        //    semantic-text) — one extra reciprocal contribution per
+        //    hunk that surfaces in the new lane.
         let fused: Vec<HunkId> = timed_phase("rrf", async {
-            reciprocal_rank_fusion(&[ranking_vec, ranking_fts, ranking_sym], 60)
+            reciprocal_rank_fusion(
+                &[ranking_vec, ranking_fts, ranking_sym, ranking_sem],
+                60,
+            )
         })
         .await;
         let trimmed: Vec<HunkId> = fused
@@ -1162,12 +1195,14 @@ mod tests {
         // Plan 24 Phase C hoist: the "embed_query" phase span no longer
         // exists — the embedder call is now inside `lane_knn` so we
         // skip it entirely when the vec lane is disabled. Phase events
-        // therefore start at the lanes themselves.
+        // therefore start at the lanes themselves. Plan 25 added
+        // `lane_fts_semantic` as a 5th lane.
         for required in [
             "lane_knn",
             "lane_fts_text",
             "lane_fts_sym_hist",
             "lane_fts_sym_head",
+            "lane_fts_semantic",
             "rrf",
             "hydrate_symbols",
         ] {
