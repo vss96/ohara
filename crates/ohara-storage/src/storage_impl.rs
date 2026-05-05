@@ -237,6 +237,32 @@ impl Storage for SqliteStorage {
         .await
     }
 
+    async fn get_hunk_symbols_batch(
+        &self,
+        _repo_id: &RepoId,
+        hunk_ids: &[HunkId],
+    ) -> CoreResult<std::collections::HashMap<HunkId, Vec<HunkSymbol>>> {
+        // Plan 24: one batch SELECT in place of N per-hit round-trips.
+        if hunk_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let ids_owned: Vec<HunkId> = hunk_ids.to_vec();
+        timed_with_conn(
+            &self.pool,
+            &self.counters.get_hunk_symbols_batch,
+            |m: &std::collections::HashMap<HunkId, Vec<HunkSymbol>>| {
+                m.values().map(|v| v.len() as u64).sum()
+            },
+            move |c| {
+                // HunkId is currently a type alias for i64; if it ever
+                // becomes a newtype, the unwrap-into-i64 boundary moves
+                // here (mirroring plan-21's get_commits_by_sha pattern).
+                crate::tables::hunk_symbol::get_for_hunks(c, &ids_owned)
+            },
+        )
+        .await
+    }
+
     async fn blob_was_seen(&self, blob_sha: &str, model: &str) -> CoreResult<bool> {
         let blob = blob_sha.to_string();
         let m = model.to_string();
