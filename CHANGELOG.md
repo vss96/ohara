@@ -8,6 +8,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-05-05
+
+### Fixed
+
+- **`ohara index` now shows progress** during the indexer dead window
+  (issue [#29](https://github.com/vss96/ohara/issues/29)). The plan-19
+  coordinator refactor had silently lost the per-commit progress
+  callbacks; the `ProgressSink` is now threaded into `Coordinator` and
+  drives `pre_walk` → `start` → per-commit `commit_done` from inside
+  the loop. New `ProgressSink::pre_walk(msg)` renders a length-less
+  spinner during the embedder lazy-load (~15-25 s on first run) and
+  the libgit2 revwalk so the bar isn't a full ~30 s of dead air before
+  it appears. `PROGRESS_INTERVAL` dropped from 100 to 25 so
+  `RUST_LOG=info` users without a TTY-rendered bar still see motion
+  every few seconds. Phase markers (`loading embedder` /
+  `embedder loaded` / `walking commit history` /
+  `commit walk complete`) print at INFO regardless of indicatif state
+  ([3a1a2d0](https://github.com/vss96/ohara/commit/3a1a2d0)) ([#30](https://github.com/vss96/ohara/pull/30))
+- **`ohara status` no longer dumps refinery migration logs** on every
+  invocation (issue [#28](https://github.com/vss96/ohara/issues/28)).
+  Default `EnvFilter` adds `refinery_core=warn` so the
+  `"applying migration"` / `"no migrations to apply"` /
+  `"preparing to apply N migrations: Map {…}"` chatter — including
+  the full SQL of every migration as a Debug `Map` — is silenced.
+  Real failures still surface at WARN/ERROR; override with
+  `RUST_LOG=info,refinery_core=info ohara …` if needed
+  ([3a1a2d0](https://github.com/vss96/ohara/commit/3a1a2d0)) ([#30](https://github.com/vss96/ohara/pull/30))
+
+### Changed
+
+- Janitor pass: hygiene + small interface tidies. One real
+  `.unwrap()` in `crates/ohara-mcp/src/tools/find_pattern.rs`
+  promoted to `expect("invariant: …")`; six broken intra-doc links
+  fixed; plan-21 doc marked merged; mcp `invalid_params` envelope
+  paths now have +10 unit tests; `ohara-storage` / `ohara-parse` /
+  `ohara-git` got expanded crate-level `//!` docs;
+  `hydrate_blame_results` 4-arg surface grouped into a
+  `HydrateInputs` struct; `RuntimeIndexMetadata::current` collapsed
+  into the single `runtime_metadata_from` constructor
+  ([79c9d40](https://github.com/vss96/ohara/commit/79c9d40)) ([#26](https://github.com/vss96/ohara/pull/26))
+
 ## [0.7.6] - 2026-05-05
 
 ### Added
