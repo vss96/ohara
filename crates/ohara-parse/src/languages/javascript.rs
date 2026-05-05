@@ -183,6 +183,11 @@ mod tests {
         );
         let empty = syms.iter().find(|s| s.name == "Empty").unwrap();
         assert!(matches!(empty.kind, ohara_core::types::SymbolKind::Class));
+        let with_fields = syms.iter().find(|s| s.name == "WithFields").unwrap();
+        assert!(matches!(
+            with_fields.kind,
+            ohara_core::types::SymbolKind::Class
+        ));
     }
 
     #[test]

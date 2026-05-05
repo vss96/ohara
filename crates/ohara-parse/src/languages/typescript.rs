@@ -186,6 +186,8 @@ mod tests {
         assert!(names.contains(&"Dto"), "Dto class missing: {names:?}");
         let empty = syms.iter().find(|s| s.name == "Empty").unwrap();
         assert!(matches!(empty.kind, ohara_core::types::SymbolKind::Class));
+        let dto = syms.iter().find(|s| s.name == "Dto").unwrap();
+        assert!(matches!(dto.kind, ohara_core::types::SymbolKind::Class));
     }
 
     #[test]
