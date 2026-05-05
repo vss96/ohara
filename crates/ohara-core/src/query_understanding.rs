@@ -575,7 +575,32 @@ mod tests {
         // recency_multiplier == 1.0 and every lane flag is true.
         let p = RetrievalProfile::default_unknown();
         assert!((p.recency_multiplier - 1.0).abs() < f32::EPSILON);
-        assert!(p.vec_lane_enabled && p.text_lane_enabled && p.symbol_lane_enabled);
+        assert!(
+            p.vec_lane_enabled
+                && p.text_lane_enabled
+                && p.symbol_lane_enabled
+                && p.semantic_text_lane_enabled
+        );
         assert!(p.rerank_top_k.is_none());
+    }
+
+    #[test]
+    fn every_profile_enables_semantic_text_lane_by_default() {
+        // Plan 25: the new lane ships enabled on every profile so that the
+        // plan-10 eval measures the win unconditionally. Profile-specific
+        // disablement is a follow-up once we have eval data per intent.
+        for intent in [
+            QueryIntent::Unknown,
+            QueryIntent::BugFixPrecedent,
+            QueryIntent::ApiUsage,
+            QueryIntent::Configuration,
+            QueryIntent::ImplementationPattern,
+        ] {
+            let p = RetrievalProfile::for_intent(intent);
+            assert!(
+                p.semantic_text_lane_enabled,
+                "{intent:?} must enable the semantic-text lane",
+            );
+        }
     }
 }
