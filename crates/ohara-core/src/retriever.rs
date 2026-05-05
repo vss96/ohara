@@ -816,7 +816,9 @@ mod tests {
             "new",
             "newer commit MUST outrank older when rerank scores are tied, \
              even when both are negative; got order {:?}",
-            out.iter().map(|h| h.commit_sha.as_str()).collect::<Vec<_>>()
+            out.iter()
+                .map(|h| h.commit_sha.as_str())
+                .collect::<Vec<_>>()
         );
         assert!(
             out[0].combined_score > out[1].combined_score,
