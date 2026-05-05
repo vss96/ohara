@@ -21,8 +21,12 @@ git2.workspace = true
 # runtime-agnostic — the macro expands to plain futures, and the test
 # binary still owns the actual runtime.
 tokio = { version = "1", features = ["macros"] }
+# Plan 24: futures::future::OptionFuture wraps each retrieval lane so
+# disabled lanes resolve to None without spawning their underlying
+# SQL/embed call. Moved out of dev-dependencies because the retriever
+# pipeline (production code) now depends on it.
+futures.workspace = true
 
 [dev-dependencies]
-futures.workspace = true
 tokio = { workspace = true }
 tracing-subscriber.workspace = true

@@ -142,7 +142,35 @@ impl Retriever {
         let parsed = crate::query_understanding::parse_query(&query.query);
         let profile = crate::query_understanding::RetrievalProfile::for_intent(parsed.intent);
         let effective_language = query.language.clone().or_else(|| parsed.language.clone());
+        let parsed_since_unix = parsed.since_unix;
+        let hits = self
+            .find_pattern_inner(
+                repo_id,
+                query,
+                profile.clone(),
+                effective_language,
+                parsed_since_unix,
+                now_unix,
+            )
+            .await?;
+        Ok((hits, profile))
+    }
 
+    /// Plan 24: shared retrieval body for both `find_pattern_with_profile`
+    /// (the public entry-point, profile derived from the query string)
+    /// and `find_pattern_with_explicit_profile` (test-only entry-point
+    /// that bypasses query parsing). Honors the profile's lane-mask
+    /// flags before spawning lane futures so disabled lanes never run
+    /// their underlying SQL or embed call.
+    async fn find_pattern_inner(
+        &self,
+        repo_id: &crate::types::RepoId,
+        query: &PatternQuery,
+        profile: crate::query_understanding::RetrievalProfile,
+        effective_language: Option<String>,
+        parsed_since_unix: Option<i64>,
+        now_unix: i64,
+    ) -> crate::Result<Vec<PatternHit>> {
         // Apply per-profile RankingWeights overrides. Profile fields of
         // None leave the base weight unchanged; Some(v) replaces it.
         let effective_weights = RankingWeights {
@@ -156,85 +184,93 @@ impl Retriever {
             lane_top_k: profile.lane_top_k.unwrap_or(self.weights.lane_top_k),
         };
 
-        // 1. Embed the query once for the vector lane. The BM25 lanes use
-        //    the raw query string directly.
-        let q_text = vec![query.query.clone()];
-        let mut q_embs = timed_phase("embed_query", self.embedder.embed_batch(&q_text)).await?;
-        let q_emb = q_embs
-            .pop()
-            .ok_or_else(|| crate::OhraError::Embedding("empty".into()))?;
-
         let language_filter = effective_language.as_deref();
+        let since_unix = query.since_unix.or(parsed_since_unix);
 
-        // 2. Gather all four candidate lanes in parallel. The symbol
-        //    side has two: the v0.7 historical lane (`hunk_symbol`,
-        //    plan 11 Task 4.1) is the primary path; if it returns
-        //    nothing — because the index was built before plan 11 ran,
-        //    or no `(commit, file)` pair has attribution rows yet — we
-        //    fall back to the v0.3 file-level lane so old indexes
-        //    stay queryable. Plan 12 Task 2.1: lanes are gated by the
-        //    profile's lane-mask flags; disabled lanes return empty.
-        let (vec_res, fts_res, hist_sym_res, head_sym_res) = tokio::join!(
-            timed_phase(
-                "lane_knn",
-                self.storage.knn_hunks(
-                    repo_id,
-                    &q_emb,
-                    effective_weights.lane_top_k,
-                    language_filter,
-                    query.since_unix.or(parsed.since_unix),
-                )
-            ),
-            timed_phase(
+        // Plan 24 Phase C: hoist lane-mask gates above `tokio::join!`
+        // so disabled lanes never spawn their underlying SQL/embed
+        // call. Each lane future is wrapped in `OptionFuture` —
+        // disabled ⇒ resolves to `None`, enabled ⇒ runs the work.
+        // The vec lane's pre-step (`embedder.embed_batch`) moves
+        // inside the lane future so we save the embed call too when
+        // the vec lane is off.
+        use futures::future::OptionFuture;
+
+        let vec_fut: OptionFuture<_> = if profile.vec_lane_enabled {
+            let q_text = vec![query.query.clone()];
+            let storage = self.storage.clone();
+            let embedder = self.embedder.clone();
+            let lane_top_k = effective_weights.lane_top_k;
+            let lang = language_filter.map(|s| s.to_string());
+            Some(timed_phase("lane_knn", async move {
+                let mut q_embs = embedder.embed_batch(&q_text).await?;
+                let q_emb = q_embs
+                    .pop()
+                    .ok_or_else(|| crate::OhraError::Embedding("empty".into()))?;
+                storage
+                    .knn_hunks(repo_id, &q_emb, lane_top_k, lang.as_deref(), since_unix)
+                    .await
+            }))
+            .into()
+        } else {
+            None.into()
+        };
+
+        let fts_fut: OptionFuture<_> = match profile.text_lane_enabled {
+            true => Some(timed_phase(
                 "lane_fts_text",
                 self.storage.bm25_hunks_by_text(
                     repo_id,
                     &query.query,
                     effective_weights.lane_top_k,
                     language_filter,
-                    query.since_unix.or(parsed.since_unix),
-                )
-            ),
-            timed_phase(
-                "lane_fts_sym_hist",
-                self.storage.bm25_hunks_by_historical_symbol(
-                    repo_id,
-                    &query.query,
-                    effective_weights.lane_top_k,
-                    language_filter,
-                    query.since_unix.or(parsed.since_unix),
-                )
-            ),
-            timed_phase(
-                "lane_fts_sym_head",
-                self.storage.bm25_hunks_by_symbol_name(
-                    repo_id,
-                    &query.query,
-                    effective_weights.lane_top_k,
-                    language_filter,
-                    query.since_unix.or(parsed.since_unix),
-                )
-            ),
-        );
-        let vec_hits = if profile.vec_lane_enabled {
-            vec_res?
-        } else {
-            Vec::new()
+                    since_unix,
+                ),
+            ))
+            .into(),
+            false => None.into(),
         };
-        let fts_hits = if profile.text_lane_enabled {
-            fts_res?
-        } else {
-            Vec::new()
-        };
-        let (hist_sym_hits, head_sym_hits) = if profile.symbol_lane_enabled {
-            (hist_sym_res?, head_sym_res?)
-        } else {
-            // Drain the futures' results to avoid leaking errors;
-            // ignore the contents because the profile disabled the lane.
-            let _ = hist_sym_res?;
-            let _ = head_sym_res?;
-            (Vec::new(), Vec::new())
-        };
+
+        let (hist_sym_fut, head_sym_fut): (OptionFuture<_>, OptionFuture<_>) =
+            match profile.symbol_lane_enabled {
+                true => (
+                    Some(timed_phase(
+                        "lane_fts_sym_hist",
+                        self.storage.bm25_hunks_by_historical_symbol(
+                            repo_id,
+                            &query.query,
+                            effective_weights.lane_top_k,
+                            language_filter,
+                            since_unix,
+                        ),
+                    ))
+                    .into(),
+                    Some(timed_phase(
+                        "lane_fts_sym_head",
+                        self.storage.bm25_hunks_by_symbol_name(
+                            repo_id,
+                            &query.query,
+                            effective_weights.lane_top_k,
+                            language_filter,
+                            since_unix,
+                        ),
+                    ))
+                    .into(),
+                ),
+                false => (None.into(), None.into()),
+            };
+
+        let (vec_opt, fts_opt, hist_sym_opt, head_sym_opt) =
+            tokio::join!(vec_fut, fts_fut, hist_sym_fut, head_sym_fut);
+
+        // Each `_opt` is `Option<Result<Vec<HunkHit>>>`. None ⇒ lane
+        // disabled (skip silently); Some(Err) ⇒ lane errored (propagate);
+        // Some(Ok) ⇒ use the hits. Disabled lanes contribute Vec::new().
+        let vec_hits: Vec<HunkHit> = vec_opt.transpose()?.unwrap_or_default();
+        let fts_hits: Vec<HunkHit> = fts_opt.transpose()?.unwrap_or_default();
+        let hist_sym_hits: Vec<HunkHit> = hist_sym_opt.transpose()?.unwrap_or_default();
+        let head_sym_hits: Vec<HunkHit> = head_sym_opt.transpose()?.unwrap_or_default();
+
         // Plan 11 Task 4.1 Step 3: prefer historical attribution when
         // the index has it, fall back to HEAD-symbol-name otherwise.
         // Mutually exclusive — feeding both into RRF would give the
@@ -282,7 +318,7 @@ impl Retriever {
             .filter_map(|id| by_id.get(id).cloned())
             .collect();
         if hits.is_empty() {
-            return Ok((vec![], profile));
+            return Ok(vec![]);
         }
 
         // 5. Optional cross-encoder rerank. In degraded mode (no
@@ -382,7 +418,27 @@ impl Retriever {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         out.truncate(query.k.clamp(1, 20) as usize);
-        Ok((out, profile))
+        Ok(out)
+    }
+
+    /// Test-only: skip query parsing and use this profile verbatim.
+    /// Production callers go through `find_pattern` /
+    /// `find_pattern_with_profile`, which derive the profile from the
+    /// query.
+    #[cfg(test)]
+    pub(crate) async fn find_pattern_with_explicit_profile(
+        &self,
+        repo_id: &crate::types::RepoId,
+        query: &PatternQuery,
+        profile: crate::query_understanding::RetrievalProfile,
+        now_unix: i64,
+    ) -> crate::Result<Vec<PatternHit>> {
+        // No query-parsing path here — the explicit profile wins, and
+        // the parsed `since_unix` defaults to None. Callers who want
+        // to test recency-bound paths set it on the `query` itself.
+        let effective_language = query.language.clone();
+        self.find_pattern_inner(repo_id, query, profile, effective_language, None, now_unix)
+            .await
     }
 }
 
@@ -647,6 +703,34 @@ mod tests {
         }
     }
 
+    /// Plan 24: instrumented embedder that counts how many times
+    /// `embed_batch` is called. Lets the lane-mask-hoist regression
+    /// test assert "vec lane disabled ⇒ embedder is never called".
+    #[derive(Default)]
+    struct CountingEmbedder {
+        calls: Mutex<usize>,
+    }
+
+    impl CountingEmbedder {
+        fn calls(&self) -> usize {
+            *self.calls.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl crate::EmbeddingProvider for CountingEmbedder {
+        fn dimension(&self) -> usize {
+            4
+        }
+        fn model_id(&self) -> &str {
+            "counting"
+        }
+        async fn embed_batch(&self, texts: &[String]) -> crate::Result<Vec<Vec<f32>>> {
+            *self.calls.lock().unwrap() += 1;
+            Ok(texts.iter().map(|_| vec![0.0_f32; 4]).collect())
+        }
+    }
+
     /// Reranker that maps a fixed `diff_text -> score` table. Returns 0.0
     /// for any unknown candidate so the pipeline still produces output.
     struct ScriptedReranker {
@@ -884,6 +968,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disabled_lanes_skip_storage_calls() {
+        // Plan 24: when the profile disables a lane, the corresponding
+        // storage method (or embedding call, for the vec lane) MUST NOT
+        // run. Pre-fix the retriever calls all four lanes unconditionally
+        // and only filters the results post-hoc.
+        let now = 1_700_000_000;
+        let storage = Arc::new(FakeStorage::new(vec![], vec![], vec![]));
+        let embedder = Arc::new(CountingEmbedder::default());
+        let r = Retriever::new(storage.clone(), embedder.clone());
+
+        // Profile: only the text lane is enabled.
+        let mut profile = crate::query_understanding::RetrievalProfile::default_unknown();
+        profile.vec_lane_enabled = false;
+        profile.symbol_lane_enabled = false;
+        // text_lane_enabled stays true.
+
+        let q = PatternQuery {
+            query: "anything".into(),
+            k: 5,
+            language: None,
+            since_unix: None,
+            no_rerank: true,
+        };
+        let id = RepoId::from_parts("x", "/y");
+        let _ = r
+            .find_pattern_with_explicit_profile(&id, &q, profile, now)
+            .await
+            .unwrap();
+
+        let calls = storage.calls.lock().unwrap().clone();
+        assert!(
+            !calls.iter().any(|c| *c == "knn"),
+            "vec lane disabled: knn_hunks must not run; calls = {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| *c == "fts_sym" || *c == "fts_hist_sym"),
+            "symbol lane disabled: fts_sym / fts_hist_sym must not run; calls = {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| *c == "fts_text"),
+            "text lane enabled: fts_text MUST run; calls = {calls:?}"
+        );
+
+        let embed_calls = embedder.calls();
+        assert_eq!(
+            embed_calls, 0,
+            "vec lane disabled: embed_batch must not be called for the query; got {embed_calls}"
+        );
+    }
+
+    #[tokio::test]
     async fn find_pattern_calls_get_hunk_symbols_batch_exactly_once() {
         // Plan 24 regression: hydration must be one batch call, not N
         // sequential calls. We construct lanes that surface 5 distinct
@@ -961,8 +1096,11 @@ mod tests {
         });
 
         let seen = seen.lock().unwrap();
+        // Plan 24 Phase C hoist: the "embed_query" phase span no longer
+        // exists — the embedder call is now inside `lane_knn` so we
+        // skip it entirely when the vec lane is disabled. Phase events
+        // therefore start at the lanes themselves.
         for required in [
-            "embed_query",
             "lane_knn",
             "lane_fts_text",
             "lane_fts_sym_hist",
