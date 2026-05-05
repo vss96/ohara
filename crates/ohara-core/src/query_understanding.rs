@@ -97,6 +97,11 @@ pub struct RetrievalProfile {
     pub vec_lane_enabled: bool,
     /// As above for the BM25-by-(diff/semantic)-text lane.
     pub text_lane_enabled: bool,
+    /// Plan 25: enables the BM25 lane over `hunk.semantic_text` (the
+    /// contextual preamble + added-lines blob produced at index time
+    /// by `hunk_text::build`). Complements `text_lane_enabled` (raw
+    /// `diff_text`); both can be on at the same time, fused via RRF.
+    pub semantic_text_lane_enabled: bool,
     /// As above for the historical / HEAD symbol lane.
     pub symbol_lane_enabled: bool,
     /// Top-K to pull into the cross-encoder reranker. The retriever's
@@ -129,6 +134,7 @@ impl RetrievalProfile {
             recency_multiplier: 1.0,
             vec_lane_enabled: true,
             text_lane_enabled: true,
+            semantic_text_lane_enabled: true,
             symbol_lane_enabled: true,
             rerank_top_k: None,
             recency_weight: None,
