@@ -312,16 +312,80 @@ fn recommend_default(rows: &[SweepRow]) -> usize {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "perf sweep; opt-in via `--ignored rerank_pool_sweep`"]
 async fn rerank_pool_sweep() -> Result<()> {
-    // Skeleton — body filled in by Task A.6 (end-to-end wiring).
-    let _cases = load_golden()?;
-    let _ = (POOL_SIZES, std::any::type_name::<SweepRow>());
-    let _ = std::any::type_name::<RankingWeights>();
-    let _ = ensure_fixture;
-    let _ = resolve_labels;
-    let _ = build_pipeline_components;
-    let _ = run_sweep_iteration;
-    let _ = recommend_default;
-    let _: Option<Arc<()>> = None;
+    // Step 1: build the deterministic eval fixture.
+    let fixture = ensure_fixture()?;
+    let label_to_sha = resolve_labels(&fixture)?;
+    let cases = load_golden()?;
+
+    // Isolate the index DB so the sweep doesn't pollute (or get
+    // polluted by) a developer's real ~/.ohara state.
+    let home = tempfile::tempdir().context("temp OHARA_HOME")?;
+    std::env::set_var("OHARA_HOME", home.path());
+
+    // Step 2: index the fixture through the same path the binary uses.
+    let index_args = ohara_cli::commands::index::Args {
+        path: fixture.clone(),
+        incremental: false,
+        force: false,
+        rebuild: false,
+        yes: false,
+        commit_batch: Some(64),
+        threads: Some(0),
+        no_progress: true,
+        profile: false,
+        embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Cpu),
+        resources: ohara_cli::resources::ResourcesArg::Auto,
+        embed_batch: None,
+    };
+    ohara_cli::commands::index::run(index_args)
+        .await
+        .context("index eval fixture")?;
+
+    // Step 3: build storage + embedder + reranker once. They're identical
+    // across pool sizes; only RankingWeights changes.
+    let (repo_id, _, _) =
+        ohara_cli::commands::resolve_repo_id(&fixture).context("resolve repo id")?;
+    let db_path = ohara_cli::commands::index_db_path(&repo_id).context("resolve db path")?;
+    let (storage, embedder, reranker) = build_pipeline_components(db_path).await?;
+
+    // Use a fixed "now" so the recency multiplier is stable across runs.
+    let now_unix = chrono::DateTime::parse_from_rfc3339("2024-07-01T00:00:00Z")
+        .expect("static rfc3339 literal parses")
+        .timestamp();
+
+    // Step 4: sweep.
+    let mut rows: Vec<SweepRow> = Vec::with_capacity(POOL_SIZES.len());
+    for &pool in POOL_SIZES {
+        let weights = RankingWeights {
+            rerank_top_k: pool,
+            ..RankingWeights::default()
+        };
+        let retriever = Retriever::new(storage.clone(), embedder.clone())
+            .with_reranker(reranker.clone())
+            .with_weights(weights);
+
+        let row = run_sweep_iteration(
+            &retriever,
+            &repo_id,
+            &cases,
+            &label_to_sha,
+            now_unix,
+            pool,
+        )
+        .await?;
+        eprintln!("{}", serde_json::to_string(&row)?);
+        rows.push(row);
+    }
+
+    // Step 5: pick the recommended default and print it on stderr.
+    let recommended = recommend_default(&rows);
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "recommended_pool_size": recommended,
+            "policy": "smallest pool with recall_at_5 within 1% of best AND p95_ms within 1.5x of smallest"
+        })
+    );
     Ok(())
 }
 
