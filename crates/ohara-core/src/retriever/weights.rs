@@ -4,7 +4,16 @@
 #[derive(Debug, Clone)]
 pub struct RankingWeights {
     /// Multiplier on the recency factor in the final score:
-    /// `final = rerank * (1.0 + recency_weight * exp(-age_days / half_life_days))`.
+    /// `final = sigmoid(rerank) * (1.0 + recency_weight * exp(-age_days / half_life_days))`.
+    ///
+    /// `sigmoid(rerank)` bounds the cross-encoder's signed logit into
+    /// `(0, 1)` so the multiplicative recency factor always boosts in
+    /// the expected direction (more recent ⇒ higher combined score).
+    /// See plan-22 for the bug this fixed. The sigmoid is applied
+    /// inside `refiners::cross_encoder::CrossEncoderRefiner` before
+    /// the score lands in `HunkHit::similarity`, so the
+    /// `RecencyRefiner` sees an already-bounded base.
+    ///
     /// Default 0.05 — small enough to act as a tie-breaker without
     /// overpowering rerank quality.
     pub recency_weight: f32,
