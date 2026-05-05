@@ -175,6 +175,9 @@ mod tests {
         assert!(names.contains(&"handle"), "handle missing: {names:?}");
         assert!(names.contains(&"greet"), "greet missing: {names:?}");
         let handle = syms.iter().find(|s| s.name == "handle").unwrap();
-        assert!(matches!(handle.kind, ohara_core::types::SymbolKind::Function));
+        assert!(matches!(
+            handle.kind,
+            ohara_core::types::SymbolKind::Function
+        ));
     }
 }
