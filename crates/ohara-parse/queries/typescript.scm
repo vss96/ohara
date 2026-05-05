@@ -1,9 +1,13 @@
 (function_declaration name: (identifier) @func_name) @def_function
 
+; Capture class declarations independently of body contents so empty
+; classes and field-only classes still produce a Class symbol. Methods
+; are captured by the separate pattern below.
+(class_declaration name: (type_identifier) @class_name) @def_class
+
 (class_declaration
-  name: (type_identifier) @class_name
   body: (class_body
-    (method_definition name: (property_identifier) @method_name) @def_method)) @def_class
+    (method_definition name: (property_identifier) @method_name) @def_method))
 
 (lexical_declaration
   (variable_declarator
