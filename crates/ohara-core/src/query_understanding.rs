@@ -97,6 +97,11 @@ pub struct RetrievalProfile {
     pub vec_lane_enabled: bool,
     /// As above for the BM25-by-(diff/semantic)-text lane.
     pub text_lane_enabled: bool,
+    /// Plan 25: enables the BM25 lane over `hunk.semantic_text` (the
+    /// contextual preamble + added-lines blob produced at index time
+    /// by `hunk_text::build`). Complements `text_lane_enabled` (raw
+    /// `diff_text`); both can be on at the same time, fused via RRF.
+    pub semantic_text_lane_enabled: bool,
     /// As above for the historical / HEAD symbol lane.
     pub symbol_lane_enabled: bool,
     /// Top-K to pull into the cross-encoder reranker. The retriever's
@@ -129,6 +134,7 @@ impl RetrievalProfile {
             recency_multiplier: 1.0,
             vec_lane_enabled: true,
             text_lane_enabled: true,
+            semantic_text_lane_enabled: true,
             symbol_lane_enabled: true,
             rerank_top_k: None,
             recency_weight: None,
@@ -193,6 +199,7 @@ impl RetrievalProfile {
         match lane {
             crate::retriever::LaneId::Vec => self.vec_lane_enabled,
             crate::retriever::LaneId::Bm25Text => self.text_lane_enabled,
+            crate::retriever::LaneId::Bm25SemText => self.semantic_text_lane_enabled,
             crate::retriever::LaneId::Bm25HistSym => self.symbol_lane_enabled,
             crate::retriever::LaneId::Bm25HeadSym => self.symbol_lane_enabled,
         }
@@ -589,7 +596,33 @@ mod tests {
         // recency_multiplier == 1.0 and every lane flag is true.
         let p = RetrievalProfile::default_unknown();
         assert!((p.recency_multiplier - 1.0).abs() < f32::EPSILON);
-        assert!(p.vec_lane_enabled && p.text_lane_enabled && p.symbol_lane_enabled);
+        assert!(
+            p.vec_lane_enabled
+                && p.text_lane_enabled
+                && p.symbol_lane_enabled
+                && p.semantic_text_lane_enabled
+        );
         assert!(p.rerank_top_k.is_none());
+    }
+
+    #[test]
+    fn every_profile_enables_semantic_text_lane_by_default() {
+        // Plan 25: the new lane ships enabled on every profile so that
+        // the plan-10 eval measures the win unconditionally. Profile-
+        // specific disablement is a follow-up once we have eval data
+        // per intent.
+        for intent in [
+            QueryIntent::Unknown,
+            QueryIntent::BugFixPrecedent,
+            QueryIntent::ApiUsage,
+            QueryIntent::Configuration,
+            QueryIntent::ImplementationPattern,
+        ] {
+            let p = RetrievalProfile::for_intent(intent);
+            assert!(
+                p.semantic_text_lane_enabled,
+                "{intent:?} must enable the semantic-text lane",
+            );
+        }
     }
 }

@@ -209,6 +209,13 @@ mod tests {
         async fn get_hunk_symbols(&self, _: &RepoId, _: HunkId) -> Result<Vec<HunkSymbol>> {
             Ok(vec![])
         }
+        async fn get_hunk_symbols_batch(
+            &self,
+            _: &RepoId,
+            _: &[HunkId],
+        ) -> Result<std::collections::HashMap<HunkId, Vec<HunkSymbol>>> {
+            Ok(std::collections::HashMap::new())
+        }
         async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> {
             Ok(false)
         }

@@ -1,6 +1,6 @@
 # ohara plan-25 — Wire contextual BM25 lane into the retriever
 
-> **Status:** draft
+> **Status:** complete
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or

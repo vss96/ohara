@@ -36,16 +36,37 @@ pub struct FakeStorage {
     pub knn: Vec<HunkHit>,
     pub fts_text: Vec<HunkHit>,
     pub fts_sym: Vec<HunkHit>,
+    /// Plan 25: scriptable hits for the semantic-text lane. Existing
+    /// tests use `new(...)` and get an empty Vec; new tests use
+    /// `new_with_semantic(...)` to seed it.
+    pub fts_semantic: Vec<HunkHit>,
     pub calls: Mutex<Vec<&'static str>>,
+    /// Plan 24: per-method batch-call counter so tests can assert the
+    /// hydration step issues exactly one batch call rather than N
+    /// sequential per-hit round-trips.
+    pub batch_calls: Mutex<usize>,
 }
 
 impl FakeStorage {
     pub fn new(knn: Vec<HunkHit>, fts_text: Vec<HunkHit>, fts_sym: Vec<HunkHit>) -> Self {
+        Self::new_with_semantic(knn, fts_text, fts_sym, vec![])
+    }
+
+    /// Plan 25 secondary constructor: scripts the semantic-text lane.
+    /// Existing tests keep using `new(...)`.
+    pub fn new_with_semantic(
+        knn: Vec<HunkHit>,
+        fts_text: Vec<HunkHit>,
+        fts_sym: Vec<HunkHit>,
+        fts_semantic: Vec<HunkHit>,
+    ) -> Self {
         Self {
             knn,
             fts_text,
             fts_sym,
+            fts_semantic,
             calls: Mutex::new(vec![]),
+            batch_calls: Mutex::new(0),
         }
     }
 }
@@ -110,10 +131,12 @@ impl crate::Storage for FakeStorage {
         _: Option<&str>,
         _: Option<i64>,
     ) -> crate::Result<Vec<HunkHit>> {
-        // Plan 11: keep retriever tests focused on the existing
-        // three lanes until Task 4.1 wires the semantic lane in.
+        // Plan 25: return scripted hits so retriever tests can
+        // exercise the lane. The "fts_semantic" call-record entry is
+        // what the test assertion checks for; the lane actually
+        // contributes to the fused output.
         self.calls.lock().unwrap().push("fts_semantic");
-        Ok(Vec::new())
+        Ok(self.fts_semantic.clone())
     }
     async fn bm25_hunks_by_symbol_name(
         &self,
@@ -145,7 +168,23 @@ impl crate::Storage for FakeStorage {
         _: &RepoId,
         _: crate::storage::HunkId,
     ) -> crate::Result<Vec<crate::types::HunkSymbol>> {
+        // Plan 24: record the per-hit call so the regression test
+        // can assert the retriever stopped using this loop in favor
+        // of `get_hunk_symbols_batch`.
+        self.calls.lock().unwrap().push("get_hunk_symbols");
         Ok(Vec::new())
+    }
+    async fn get_hunk_symbols_batch(
+        &self,
+        _: &RepoId,
+        _: &[crate::storage::HunkId],
+    ) -> crate::Result<
+        std::collections::HashMap<crate::storage::HunkId, Vec<crate::types::HunkSymbol>>,
+    > {
+        // Plan 24: record the batch call count so the regression test
+        // asserts the retriever issues exactly one batch round-trip.
+        *self.batch_calls.lock().unwrap() += 1;
+        Ok(std::collections::HashMap::new())
     }
     async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
         Ok(false)

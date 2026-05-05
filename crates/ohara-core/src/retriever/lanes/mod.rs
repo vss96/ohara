@@ -15,6 +15,7 @@ use async_trait::async_trait;
 
 pub mod bm25_head_sym;
 pub mod bm25_hist_sym;
+pub mod bm25_sem_text;
 pub mod bm25_text;
 pub mod vec;
 
@@ -25,6 +26,11 @@ pub mod vec;
 pub enum LaneId {
     Vec,
     Bm25Text,
+    /// Plan 25: BM25 lane over `hunk.semantic_text` (the contextual
+    /// preamble + added-lines blob produced at index time by
+    /// `hunk_text::build`). Complements `Bm25Text` (raw `diff_text`);
+    /// both fuse via RRF.
+    Bm25SemText,
     Bm25HistSym,
     Bm25HeadSym,
 }
@@ -94,7 +100,8 @@ mod trait_object_tests {
     #[test]
     fn lane_id_variants_are_distinct() {
         assert_ne!(LaneId::Vec, LaneId::Bm25Text);
-        assert_ne!(LaneId::Bm25Text, LaneId::Bm25HistSym);
+        assert_ne!(LaneId::Bm25Text, LaneId::Bm25SemText);
+        assert_ne!(LaneId::Bm25SemText, LaneId::Bm25HistSym);
         assert_ne!(LaneId::Bm25HistSym, LaneId::Bm25HeadSym);
     }
 }
