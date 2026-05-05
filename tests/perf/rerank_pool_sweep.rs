@@ -283,10 +283,36 @@ async fn run_sweep_iteration(
     })
 }
 
+/// Pick the smallest pool whose `recall_at_5` is within 1% of the best
+/// observed AND whose `p95_ms` is within 1.5x of the smallest observed.
+/// "Smallest" is intentional: when multiple pools are on the same
+/// recall plateau, the smaller pool wins on cost.
+fn recommend_default(rows: &[SweepRow]) -> usize {
+    if rows.is_empty() {
+        return RankingWeights::default().rerank_top_k;
+    }
+    let best_recall_at_5 = rows
+        .iter()
+        .map(|r| r.recall_at_5)
+        .fold(0.0_f32, f32::max);
+    let smallest_p95 = rows
+        .iter()
+        .map(|r| r.p95_ms)
+        .fold(f32::INFINITY, f32::min);
+    let recall_floor = best_recall_at_5 - 0.01;
+    let p95_ceiling = smallest_p95 * 1.5;
+
+    rows.iter()
+        .filter(|r| r.recall_at_5 >= recall_floor && r.p95_ms <= p95_ceiling)
+        .map(|r| r.pool_size)
+        .min()
+        .unwrap_or(rows[0].pool_size)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "perf sweep; opt-in via `--ignored rerank_pool_sweep`"]
 async fn rerank_pool_sweep() -> Result<()> {
-    // Skeleton — body filled in by Tasks A.5 (recommend) and A.6 (e2e).
+    // Skeleton — body filled in by Task A.6 (end-to-end wiring).
     let _cases = load_golden()?;
     let _ = (POOL_SIZES, std::any::type_name::<SweepRow>());
     let _ = std::any::type_name::<RankingWeights>();
@@ -294,6 +320,61 @@ async fn rerank_pool_sweep() -> Result<()> {
     let _ = resolve_labels;
     let _ = build_pipeline_components;
     let _ = run_sweep_iteration;
+    let _ = recommend_default;
     let _: Option<Arc<()>> = None;
     Ok(())
+}
+
+#[cfg(test)]
+mod recommend_tests {
+    use super::*;
+
+    fn row(pool: usize, r5: f32, p95: f32) -> SweepRow {
+        SweepRow {
+            pool_size: pool,
+            cases: 10,
+            recall_at_1: 0.0,
+            recall_at_5: r5,
+            mrr: 0.0,
+            p50_ms: 10.0,
+            p95_ms: p95,
+        }
+    }
+
+    #[test]
+    fn picks_smallest_pool_on_recall_plateau() {
+        // 50, 100, 150 all sit on the same recall plateau; latency
+        // grows. Policy must pick the smallest. Latencies are chosen
+        // so the smallest qualifying pool clears the 1.5x p95 ceiling
+        // (smallest p95=50, ceiling=75, pool=50 has p95=70).
+        let rows = vec![
+            row(20, 0.80, 50.0),
+            row(50, 0.95, 70.0),
+            row(100, 0.95, 130.0),
+            row(150, 0.95, 200.0),
+        ];
+        assert_eq!(recommend_default(&rows), 50);
+    }
+
+    #[test]
+    fn rejects_pool_when_p95_blows_through_ceiling() {
+        // Best recall is at pool=200 but its p95 is 8x the smallest;
+        // the 1.5x ceiling rejects it. No pool clears both bars; policy
+        // falls back to rows[0].pool_size.
+        let rows = vec![
+            row(20, 0.80, 50.0),
+            row(50, 0.85, 70.0),
+            row(200, 1.00, 400.0),
+        ];
+        assert_eq!(recommend_default(&rows), 20);
+    }
+
+    #[test]
+    fn handles_empty_rows() {
+        let rows: Vec<SweepRow> = vec![];
+        assert_eq!(
+            recommend_default(&rows),
+            RankingWeights::default().rerank_top_k
+        );
+    }
 }
