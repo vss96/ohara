@@ -16,8 +16,19 @@ pub trait EmbeddingProvider: Send + Sync {
 /// Score `candidates` against `query`. Output length == `candidates.len()`;
 /// element `i` is the score for `candidates[i]`. Higher is better.
 ///
-/// Implementations MUST be order-preserving with respect to the input slice
-/// (i.e. the returned `Vec<f32>` aligns positionally with `candidates`).
+/// **Score domain:** unbounded `f32`. Implementations MAY return raw
+/// cross-encoder logits (the `fastembed::TextRerank` impl in
+/// `ohara-embed` does), which means scores CAN be negative for
+/// low-relevance pairs. Downstream consumers in `crate::retriever`
+/// sigmoid-normalise the score before any multiplicative combination
+/// (see plan-22). New implementations MUST NOT silently apply their
+/// own normalisation that would clamp the score into `[0, 1]`, since
+/// that would lose the relative-ordering signal cross-encoders
+/// produce in the negative range.
+///
+/// Implementations MUST be order-preserving with respect to the input
+/// slice (i.e. the returned `Vec<f32>` aligns positionally with
+/// `candidates`).
 #[async_trait]
 pub trait RerankProvider: Send + Sync {
     async fn rerank(&self, query: &str, candidates: &[&str]) -> Result<Vec<f32>>;
