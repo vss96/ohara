@@ -336,10 +336,7 @@ impl Retriever {
         //    semantic-text) — one extra reciprocal contribution per
         //    hunk that surfaces in the new lane.
         let fused: Vec<HunkId> = timed_phase("rrf", async {
-            reciprocal_rank_fusion(
-                &[ranking_vec, ranking_fts, ranking_sym, ranking_sem],
-                60,
-            )
+            reciprocal_rank_fusion(&[ranking_vec, ranking_fts, ranking_sym, ranking_sem], 60)
         })
         .await;
         let trimmed: Vec<HunkId> = fused

@@ -1,6 +1,6 @@
 # Contextual BM25 Lane Wiring — Design Note
 
-> **Status:** draft
+> **Status:** implemented
 > **Drives:** `docs/superpowers/plans/2026-05-05-ohara-plan-25-contextual-bm25-lane.md`
 > **Date:** 2026-05-05
 
@@ -137,3 +137,19 @@ goes into the design follow-up.
 - Tuning per-lane RRF weights (the unweighted RRF in `query.rs:67-100`
   treats every lane equally; weighting is a future optimisation).
 - Bumping `rerank_top_k` — covered by plan-23.
+
+## Outcome
+
+Plan 25 shipped enabled-by-default on every profile. Plan-10
+context-engine eval after wiring (run on the post-plan-24 base, with
+the new lane on every profile):
+
+```
+{"cases":8,"recall_at_1":0.875,"recall_at_5":1.0,"mrr":0.9375,"ndcg_lite":0.9538662191964322,"p50_ms":893,"p95_ms":1121,"failed_ids":[]}
+```
+
+Both gating conditions hold (`recall_at_5 == 1.0`, `mrr ≥ 0.80`), so
+the lane stays enabled. There is no checked-in pre-change baseline file
+in `tests/perf/baselines/` to diff against; the published plan-10
+thresholds (`recall_at_5 == 1.0`, `mrr >= 0.80`) are the comparison
+basis.
