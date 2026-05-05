@@ -413,6 +413,18 @@ mod tests {
     }
 
     #[test]
+    fn ranking_weights_default_rerank_pool_matches_plan_23_baseline() {
+        // plan-23 sweep concluded the recommended pool is 20 (smallest
+        // pool whose recall_at_5 is within 1% of the best observed and
+        // whose p95_ms is within 1.5x of the smallest observed). Pin
+        // the value so a future drift triggers a CI failure and forces
+        // re-running the sweep. See:
+        //   tests/perf/baselines/rerank_pool_sweep.jsonl
+        //   docs/superpowers/plans/2026-05-05-ohara-plan-23-rerank-pool-sizing.md
+        assert_eq!(RankingWeights::default().rerank_top_k, 20);
+    }
+
+    #[test]
     fn truncate_marks_truncation_for_long_diffs() {
         let big = (0..200)
             .map(|i| format!("line {}\n", i))
