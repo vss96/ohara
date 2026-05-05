@@ -136,4 +136,20 @@ mod tests {
         assert!(names.contains(&"Foo"));
         assert!(names.contains(&"beta"));
     }
+
+    #[test]
+    fn extracts_class_with_no_methods() {
+        // `class Foo: pass` and a class with only attributes both need
+        // to produce a Class symbol — earlier the class capture was
+        // nested inside the function_definition body pattern, so
+        // classes without methods were silently dropped.
+        let src = "class Empty:\n    pass\n\
+                   class Dto:\n    x = 0\n    y = 1\n";
+        let syms = extract("a.py", src, "deadbeef").unwrap();
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"Empty"), "Empty class missing: {names:?}");
+        assert!(names.contains(&"Dto"), "Dto class missing: {names:?}");
+        let empty = syms.iter().find(|s| s.name == "Empty").unwrap();
+        assert!(matches!(empty.kind, ohara_core::types::SymbolKind::Class));
+    }
 }
