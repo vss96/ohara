@@ -206,3 +206,72 @@ fn str_to_symbol_kind(s: &str) -> Option<SymbolKind> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    use ohara_core::types::{AttributionKind, HunkSymbol};
+    use rusqlite::Connection;
+
+    /// Build an in-memory schema with just the columns `hunk_symbol`
+    /// needs. The `hunk` and `commit_record` foreign-key targets are
+    /// stubbed because `get_for_hunks` does not join.
+    fn schema(c: &Connection) {
+        c.execute_batch(
+            "CREATE TABLE hunk_symbol (
+                hunk_id          INTEGER NOT NULL,
+                symbol_kind      TEXT NOT NULL,
+                symbol_name      TEXT NOT NULL,
+                qualified_name   TEXT,
+                attribution_kind TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+    }
+
+    fn insert(c: &Connection, hunk_id: i64, name: &str, kind: AttributionKind) {
+        c.execute(
+            "INSERT INTO hunk_symbol \
+                 (hunk_id, symbol_kind, symbol_name, qualified_name, attribution_kind) \
+             VALUES (?1, 'function', ?2, NULL, ?3)",
+            rusqlite::params![hunk_id, name, kind.as_str()],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn get_for_hunks_groups_results_by_hunk_id_in_a_single_query() {
+        let c = Connection::open_in_memory().unwrap();
+        schema(&c);
+        insert(&c, 10, "alpha", AttributionKind::ExactSpan);
+        insert(&c, 10, "beta", AttributionKind::HunkHeader);
+        insert(&c, 11, "gamma", AttributionKind::ExactSpan);
+        // 12 has no rows — must appear as an empty Vec, not be missing.
+
+        let got = get_for_hunks(&c, &[10_i64, 11, 12]).unwrap();
+        assert_eq!(got.len(), 3, "every requested hunk_id must be represented");
+
+        let h10: &Vec<HunkSymbol> = got.get(&10).expect("hunk 10");
+        assert_eq!(h10.len(), 2);
+        // Plan 11 ordering: ExactSpan before HunkHeader, then symbol_name ASC.
+        assert_eq!(h10[0].name, "alpha");
+        assert_eq!(h10[0].attribution, AttributionKind::ExactSpan);
+        assert_eq!(h10[1].name, "beta");
+        assert_eq!(h10[1].attribution, AttributionKind::HunkHeader);
+
+        let h11: &Vec<HunkSymbol> = got.get(&11).expect("hunk 11");
+        assert_eq!(h11.len(), 1);
+        assert_eq!(h11[0].name, "gamma");
+
+        let h12: &Vec<HunkSymbol> = got.get(&12).expect("hunk 12");
+        assert!(h12.is_empty(), "no rows ⇒ empty Vec, never missing");
+    }
+
+    #[test]
+    fn get_for_hunks_returns_empty_map_for_empty_input() {
+        let c = Connection::open_in_memory().unwrap();
+        schema(&c);
+        let got = get_for_hunks(&c, &[]).unwrap();
+        assert!(got.is_empty(), "empty input ⇒ empty map, no SQL roundtrip");
+    }
+}
