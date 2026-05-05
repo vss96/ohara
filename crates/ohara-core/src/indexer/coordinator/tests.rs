@@ -61,6 +61,8 @@ impl EmbeddingProvider for ZeroEmbedder {
 struct SpyStorage {
     put_commit_calls: Mutex<Vec<String>>,
     put_hunk_totals: Mutex<Vec<usize>>,
+    /// Every `file_path` from every `put_hunks` call, in order.
+    put_hunk_paths: Mutex<Vec<String>>,
     watermark: Mutex<Option<String>>,
     seen_commits: Mutex<Vec<String>>,
 }
@@ -99,6 +101,10 @@ impl Storage for SpyStorage {
     }
     async fn put_hunks(&self, _: &RepoId, rows: &[StorageHunkRecord]) -> Result<()> {
         self.put_hunk_totals.lock().unwrap().push(rows.len());
+        let mut paths = self.put_hunk_paths.lock().unwrap();
+        for row in rows {
+            paths.push(row.hunk.file_path.clone());
+        }
         Ok(())
     }
     async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> Result<()> {
@@ -308,5 +314,152 @@ async fn coordinator_resume_from_attributed_hunks_directly() {
         *storage.put_hunk_totals.lock().unwrap(),
         vec![1],
         "partial-pipeline run must persist the hunk"
+    );
+}
+
+#[tokio::test]
+async fn coordinator_with_ignore_filter_field_is_set() {
+    // Plan 26: builder smoke test — `with_ignore_filter` accepts an
+    // `Arc<dyn IgnoreFilter>` and returns `Self`. Behavioural coverage
+    // (mixed-path filtering, 100%-ignored watermark advance) lives in
+    // `ignored_paths_drop_from_hunk_records_before_persist` and
+    // `fully_ignored_commit_advances_watermark_with_zero_persisted_rows`.
+    use crate::ignore::LayeredIgnore;
+
+    let storage = Arc::new(SpyStorage::default());
+    let embedder = Arc::new(ZeroEmbedder { dim: 4 });
+
+    let filter: Arc<dyn crate::IgnoreFilter> = Arc::new(LayeredIgnore::builtins_only());
+    let coord = Coordinator::new(storage, embedder).with_ignore_filter(filter);
+    let _ = coord;
+}
+
+#[tokio::test]
+async fn ignored_paths_drop_from_hunk_records_before_persist() {
+    // Plan 26 Task C.2: when the filter ignores `vendor/foo.c`, the
+    // pipeline must NOT persist a hunk for that path. The same
+    // commit's `src/main.rs` hunk must still be persisted.
+    use crate::ignore::LayeredIgnore;
+    use crate::types::ChangeKind;
+
+    let storage = Arc::new(SpyStorage::default());
+    let embedder = Arc::new(ZeroEmbedder { dim: 4 });
+
+    // Two hunks in one commit: one real, one vendor.
+    let source = SingleCommitSource {
+        sha: "abc".into(),
+        hunks: vec![
+            Hunk {
+                commit_sha: "abc".into(),
+                file_path: "src/main.rs".into(),
+                language: None,
+                change_kind: ChangeKind::Added,
+                diff_text: "+fn main() {}\n".into(),
+            },
+            Hunk {
+                commit_sha: "abc".into(),
+                file_path: "vendor/foo.c".into(),
+                language: None,
+                change_kind: ChangeKind::Added,
+                diff_text: "+int main(void) { return 0; }\n".into(),
+            },
+        ],
+    };
+
+    // Filter that ignores `vendor/` paths.
+    let filter: Arc<dyn crate::IgnoreFilter> =
+        Arc::new(LayeredIgnore::from_strings(&[], "", "vendor/\n"));
+    let coord = Coordinator::new(storage.clone(), embedder).with_ignore_filter(filter);
+
+    let repo = RepoId::from_parts("sha", "/repo");
+    coord.run(&repo, &source, &NoopSymbolSource).await.unwrap();
+
+    // Commit must still be persisted (non-ignored hunk survived).
+    assert_eq!(
+        *storage.put_commit_calls.lock().unwrap(),
+        vec!["abc"],
+        "commit must be persisted when at least one hunk survives the filter"
+    );
+
+    // Exactly one hunk must reach storage, and it must be src/main.rs.
+    let paths = storage.put_hunk_paths.lock().unwrap().clone();
+    assert_eq!(
+        paths.len(),
+        1,
+        "only one hunk must survive the ignore filter"
+    );
+    assert_eq!(
+        paths[0], "src/main.rs",
+        "the surviving hunk must be src/main.rs, not vendor/foo.c"
+    );
+}
+
+#[tokio::test]
+async fn fully_ignored_commit_advances_watermark_with_zero_persisted_rows() {
+    // Plan 26 Task C.3: a commit whose changed paths are 100%
+    // ignored must (a) persist zero hunks, (b) write no commit
+    // metadata row, (c) still advance the coordinator's
+    // `latest_sha` so `commits_behind_head` decreases on next run.
+    use crate::ignore::LayeredIgnore;
+    use crate::types::ChangeKind;
+
+    let storage = Arc::new(SpyStorage::default());
+    let embedder = Arc::new(ZeroEmbedder { dim: 4 });
+
+    // One commit whose only changed paths are under vendor/ — 100% ignored.
+    let source = SingleCommitSource {
+        sha: "deadbeef".into(),
+        hunks: vec![
+            Hunk {
+                commit_sha: "deadbeef".into(),
+                file_path: "vendor/a.c".into(),
+                language: None,
+                change_kind: ChangeKind::Added,
+                diff_text: "+int a(void) { return 1; }\n".into(),
+            },
+            Hunk {
+                commit_sha: "deadbeef".into(),
+                file_path: "vendor/b.c".into(),
+                language: None,
+                change_kind: ChangeKind::Added,
+                diff_text: "+int b(void) { return 2; }\n".into(),
+            },
+        ],
+    };
+
+    // Filter that ignores all `vendor/` paths.
+    let filter: Arc<dyn crate::IgnoreFilter> =
+        Arc::new(LayeredIgnore::from_strings(&[], "", "vendor/\n"));
+    let coord = Coordinator::new(storage.clone(), embedder).with_ignore_filter(filter);
+
+    let repo = RepoId::from_parts("sha", "/repo");
+    let result = coord
+        .run_timed(&repo, &source, &NoopSymbolSource)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.new_commits, 0,
+        "no new commit rows for a 100%-ignored commit"
+    );
+    assert_eq!(result.new_hunks, 0, "no hunks for a 100%-ignored commit");
+    assert_eq!(
+        result.latest_sha.as_deref(),
+        Some("deadbeef"),
+        "watermark must still advance to the skipped commit's SHA"
+    );
+
+    // SpyStorage must have seen zero persisted commit rows.
+    let commit_calls = storage.put_commit_calls.lock().unwrap().clone();
+    assert!(
+        commit_calls.is_empty(),
+        "put_commit must not be called for a 100%-ignored commit; got {commit_calls:?}"
+    );
+
+    // SpyStorage must have seen zero persisted hunk paths.
+    let persisted = storage.put_hunk_paths.lock().unwrap().clone();
+    assert!(
+        persisted.is_empty(),
+        "expected zero persisted hunks; got {persisted:?}"
     );
 }

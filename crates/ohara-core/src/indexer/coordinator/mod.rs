@@ -56,6 +56,7 @@ pub struct Coordinator {
     embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
     embed_batch: usize,
     progress: Arc<dyn ProgressSink>,
+    ignore_filter: Option<Arc<dyn crate::IgnoreFilter>>,
 }
 
 impl Coordinator {
@@ -70,6 +71,7 @@ impl Coordinator {
             embedder,
             embed_batch: 32,
             progress: Arc::new(NullProgress),
+            ignore_filter: None,
         }
     }
 
@@ -84,6 +86,16 @@ impl Coordinator {
     /// pipeline. Defaults to [`NullProgress`].
     pub fn with_progress(mut self, progress: Arc<dyn ProgressSink>) -> Self {
         self.progress = progress;
+        self
+    }
+
+    /// Wire a [`crate::ignore::LayeredIgnore`] (or any `IgnoreFilter`
+    /// impl). When set, the per-commit pipeline drops `HunkRecord`s
+    /// whose path matches the filter, and skips a commit entirely when
+    /// 100% of its changed paths matched (advancing the watermark in
+    /// either case). Plumbing-only in C.1; behaviour added in C.2.
+    pub fn with_ignore_filter(mut self, f: Arc<dyn crate::IgnoreFilter>) -> Self {
+        self.ignore_filter = Some(f);
         self
     }
 
@@ -217,8 +229,24 @@ impl Coordinator {
     ) -> Result<()> {
         // Stage 2: hunk chunk (timed).
         let extract_start = Instant::now();
-        let records = HunkChunkStage::run(commit_source, commit).await?;
+        let mut records = HunkChunkStage::run(commit_source, commit).await?;
         result.timings.diff_extract_ms += extract_start.elapsed().as_millis() as u64;
+
+        // Plan 26 Task C.2: drop ignored paths before downstream stages.
+        // Mixed commits keep their non-ignored hunks; pure-ignored
+        // commits are caught by the `paths_kept == 0` branch below.
+        let paths_total = records.len();
+        if let Some(filter) = self.ignore_filter.as_ref() {
+            records.retain(|r| !filter.is_ignored(&r.file_path));
+        }
+        let paths_kept = records.len();
+        if paths_total > 0 && paths_kept == 0 {
+            tracing::debug!(
+                sha = %commit.commit_sha,
+                "plan-26: commit has 100% ignored paths; skipping (watermark advances)"
+            );
+            return Ok(());
+        }
 
         // Accumulate diff metrics for inflation-ratio diagnostic.
         for rec in &records {

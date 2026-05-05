@@ -357,7 +357,10 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         // HunkHeader-only attribution for files the parser can't
         // reach (binary blobs, unsupported languages); see
         // crates/ohara-core/src/hunk_attribution.rs.
-        .with_atomic_symbol_extractor(Arc::new(ohara_parse::TreeSitterAtomicExtractor));
+        .with_atomic_symbol_extractor(Arc::new(ohara_parse::TreeSitterAtomicExtractor))
+        // Plan 26: load `.oharaignore` / `.gitattributes` from the repo
+        // root so the indexer respects the ignore filter automatically.
+        .with_repo_root(canonical.clone());
     let report = indexer
         .run(&repo_id, &commit_source, &symbol_source)
         .await?;

@@ -134,6 +134,10 @@ pub struct Indexer {
     /// test fakes don't have to wire tree-sitter just to run the
     /// indexer.
     symbol_extractor: Arc<dyn AtomicSymbolExtractor>,
+    /// Repo root used to load `.oharaignore` / `.gitattributes`. When
+    /// `None`, the coordinator runs without an ignore filter (today's
+    /// behaviour). Plan 26.
+    repo_root: Option<std::path::PathBuf>,
 }
 
 impl Indexer {
@@ -146,6 +150,7 @@ impl Indexer {
             progress: Arc::new(NullProgress),
             runtime_metadata: None,
             symbol_extractor: Arc::new(NullAtomicSymbolExtractor),
+            repo_root: None,
         }
     }
 
@@ -197,6 +202,13 @@ impl Indexer {
         self
     }
 
+    /// Set the repo root from which `LayeredIgnore::load` reads
+    /// `.gitattributes` and `.oharaignore`. Plan 26.
+    pub fn with_repo_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.repo_root = Some(root.into());
+        self
+    }
+
     /// Run a (full or incremental) indexing pass for `repo_id`.
     /// `commit_source` and `symbol_source` are wired by the caller.
     ///
@@ -217,9 +229,17 @@ impl Indexer {
         // Issue #29 — without this thread-through the bar only got
         // `start` / `commit_done(total, total)` / `finish` called at
         // the end of the run, so the user saw no per-commit motion.
-        let coordinator = Coordinator::new(self.storage.clone(), self.embedder.clone())
+        let mut coordinator = Coordinator::new(self.storage.clone(), self.embedder.clone())
             .with_embed_batch(self.embed_batch)
             .with_progress(self.progress.clone());
+        // Plan 26: when repo_root is set, build a LayeredIgnore filter
+        // and thread it to the Coordinator. Best-effort load — a missing
+        // `.oharaignore` is fine (LayeredIgnore::load treats ENOENT as
+        // empty).
+        if let Some(root) = self.repo_root.as_ref() {
+            let filter = crate::ignore::LayeredIgnore::load(root)?;
+            coordinator = coordinator.with_ignore_filter(std::sync::Arc::new(filter));
+        }
 
         let result = coordinator
             .run_timed_with_extractor(
@@ -1329,6 +1349,190 @@ mod phase_timing_tests {
             calls.load(Ordering::SeqCst),
             1,
             "extractor must be called exactly once for the in-bounds hunk"
+        );
+    }
+}
+
+#[cfg(test)]
+mod plan_26_repo_root_tests {
+    use super::*;
+
+    #[test]
+    fn indexer_with_repo_root_stores_path() {
+        // Plan 26 Task C.4: builder stores the repo root.
+        // Uses the same fake storage/embedder pattern as phase_timing_tests.
+        use crate::query::IndexStatus;
+        use crate::storage::{CommitRecord, HunkRecord};
+        use crate::types::{CommitMeta, Hunk, RepoId, Symbol};
+        use async_trait::async_trait;
+        use std::collections::HashSet;
+        use std::sync::Mutex;
+
+        struct MinStorage;
+
+        #[async_trait]
+        impl crate::Storage for MinStorage {
+            async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> crate::Result<()> {
+                Ok(())
+            }
+            async fn get_index_status(&self, _: &RepoId) -> crate::Result<IndexStatus> {
+                Ok(IndexStatus {
+                    last_indexed_commit: None,
+                    commits_behind_head: 0,
+                    indexed_at: None,
+                })
+            }
+            async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> crate::Result<()> {
+                Ok(())
+            }
+            async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> crate::Result<()> {
+                Ok(())
+            }
+            async fn commit_exists(&self, _: &str) -> crate::Result<bool> {
+                Ok(false)
+            }
+            async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> crate::Result<()> {
+                Ok(())
+            }
+            async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> crate::Result<()> {
+                Ok(())
+            }
+            async fn clear_head_symbols(&self, _: &RepoId) -> crate::Result<()> {
+                Ok(())
+            }
+            async fn knn_hunks(
+                &self,
+                _: &RepoId,
+                _: &[f32],
+                _: u8,
+                _: Option<&str>,
+                _: Option<i64>,
+            ) -> crate::Result<Vec<crate::HunkHit>> {
+                Ok(vec![])
+            }
+            async fn bm25_hunks_by_text(
+                &self,
+                _: &RepoId,
+                _: &str,
+                _: u8,
+                _: Option<&str>,
+                _: Option<i64>,
+            ) -> crate::Result<Vec<crate::HunkHit>> {
+                Ok(vec![])
+            }
+            async fn bm25_hunks_by_semantic_text(
+                &self,
+                _: &RepoId,
+                _: &str,
+                _: u8,
+                _: Option<&str>,
+                _: Option<i64>,
+            ) -> crate::Result<Vec<crate::HunkHit>> {
+                Ok(vec![])
+            }
+            async fn bm25_hunks_by_symbol_name(
+                &self,
+                _: &RepoId,
+                _: &str,
+                _: u8,
+                _: Option<&str>,
+                _: Option<i64>,
+            ) -> crate::Result<Vec<crate::HunkHit>> {
+                Ok(vec![])
+            }
+            async fn bm25_hunks_by_historical_symbol(
+                &self,
+                _: &RepoId,
+                _: &str,
+                _: u8,
+                _: Option<&str>,
+                _: Option<i64>,
+            ) -> crate::Result<Vec<crate::HunkHit>> {
+                Ok(vec![])
+            }
+            async fn get_hunk_symbols(
+                &self,
+                _: &RepoId,
+                _: crate::storage::HunkId,
+            ) -> crate::Result<Vec<crate::types::HunkSymbol>> {
+                Ok(vec![])
+            }
+            async fn get_hunk_symbols_batch(
+                &self,
+                _: &RepoId,
+                _: &[crate::storage::HunkId],
+            ) -> crate::Result<
+                std::collections::HashMap<crate::storage::HunkId, Vec<crate::types::HunkSymbol>>,
+            > {
+                Ok(std::collections::HashMap::new())
+            }
+            async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
+                Ok(false)
+            }
+            async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
+                Ok(())
+            }
+            async fn get_commit(&self, _: &RepoId, _: &str) -> crate::Result<Option<CommitMeta>> {
+                Ok(None)
+            }
+            async fn get_hunks_for_file_in_commit(
+                &self,
+                _: &RepoId,
+                _: &str,
+                _: &str,
+            ) -> crate::Result<Vec<Hunk>> {
+                Ok(vec![])
+            }
+            async fn get_neighboring_file_commits(
+                &self,
+                _: &RepoId,
+                _: &str,
+                _: &str,
+                _: u8,
+                _: u8,
+            ) -> crate::Result<Vec<(u32, CommitMeta)>> {
+                Ok(vec![])
+            }
+            async fn get_index_metadata(
+                &self,
+                _: &RepoId,
+            ) -> crate::Result<crate::index_metadata::StoredIndexMetadata> {
+                Ok(crate::index_metadata::StoredIndexMetadata::default())
+            }
+            async fn put_index_metadata(
+                &self,
+                _: &RepoId,
+                _: &[(String, String)],
+            ) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        struct MinEmbedder;
+
+        #[async_trait]
+        impl crate::EmbeddingProvider for MinEmbedder {
+            fn dimension(&self) -> usize {
+                4
+            }
+            fn model_id(&self) -> &str {
+                "min"
+            }
+            async fn embed_batch(&self, texts: &[String]) -> crate::Result<Vec<Vec<f32>>> {
+                Ok(texts.iter().map(|_| vec![0.0_f32; 4]).collect())
+            }
+        }
+
+        let _ = (HashSet::<String>::new(), Mutex::new(()));
+
+        let i = Indexer::new(
+            std::sync::Arc::new(MinStorage),
+            std::sync::Arc::new(MinEmbedder),
+        )
+        .with_repo_root(std::path::PathBuf::from("/tmp/example"));
+        assert_eq!(
+            i.repo_root.as_deref(),
+            Some(std::path::Path::new("/tmp/example"))
         );
     }
 }

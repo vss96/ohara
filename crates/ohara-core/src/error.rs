@@ -23,6 +23,9 @@ pub enum OhraError {
     #[error("config error: {0}")]
     Config(String),
 
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

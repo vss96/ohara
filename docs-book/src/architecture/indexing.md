@@ -36,6 +36,27 @@ A full pass, in order:
 7. **Final watermark advance.** Set `last_indexed_commit` to the
    newest commit walked.
 
+## Path-aware indexing — `.oharaignore`
+
+`ohara` consults a layered ignore filter at index time. Three sources
+are merged, with the user layer winning so `!negate` patterns work:
+
+1. **Built-in defaults** (compiled into `ohara-core`) — lockfiles,
+   `node_modules/`, `target/`, `vendor/`, `dist/`, etc.
+2. **`.gitattributes`** — paths flagged `linguist-generated=true` or
+   `linguist-vendored=true`.
+3. **`.oharaignore`** at repo root — gitignore-syntax, team-shared.
+
+Run `ohara plan` to survey a repo's commit-share hotmap and write a
+suggested `.oharaignore`. The planner runs a paths-only libgit2 walk
+(seconds-to-minutes even on giant repos), groups commits by top-level
+directory, and proposes ignoring high-share directories outside a
+small documentation allowlist.
+
+When a commit's changed paths are 100% ignored, the indexer skips it
+entirely (no rows written) but advances `last_indexed_commit` past it,
+so `--incremental` runs work normally.
+
 ## `--incremental` fast path
 
 Used by the [`ohara init`](../cli/init.md) post-commit hook and any

@@ -152,6 +152,12 @@ The hook runs `ohara index --incremental` after every commit. It's safe to
 re-run `ohara init` (idempotent) and the hook fails closed if the `ohara`
 binary isn't on `PATH` (won't block your commits).
 
+For large repos (Linux-class, 100k+ commits), run `ohara plan` first to
+write a `.oharaignore` that drops mechanical noise (vendored deps,
+generated code, lockfiles). This is also where the `--features coreml`
+(Apple) / `--features cuda` (NVIDIA Linux) builds pay off — embedding
+on the accelerator is 3-5x faster.
+
 ## Upgrading & index compatibility
 
 Each ohara release records the embedder, chunker, and parser versions it

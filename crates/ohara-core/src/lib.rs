@@ -10,6 +10,7 @@ pub mod error;
 pub mod explain;
 pub mod hunk_attribution;
 pub mod hunk_text;
+pub mod ignore;
 pub mod index_metadata;
 pub mod indexer;
 pub mod paths;
@@ -24,6 +25,7 @@ pub use diff_text::{count_lines, truncate_diff, DIFF_EXCERPT_MAX_LINES};
 pub use embed::EmbeddingProvider;
 pub use error::{OhraError, Result};
 pub use explain::{BlameRange, BlameSource, ExplainHit, ExplainMeta, ExplainQuery};
+pub use ignore::{IgnoreFilter, LayeredIgnore, BUILT_IN_DEFAULTS};
 pub use index_metadata::{
     compose_hint, runtime_metadata_from, CompatibilityStatus, RuntimeIndexMetadata,
     StoredIndexMetadata,
