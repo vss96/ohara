@@ -303,19 +303,25 @@ impl Retriever {
         //    used to mean "symbols defined in HEAD that share the
         //    file"); under plan 11 it carries actual touched-symbol
         //    names. Renaming will land in a later breaking release.
-        //    Per-hit lookup is bounded by k (≤ 20) so sequential
-        //    calls are cheap; batching is a future optimisation.
+        //    Plan 24: one batch call rather than N sequential per-hit
+        //    round-trips. Storage seeds every requested hunk_id in the
+        //    returned map (with an empty Vec when no attribution rows
+        //    exist), so the subsequent `.get(&id).cloned().unwrap_or_default()`
+        //    call below remains correct without further branching.
+        let hunk_ids: Vec<HunkId> = hits.iter().map(|h| h.hunk_id).collect();
         let symbols_by_hunk: std::collections::HashMap<HunkId, Vec<String>> =
             timed_phase("hydrate_symbols", async {
-                let mut acc: std::collections::HashMap<HunkId, Vec<String>> =
-                    std::collections::HashMap::new();
-                for h in &hits {
-                    let attrs = self.storage.get_hunk_symbols(repo_id, h.hunk_id).await?;
-                    if !attrs.is_empty() {
-                        acc.insert(h.hunk_id, attrs.into_iter().map(|a| a.name).collect());
-                    }
-                }
-                Ok::<_, crate::OhraError>(acc)
+                let attrs_map = self
+                    .storage
+                    .get_hunk_symbols_batch(repo_id, &hunk_ids)
+                    .await?;
+                Ok::<_, crate::OhraError>(
+                    attrs_map
+                        .into_iter()
+                        .filter(|(_, v)| !v.is_empty())
+                        .map(|(id, v)| (id, v.into_iter().map(|a| a.name).collect()))
+                        .collect(),
+                )
             })
             .await?;
 
