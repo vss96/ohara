@@ -64,6 +64,21 @@ impl LayeredIgnore {
             user: Gitignore::empty(),
         }
     }
+
+    /// Test/programmatic constructor: pass the three layers as in-memory
+    /// strings. Used by unit tests and by `LayeredIgnore::load`.
+    pub fn from_strings(builtins: &[&str], gitattributes: &str, user_oharaignore: &str) -> Self {
+        let root = Path::new("/");
+        let builtins = build_gitignore_from_patterns(root, builtins)
+            .expect("invariant: built-in defaults are valid gitignore patterns");
+        let gitattributes = build_gitignore_from_gitattributes(root, gitattributes);
+        let user = build_gitignore_from_lines(root, user_oharaignore);
+        Self {
+            builtins,
+            gitattributes,
+            user,
+        }
+    }
 }
 
 impl IgnoreFilter for LayeredIgnore {
@@ -95,6 +110,51 @@ fn build_gitignore_from_patterns(
         b.add_line(None, p)?;
     }
     b.build()
+}
+
+/// Parse a `.gitattributes` string and emit a `Gitignore` matcher
+/// covering paths flagged `linguist-generated=true` or
+/// `linguist-vendored=true`. Lines without those attributes are
+/// ignored. Patterns are reused verbatim — gitattributes path patterns
+/// are gitignore-compatible.
+fn build_gitignore_from_gitattributes(root: &Path, contents: &str) -> Gitignore {
+    let mut b = GitignoreBuilder::new(root);
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut tokens = line.split_whitespace();
+        let pattern = match tokens.next() {
+            Some(p) => p,
+            None => continue,
+        };
+        let flags_active = tokens.any(|t| {
+            t == "linguist-generated=true"
+                || t == "linguist-generated"
+                || t == "linguist-vendored=true"
+                || t == "linguist-vendored"
+        });
+        if !flags_active {
+            continue;
+        }
+        // gitattributes wildcards are gitignore-compatible.
+        let _ = b.add_line(None, pattern);
+    }
+    b.build().unwrap_or_else(|_| Gitignore::empty())
+}
+
+/// Parse a `.oharaignore` (gitignore-syntax) string into a matcher.
+fn build_gitignore_from_lines(root: &Path, contents: &str) -> Gitignore {
+    let mut b = GitignoreBuilder::new(root);
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let _ = b.add_line(None, line);
+    }
+    b.build().unwrap_or_else(|_| Gitignore::empty())
 }
 
 #[cfg(test)]
@@ -131,5 +191,32 @@ mod tests {
         let f = LayeredIgnore::builtins_only();
         assert!(!f.is_ignored("src/main.rs"));
         assert!(!f.is_ignored("crates/ohara-core/src/lib.rs"));
+    }
+
+    #[test]
+    fn gitattributes_linguist_generated_is_ignored() {
+        // Plan 26 Task A.4: a path flagged `linguist-generated=true` in
+        // .gitattributes must be ignored even if the user has no
+        // .oharaignore.
+        let attrs = "src/generated.rs linguist-generated=true\n";
+        let f = LayeredIgnore::from_strings(BUILT_IN_DEFAULTS, attrs, "");
+        assert!(f.is_ignored("src/generated.rs"));
+    }
+
+    #[test]
+    fn gitattributes_linguist_vendored_is_ignored() {
+        let attrs = "third_party/** linguist-vendored=true\n";
+        let f = LayeredIgnore::from_strings(BUILT_IN_DEFAULTS, attrs, "");
+        assert!(f.is_ignored("third_party/foo/bar.c"));
+    }
+
+    #[test]
+    fn gitattributes_unrelated_attribute_is_not_a_signal() {
+        // Plan 26 Task A.4: only linguist-generated and linguist-vendored
+        // affect the ignore-set. `text=auto` etc. must NOT mark a path
+        // as ignored.
+        let attrs = "src/foo.rs text=auto\n";
+        let f = LayeredIgnore::from_strings(BUILT_IN_DEFAULTS, attrs, "");
+        assert!(!f.is_ignored("src/foo.rs"));
     }
 }
