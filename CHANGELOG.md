@@ -8,6 +8,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-05-05
+
+### Added
+
+- TypeScript and JavaScript language support (plans 17 + 18) — tree-sitter
+  parsers for `.ts` / `.tsx` / `.js` / `.jsx` / `.mjs` / `.cjs`, with the
+  AST sibling-merge chunker tuned for both ([bace206](https://github.com/vss96/ohara/commit/bace206)) ([#19](https://github.com/vss96/ohara/pull/19))
+
+### Changed
+
+- **Indexer 5-stage pipeline (plan-19):** the indexer is now decomposed
+  into discrete `walk → chunk → embed → attribute → write` stages with
+  resume-agnostic semantics — a crashed pass replays cleanly without
+  duplicating work ([e2ebfd8](https://github.com/vss96/ohara/commit/e2ebfd8)) ([#17](https://github.com/vss96/ohara/pull/17))
+- **Retriever lanes + `ScoreRefiner` trait (plan-20):** the retriever
+  pipeline split into composable lanes (vector KNN, BM25 hunk text, BM25
+  symbol name) feeding a chain of `ScoreRefiner` impls (RRF, cross-encoder
+  rerank, recency) ([a4e9ccf](https://github.com/vss96/ohara/commit/a4e9ccf)) ([#15](https://github.com/vss96/ohara/pull/15))
+- **Explain hydrator + `ContentHash` + BlameCache wiring (plan-21):**
+  `explain_change` blame computation and result hydration are now
+  independently testable; daemon-warm calls skip `Blamer::blame_range`
+  when the file's HEAD content hasn't changed ([8127ac0](https://github.com/vss96/ohara/commit/8127ac0)) ([#16](https://github.com/vss96/ohara/pull/16))
+- **Ranking improvements re-ported onto the new retriever (plans 22–25):**
+  recency formula fix (multiplicative against bounded sigmoid rerank),
+  rerank pool sized to the plan-23 baseline (k=20), per-lane gate with
+  batched symbol resolution, contextual BM25 lane ([4b9d3db](https://github.com/vss96/ohara/commit/4b9d3db)) ([#25](https://github.com/vss96/ohara/pull/25))
+- Post-plan-16 cleanup: `compose_hint` consolidation, IPC stub refresh,
+  `spawn_daemon` ergonomics, `RankingWeights` exposure ([5830e9c](https://github.com/vss96/ohara/commit/5830e9c)) ([#13](https://github.com/vss96/ohara/pull/13))
+- CI: switch to `Swatinem/rust-cache` + `cargo-nextest`, drop the
+  redundant `cargo build` step ([8bf15ee](https://github.com/vss96/ohara/commit/8bf15ee)) ([#18](https://github.com/vss96/ohara/pull/18))
+
+### Fixed
+
+- Python: extract classes that have no methods ([e5355ef](https://github.com/vss96/ohara/commit/e5355ef)) ([#24](https://github.com/vss96/ohara/pull/24))
+- JavaScript / TypeScript: extract classes that have no methods ([e4c324a](https://github.com/vss96/ohara/commit/e4c324a)) ([#20](https://github.com/vss96/ohara/pull/20))
+
+### Documentation
+
+- Plan-18 tree-sitter modernization ([e3cd34b](https://github.com/vss96/ohara/commit/e3cd34b)) ([#12](https://github.com/vss96/ohara/pull/12))
+
 ## [0.7.5] - 2026-05-04
 
 ### Added
