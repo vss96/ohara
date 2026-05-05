@@ -168,3 +168,47 @@ fn pure_vendor_commit_advances_watermark_with_zero_rows() {
         "commits_behind_head should be 0; status:\n{stdout}"
     );
 }
+
+#[test]
+#[ignore = "downloads the embedding model on first run; opt in with --include-ignored"]
+fn no_oharaignore_indexes_all_paths_unchanged() {
+    // Plan 26 regression: when no `.oharaignore` exists at the repo
+    // root, the indexer's behaviour matches today's (every changed
+    // file is indexed). Built-in defaults still apply, but the user
+    // has opted into nothing extra.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo = dir.path();
+    let ohara_home = tempfile::tempdir().expect("OHARA_HOME tempdir");
+
+    git_init(repo);
+    write_file(repo.join("src"), "main.rs", "fn main() {}\n");
+    write_file(repo.join("custom_lib"), "thing.rs", "// keep me\n");
+    git_add_all(repo);
+    git_commit(repo, "feat: initial");
+
+    let idx = Command::new(ohara_bin())
+        .env("OHARA_HOME", ohara_home.path())
+        .args(["index", "--embed-provider", "cpu"])
+        .arg(repo)
+        .output()
+        .unwrap();
+    assert!(
+        idx.status.success(),
+        "ohara index failed: {}",
+        String::from_utf8_lossy(&idx.stderr)
+    );
+
+    // The non-builtin path `custom_lib/` must still appear when we
+    // query for it (no .oharaignore = no extra filtering).
+    let q = Command::new(ohara_bin())
+        .env("OHARA_HOME", ohara_home.path())
+        .args(["query", "--query", "keep me", "--no-rerank"])
+        .arg(repo)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&q.stdout);
+    assert!(
+        stdout.contains("custom_lib/thing.rs"),
+        "expected custom_lib hit without .oharaignore; got:\n{stdout}"
+    );
+}
