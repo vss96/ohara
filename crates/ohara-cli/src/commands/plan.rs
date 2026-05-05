@@ -171,6 +171,122 @@ mod suggestion_tests {
     }
 }
 
+const MARKER_BEGIN_PREFIX: &str = "# === ohara plan v";
+const MARKER_END: &str = "# === end auto-generated ===";
+
+/// Public for tests; the live opener prepended in `render_oharaignore_body`.
+pub const MARKER_BEGIN: &str = "# === ohara plan v";
+
+/// Render the body of a fresh `.oharaignore`: marker-fenced patterns
+/// followed by a hint for user-added lines below the closing marker.
+pub fn render_oharaignore_body(patterns: &[String], version: &str) -> String {
+    let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{MARKER_BEGIN_PREFIX}{version} — auto-generated {timestamp} ===\n"
+    ));
+    for p in patterns {
+        out.push_str(p);
+        out.push('\n');
+    }
+    out.push_str(MARKER_END);
+    out.push('\n');
+    out.push('\n');
+    out.push_str(
+        "# user-added lines below this marker are preserved by `ohara plan --keep-existing`\n",
+    );
+    out
+}
+
+/// Merge a freshly-rendered auto-section with an existing
+/// `.oharaignore`. Replaces only the block between the markers; lines
+/// outside are kept verbatim. Errors if the existing file is non-empty
+/// and lacks markers (fail-open: refuse to silently overwrite user
+/// content).
+pub fn merge_oharaignore(existing: &str, new_section: &str) -> Result<String> {
+    let trimmed = existing.trim();
+    if trimmed.is_empty() {
+        return Ok(new_section.to_string());
+    }
+    let begin = existing.find(MARKER_BEGIN_PREFIX).ok_or_else(|| {
+        anyhow::anyhow!(
+            "existing .oharaignore has content but no auto-generated markers; \
+             pass --replace to overwrite or delete the file and re-run"
+        )
+    })?;
+    let end = existing.find(MARKER_END).ok_or_else(|| {
+        anyhow::anyhow!(
+            "existing .oharaignore has begin marker but no end marker; refusing to merge"
+        )
+    })? + MARKER_END.len();
+
+    // Walk past trailing whitespace/newline of the end marker line.
+    let after_end = existing[end..]
+        .find('\n')
+        .map(|i| end + i + 1)
+        .unwrap_or(end);
+
+    let prefix = &existing[..begin];
+    let suffix = &existing[after_end..];
+
+    let mut out = String::new();
+    out.push_str(prefix);
+    out.push_str(new_section);
+    out.push_str(suffix);
+    Ok(out)
+}
+
+#[cfg(test)]
+mod writer_tests {
+    use super::*;
+
+    #[test]
+    fn render_oharaignore_wraps_patterns_in_markers() {
+        // Plan 26 Task D.4: the auto-generated section is fenced by
+        // begin/end markers so re-runs replace only that block.
+        let body = render_oharaignore_body(&["drivers/".into(), "vendor/".into()], "0.7.7");
+        assert!(body.contains(MARKER_BEGIN));
+        assert!(body.contains(MARKER_END));
+        assert!(body.contains("drivers/"));
+        assert!(body.contains("vendor/"));
+        // The opening marker must include the version so a future ohara
+        // can detect schema drift.
+        assert!(body.contains("ohara plan v0.7.7"));
+    }
+
+    #[test]
+    fn merge_replaces_only_auto_section_in_existing_file() {
+        // Plan 26 Task D.4: --keep-existing (default) preserves user
+        // lines outside the markers across re-runs.
+        let existing = "\
+# === ohara plan v0.7.6 — auto-generated 2026-05-04T12:00:00 ===
+old_pattern/
+# === end auto-generated ===
+
+# user added below
+my_team/
+!Cargo.lock
+";
+        let new_section = render_oharaignore_body(&["drivers/".into()], "0.7.7");
+        let merged = merge_oharaignore(existing, &new_section).expect("merge");
+
+        assert!(merged.contains("drivers/"), "new pattern present");
+        assert!(!merged.contains("old_pattern/"), "old auto pattern dropped");
+        assert!(merged.contains("my_team/"), "user line preserved");
+        assert!(merged.contains("!Cargo.lock"), "user negation preserved");
+    }
+
+    #[test]
+    fn merge_fails_open_when_markers_missing() {
+        // Plan 26 Task D.4: refusing to overwrite an existing file
+        // without markers protects user lines from silent loss.
+        let existing = "user_only_pattern/\n";
+        let new_section = render_oharaignore_body(&["drivers/".into()], "0.7.7");
+        let res = merge_oharaignore(existing, &new_section);
+        assert!(res.is_err(), "merge must refuse when markers absent");
+    }
+}
+
 #[cfg(test)]
 mod aggregator_tests {
     use super::*;
