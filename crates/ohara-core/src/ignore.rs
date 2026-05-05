@@ -86,7 +86,10 @@ impl IgnoreFilter for LayeredIgnore {
 }
 
 /// Build a `Gitignore` matcher from in-memory patterns rooted at `root`.
-fn build_gitignore_from_patterns(root: &Path, patterns: &[&str]) -> Result<Gitignore, ignore::Error> {
+fn build_gitignore_from_patterns(
+    root: &Path,
+    patterns: &[&str],
+) -> Result<Gitignore, ignore::Error> {
     let mut b = GitignoreBuilder::new(root);
     for p in patterns {
         b.add_line(None, p)?;
