@@ -188,6 +188,68 @@ pub fn get_for_hunk(c: &Connection, hunk_id: i64) -> Result<Vec<HunkSymbol>> {
     Ok(out)
 }
 
+/// Plan 24 batch variant of `get_for_hunk`. Returns a map keyed by the
+/// requested `hunk_id`s; every requested id is present in the map (as
+/// an empty `Vec` when the hunk has no attribution rows). Ordering of
+/// each per-hunk `Vec` matches `get_for_hunk`: ExactSpan before
+/// HunkHeader before everything else, then `symbol_name` ASC.
+pub fn get_for_hunks(
+    c: &Connection,
+    hunk_ids: &[i64],
+) -> Result<std::collections::HashMap<i64, Vec<HunkSymbol>>> {
+    if hunk_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    // Seed every requested id with an empty Vec so callers can rely on
+    // "every id is present in the map" — matches the contract documented
+    // on the function.
+    let mut acc: std::collections::HashMap<i64, Vec<HunkSymbol>> =
+        hunk_ids.iter().map(|id| (*id, Vec::new())).collect();
+
+    let placeholders = hunk_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let sql = format!(
+        "SELECT hunk_id, symbol_kind, symbol_name, qualified_name, attribution_kind \
+         FROM hunk_symbol \
+         WHERE hunk_id IN ({placeholders}) \
+         ORDER BY hunk_id ASC, \
+           CASE attribution_kind \
+             WHEN 'exact_span' THEN 0 \
+             WHEN 'hunk_header' THEN 1 \
+             ELSE 2 \
+           END ASC, symbol_name ASC"
+    );
+    let mut stmt = c.prepare(&sql)?;
+    let params: Vec<&dyn rusqlite::ToSql> = hunk_ids
+        .iter()
+        .map(|id| id as &dyn rusqlite::ToSql)
+        .collect();
+    let rows = stmt.query_map(params.as_slice(), |row| {
+        let hunk_id: i64 = row.get(0)?;
+        let kind_s: String = row.get(1)?;
+        let name: String = row.get(2)?;
+        let qualified_name: Option<String> = row.get(3)?;
+        let attribution_s: String = row.get(4)?;
+        let kind = str_to_symbol_kind(&kind_s).unwrap_or(SymbolKind::Function);
+        let attribution =
+            AttributionKind::from_str(&attribution_s).unwrap_or(AttributionKind::HunkHeader);
+        Ok((
+            hunk_id,
+            HunkSymbol {
+                kind,
+                name,
+                qualified_name,
+                attribution,
+            },
+        ))
+    })?;
+    for r in rows {
+        let (hunk_id, sym) = r?;
+        acc.entry(hunk_id).or_default().push(sym);
+    }
+    Ok(acc)
+}
+
 fn symbol_kind_to_str(kind: SymbolKind) -> &'static str {
     match kind {
         SymbolKind::Function => "function",
@@ -204,5 +266,74 @@ fn str_to_symbol_kind(s: &str) -> Option<SymbolKind> {
         "class" => Some(SymbolKind::Class),
         "const" => Some(SymbolKind::Const),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    use ohara_core::types::{AttributionKind, HunkSymbol};
+    use rusqlite::Connection;
+
+    /// Build an in-memory schema with just the columns `hunk_symbol`
+    /// needs. The `hunk` and `commit_record` foreign-key targets are
+    /// stubbed because `get_for_hunks` does not join.
+    fn schema(c: &Connection) {
+        c.execute_batch(
+            "CREATE TABLE hunk_symbol (
+                hunk_id          INTEGER NOT NULL,
+                symbol_kind      TEXT NOT NULL,
+                symbol_name      TEXT NOT NULL,
+                qualified_name   TEXT,
+                attribution_kind TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+    }
+
+    fn insert(c: &Connection, hunk_id: i64, name: &str, kind: AttributionKind) {
+        c.execute(
+            "INSERT INTO hunk_symbol \
+                 (hunk_id, symbol_kind, symbol_name, qualified_name, attribution_kind) \
+             VALUES (?1, 'function', ?2, NULL, ?3)",
+            rusqlite::params![hunk_id, name, kind.as_str()],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn get_for_hunks_groups_results_by_hunk_id_in_a_single_query() {
+        let c = Connection::open_in_memory().unwrap();
+        schema(&c);
+        insert(&c, 10, "alpha", AttributionKind::ExactSpan);
+        insert(&c, 10, "beta", AttributionKind::HunkHeader);
+        insert(&c, 11, "gamma", AttributionKind::ExactSpan);
+        // 12 has no rows — must appear as an empty Vec, not be missing.
+
+        let got = get_for_hunks(&c, &[10_i64, 11, 12]).unwrap();
+        assert_eq!(got.len(), 3, "every requested hunk_id must be represented");
+
+        let h10: &Vec<HunkSymbol> = got.get(&10).expect("hunk 10");
+        assert_eq!(h10.len(), 2);
+        // Plan 11 ordering: ExactSpan before HunkHeader, then symbol_name ASC.
+        assert_eq!(h10[0].name, "alpha");
+        assert_eq!(h10[0].attribution, AttributionKind::ExactSpan);
+        assert_eq!(h10[1].name, "beta");
+        assert_eq!(h10[1].attribution, AttributionKind::HunkHeader);
+
+        let h11: &Vec<HunkSymbol> = got.get(&11).expect("hunk 11");
+        assert_eq!(h11.len(), 1);
+        assert_eq!(h11[0].name, "gamma");
+
+        let h12: &Vec<HunkSymbol> = got.get(&12).expect("hunk 12");
+        assert!(h12.is_empty(), "no rows ⇒ empty Vec, never missing");
+    }
+
+    #[test]
+    fn get_for_hunks_returns_empty_map_for_empty_input() {
+        let c = Connection::open_in_memory().unwrap();
+        schema(&c);
+        let got = get_for_hunks(&c, &[]).unwrap();
+        assert!(got.is_empty(), "empty input ⇒ empty map, no SQL roundtrip");
     }
 }

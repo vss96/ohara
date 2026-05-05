@@ -1,6 +1,6 @@
 # ohara plan-24 — Lane-mask hoist + batched symbol hydration
 
-> **Status:** draft
+> **Status:** complete
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or

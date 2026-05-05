@@ -381,6 +381,14 @@ mod tests {
         ) -> crate::Result<Vec<HunkSymbol>> {
             unreachable!()
         }
+        async fn get_hunk_symbols_batch(
+            &self,
+            _: &RepoId,
+            _: &[crate::storage::HunkId],
+        ) -> crate::Result<std::collections::HashMap<crate::storage::HunkId, Vec<HunkSymbol>>>
+        {
+            Ok(std::collections::HashMap::new())
+        }
         async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
             Ok(false)
         }

@@ -35,6 +35,7 @@ pub struct StorageMetricsSnapshot {
     pub bm25_hunks_by_symbol_name: StorageMethodMetrics,
     pub bm25_hunks_by_historical_symbol: StorageMethodMetrics,
     pub get_hunk_symbols: StorageMethodMetrics,
+    pub get_hunk_symbols_batch: StorageMethodMetrics,
     pub get_neighboring_file_commits: StorageMethodMetrics,
     pub get_index_status: StorageMethodMetrics,
     pub get_index_metadata: StorageMethodMetrics,
@@ -248,6 +249,16 @@ pub trait Storage: Send + Sync {
     /// `PatternHit.related_head_symbols`. Returns an empty Vec when
     /// the hunk has no attribution rows (legacy index).
     async fn get_hunk_symbols(&self, repo_id: &RepoId, hunk_id: HunkId) -> Result<Vec<HunkSymbol>>;
+
+    /// Plan 24 batch variant. Same contract as `get_hunk_symbols` but
+    /// for many hunks at once. Implementations MUST return a map with
+    /// every requested `hunk_id` present (empty `Vec` when no
+    /// attribution rows exist).
+    async fn get_hunk_symbols_batch(
+        &self,
+        repo_id: &RepoId,
+        hunk_ids: &[HunkId],
+    ) -> Result<std::collections::HashMap<HunkId, Vec<HunkSymbol>>>;
 
     // --- Blob cache ---
 

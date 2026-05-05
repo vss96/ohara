@@ -146,7 +146,35 @@ impl Retriever {
         let parsed = crate::query_understanding::parse_query(&query.query);
         let profile = crate::query_understanding::RetrievalProfile::for_intent(parsed.intent);
         let effective_language = query.language.clone().or_else(|| parsed.language.clone());
+        let parsed_since_unix = parsed.since_unix;
+        let hits = self
+            .find_pattern_inner(
+                repo_id,
+                query,
+                profile.clone(),
+                effective_language,
+                parsed_since_unix,
+                now_unix,
+            )
+            .await?;
+        Ok((hits, profile))
+    }
 
+    /// Plan 24: shared retrieval body for both `find_pattern_with_profile`
+    /// (the public entry-point, profile derived from the query string)
+    /// and `find_pattern_with_explicit_profile` (test-only entry-point
+    /// that bypasses query parsing). Honors the profile's lane-mask
+    /// flags before spawning lane futures so disabled lanes never run
+    /// their underlying SQL or embed call.
+    async fn find_pattern_inner(
+        &self,
+        repo_id: &crate::types::RepoId,
+        query: &PatternQuery,
+        profile: crate::query_understanding::RetrievalProfile,
+        effective_language: Option<String>,
+        parsed_since_unix: Option<i64>,
+        now_unix: i64,
+    ) -> crate::Result<Vec<PatternHit>> {
         // Apply per-profile RankingWeights overrides. Profile fields of
         // None leave the base weight unchanged; Some(v) replaces it.
         let effective_weights = RankingWeights {
@@ -160,85 +188,113 @@ impl Retriever {
             lane_top_k: profile.lane_top_k.unwrap_or(self.weights.lane_top_k),
         };
 
-        // 1. Embed the query once for the vector lane. The BM25 lanes use
-        //    the raw query string directly.
-        let q_text = vec![query.query.clone()];
-        let mut q_embs = timed_phase("embed_query", self.embedder.embed_batch(&q_text)).await?;
-        let q_emb = q_embs
-            .pop()
-            .ok_or_else(|| crate::OhraError::Embedding("empty".into()))?;
-
         let language_filter = effective_language.as_deref();
+        let since_unix = query.since_unix.or(parsed_since_unix);
 
-        // 2. Gather all four candidate lanes in parallel. The symbol
-        //    side has two: the v0.7 historical lane (`hunk_symbol`,
-        //    plan 11 Task 4.1) is the primary path; if it returns
-        //    nothing — because the index was built before plan 11 ran,
-        //    or no `(commit, file)` pair has attribution rows yet — we
-        //    fall back to the v0.3 file-level lane so old indexes
-        //    stay queryable. Plan 12 Task 2.1: lanes are gated by the
-        //    profile's lane-mask flags; disabled lanes return empty.
-        let (vec_res, fts_res, hist_sym_res, head_sym_res) = tokio::join!(
-            timed_phase(
-                "lane_knn",
-                self.storage.knn_hunks(
-                    repo_id,
-                    &q_emb,
-                    effective_weights.lane_top_k,
-                    language_filter,
-                    query.since_unix.or(parsed.since_unix),
-                )
-            ),
-            timed_phase(
+        // Plan 24 Phase C: hoist lane-mask gates above `tokio::join!`
+        // so disabled lanes never spawn their underlying SQL/embed
+        // call. Each lane future is wrapped in `OptionFuture` —
+        // disabled ⇒ resolves to `None`, enabled ⇒ runs the work.
+        // The vec lane's pre-step (`embedder.embed_batch`) moves
+        // inside the lane future so we save the embed call too when
+        // the vec lane is off.
+        use futures::future::OptionFuture;
+
+        let vec_fut: OptionFuture<_> = if profile.vec_lane_enabled {
+            let q_text = vec![query.query.clone()];
+            let storage = self.storage.clone();
+            let embedder = self.embedder.clone();
+            let lane_top_k = effective_weights.lane_top_k;
+            let lang = language_filter.map(|s| s.to_string());
+            Some(timed_phase("lane_knn", async move {
+                let mut q_embs = embedder.embed_batch(&q_text).await?;
+                let q_emb = q_embs
+                    .pop()
+                    .ok_or_else(|| crate::OhraError::Embedding("empty".into()))?;
+                storage
+                    .knn_hunks(repo_id, &q_emb, lane_top_k, lang.as_deref(), since_unix)
+                    .await
+            }))
+            .into()
+        } else {
+            None.into()
+        };
+
+        let fts_fut: OptionFuture<_> = match profile.text_lane_enabled {
+            true => Some(timed_phase(
                 "lane_fts_text",
                 self.storage.bm25_hunks_by_text(
                     repo_id,
                     &query.query,
                     effective_weights.lane_top_k,
                     language_filter,
-                    query.since_unix.or(parsed.since_unix),
-                )
-            ),
-            timed_phase(
-                "lane_fts_sym_hist",
-                self.storage.bm25_hunks_by_historical_symbol(
+                    since_unix,
+                ),
+            ))
+            .into(),
+            false => None.into(),
+        };
+
+        let (hist_sym_fut, head_sym_fut): (OptionFuture<_>, OptionFuture<_>) =
+            match profile.symbol_lane_enabled {
+                true => (
+                    Some(timed_phase(
+                        "lane_fts_sym_hist",
+                        self.storage.bm25_hunks_by_historical_symbol(
+                            repo_id,
+                            &query.query,
+                            effective_weights.lane_top_k,
+                            language_filter,
+                            since_unix,
+                        ),
+                    ))
+                    .into(),
+                    Some(timed_phase(
+                        "lane_fts_sym_head",
+                        self.storage.bm25_hunks_by_symbol_name(
+                            repo_id,
+                            &query.query,
+                            effective_weights.lane_top_k,
+                            language_filter,
+                            since_unix,
+                        ),
+                    ))
+                    .into(),
+                ),
+                false => (None.into(), None.into()),
+            };
+
+        // Plan 25: contextual-BM25 lane over `hunk.semantic_text`
+        // (built at index time by `hunk_text::build`). Runs in
+        // parallel with the four existing lanes; its hits fuse into
+        // the same RRF call so no separate ranking knob is needed.
+        let sem_fut: OptionFuture<_> = match profile.semantic_text_lane_enabled {
+            true => Some(timed_phase(
+                "lane_fts_semantic",
+                self.storage.bm25_hunks_by_semantic_text(
                     repo_id,
                     &query.query,
                     effective_weights.lane_top_k,
                     language_filter,
-                    query.since_unix.or(parsed.since_unix),
-                )
-            ),
-            timed_phase(
-                "lane_fts_sym_head",
-                self.storage.bm25_hunks_by_symbol_name(
-                    repo_id,
-                    &query.query,
-                    effective_weights.lane_top_k,
-                    language_filter,
-                    query.since_unix.or(parsed.since_unix),
-                )
-            ),
-        );
-        let vec_hits = if profile.vec_lane_enabled {
-            vec_res?
-        } else {
-            Vec::new()
+                    since_unix,
+                ),
+            ))
+            .into(),
+            false => None.into(),
         };
-        let fts_hits = if profile.text_lane_enabled {
-            fts_res?
-        } else {
-            Vec::new()
-        };
-        let (hist_sym_hits, head_sym_hits) = if profile.symbol_lane_enabled {
-            (hist_sym_res?, head_sym_res?)
-        } else {
-            // Drain the futures' results to avoid leaking errors;
-            // ignore the contents because the profile disabled the lane.
-            let _ = hist_sym_res?;
-            let _ = head_sym_res?;
-            (Vec::new(), Vec::new())
-        };
+
+        let (vec_opt, fts_opt, hist_sym_opt, head_sym_opt, sem_opt) =
+            tokio::join!(vec_fut, fts_fut, hist_sym_fut, head_sym_fut, sem_fut);
+
+        // Each `_opt` is `Option<Result<Vec<HunkHit>>>`. None ⇒ lane
+        // disabled (skip silently); Some(Err) ⇒ lane errored (propagate);
+        // Some(Ok) ⇒ use the hits. Disabled lanes contribute Vec::new().
+        let vec_hits: Vec<HunkHit> = vec_opt.transpose()?.unwrap_or_default();
+        let fts_hits: Vec<HunkHit> = fts_opt.transpose()?.unwrap_or_default();
+        let hist_sym_hits: Vec<HunkHit> = hist_sym_opt.transpose()?.unwrap_or_default();
+        let head_sym_hits: Vec<HunkHit> = head_sym_opt.transpose()?.unwrap_or_default();
+        let sem_hits: Vec<HunkHit> = sem_opt.transpose()?.unwrap_or_default();
+
         // Plan 11 Task 4.1 Step 3: prefer historical attribution when
         // the index has it, fall back to HEAD-symbol-name otherwise.
         // Mutually exclusive — feeding both into RRF would give the
@@ -269,12 +325,22 @@ impl Retriever {
             ranking_sym.push(h.hunk_id);
             by_id.entry(h.hunk_id).or_insert_with(|| h.clone());
         }
+        // Plan 25: per-id ranking for the contextual-BM25 lane,
+        // contributed alongside the existing three rankings to RRF.
+        let mut ranking_sem: Vec<HunkId> = Vec::with_capacity(sem_hits.len());
+        for h in &sem_hits {
+            ranking_sem.push(h.hunk_id);
+            by_id.entry(h.hunk_id).or_insert_with(|| h.clone());
+        }
 
         // 4. Reciprocal Rank Fusion (k = 60, Cormack 2009 default) →
         //    truncate to rerank_top_k before the expensive cross-encoder.
         //    Plan 12 Task 2.1: profile may widen the rerank pool.
+        //    Plan 25: 4 ranked sources now (vec / text / symbol /
+        //    semantic-text) — one extra reciprocal contribution per
+        //    hunk that surfaces in the new lane.
         let fused: Vec<HunkId> = timed_phase("rrf", async {
-            reciprocal_rank_fusion(&[ranking_vec, ranking_fts, ranking_sym], 60)
+            reciprocal_rank_fusion(&[ranking_vec, ranking_fts, ranking_sym, ranking_sem], 60)
         })
         .await;
         let trimmed: Vec<HunkId> = fused
@@ -286,7 +352,7 @@ impl Retriever {
             .filter_map(|id| by_id.get(id).cloned())
             .collect();
         if hits.is_empty() {
-            return Ok((vec![], profile));
+            return Ok(vec![]);
         }
 
         // 5. Optional cross-encoder rerank. In degraded mode (no
@@ -307,19 +373,25 @@ impl Retriever {
         //    used to mean "symbols defined in HEAD that share the
         //    file"); under plan 11 it carries actual touched-symbol
         //    names. Renaming will land in a later breaking release.
-        //    Per-hit lookup is bounded by k (≤ 20) so sequential
-        //    calls are cheap; batching is a future optimisation.
+        //    Plan 24: one batch call rather than N sequential per-hit
+        //    round-trips. Storage seeds every requested hunk_id in the
+        //    returned map (with an empty Vec when no attribution rows
+        //    exist), so the subsequent `.get(&id).cloned().unwrap_or_default()`
+        //    call below remains correct without further branching.
+        let hunk_ids: Vec<HunkId> = hits.iter().map(|h| h.hunk_id).collect();
         let symbols_by_hunk: std::collections::HashMap<HunkId, Vec<String>> =
             timed_phase("hydrate_symbols", async {
-                let mut acc: std::collections::HashMap<HunkId, Vec<String>> =
-                    std::collections::HashMap::new();
-                for h in &hits {
-                    let attrs = self.storage.get_hunk_symbols(repo_id, h.hunk_id).await?;
-                    if !attrs.is_empty() {
-                        acc.insert(h.hunk_id, attrs.into_iter().map(|a| a.name).collect());
-                    }
-                }
-                Ok::<_, crate::OhraError>(acc)
+                let attrs_map = self
+                    .storage
+                    .get_hunk_symbols_batch(repo_id, &hunk_ids)
+                    .await?;
+                Ok::<_, crate::OhraError>(
+                    attrs_map
+                        .into_iter()
+                        .filter(|(_, v)| !v.is_empty())
+                        .map(|(id, v)| (id, v.into_iter().map(|a| a.name).collect()))
+                        .collect(),
+                )
             })
             .await?;
 
@@ -380,7 +452,27 @@ impl Retriever {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         out.truncate(query.k.clamp(1, 20) as usize);
-        Ok((out, profile))
+        Ok(out)
+    }
+
+    /// Test-only: skip query parsing and use this profile verbatim.
+    /// Production callers go through `find_pattern` /
+    /// `find_pattern_with_profile`, which derive the profile from the
+    /// query.
+    #[cfg(test)]
+    pub(crate) async fn find_pattern_with_explicit_profile(
+        &self,
+        repo_id: &crate::types::RepoId,
+        query: &PatternQuery,
+        profile: crate::query_understanding::RetrievalProfile,
+        now_unix: i64,
+    ) -> crate::Result<Vec<PatternHit>> {
+        // No query-parsing path here — the explicit profile wins, and
+        // the parsed `since_unix` defaults to None. Callers who want
+        // to test recency-bound paths set it on the `query` itself.
+        let effective_language = query.language.clone();
+        self.find_pattern_inner(repo_id, query, profile, effective_language, None, now_unix)
+            .await
     }
 }
 
@@ -471,16 +563,37 @@ mod tests {
         knn: Vec<HunkHit>,
         fts_text: Vec<HunkHit>,
         fts_sym: Vec<HunkHit>,
+        // Plan 25: scriptable hits for the semantic-text lane.
+        // Existing tests use `new(...)` and get an empty Vec; new
+        // tests use `new_with_semantic(...)` to seed it.
+        fts_semantic: Vec<HunkHit>,
         calls: Mutex<Vec<&'static str>>,
+        // Plan 24: per-method batch-call counter so tests can assert the
+        // hydration step issues exactly one batch call rather than N
+        // sequential per-hit round-trips.
+        batch_calls: Mutex<usize>,
     }
 
     impl FakeStorage {
         fn new(knn: Vec<HunkHit>, fts_text: Vec<HunkHit>, fts_sym: Vec<HunkHit>) -> Self {
+            Self::new_with_semantic(knn, fts_text, fts_sym, vec![])
+        }
+
+        // Plan 25: secondary constructor for tests that need to script
+        // the semantic-text lane. Existing tests keep using `new(...)`.
+        fn new_with_semantic(
+            knn: Vec<HunkHit>,
+            fts_text: Vec<HunkHit>,
+            fts_sym: Vec<HunkHit>,
+            fts_semantic: Vec<HunkHit>,
+        ) -> Self {
             Self {
                 knn,
                 fts_text,
                 fts_sym,
+                fts_semantic,
                 calls: Mutex::new(vec![]),
+                batch_calls: Mutex::new(0),
             }
         }
     }
@@ -545,10 +658,12 @@ mod tests {
             _: Option<&str>,
             _: Option<i64>,
         ) -> crate::Result<Vec<HunkHit>> {
-            // Plan 11: keep retriever tests focused on the existing
-            // three lanes until Task 4.1 wires the semantic lane in.
+            // Plan 25: return scripted hits so retriever tests can
+            // exercise the lane. The "fts_semantic" call-record entry
+            // is what the test assertion checks for; the lane is now
+            // expected to actually contribute to the fused output.
             self.calls.lock().unwrap().push("fts_semantic");
-            Ok(Vec::new())
+            Ok(self.fts_semantic.clone())
         }
         async fn bm25_hunks_by_symbol_name(
             &self,
@@ -580,7 +695,21 @@ mod tests {
             _: &RepoId,
             _: crate::storage::HunkId,
         ) -> crate::Result<Vec<crate::types::HunkSymbol>> {
+            // Plan 24: record the per-hit call so the regression test
+            // can assert the retriever stopped using this loop in favor
+            // of `get_hunk_symbols_batch`.
+            self.calls.lock().unwrap().push("get_hunk_symbols");
             Ok(Vec::new())
+        }
+        async fn get_hunk_symbols_batch(
+            &self,
+            _: &RepoId,
+            _: &[crate::storage::HunkId],
+        ) -> crate::Result<
+            std::collections::HashMap<crate::storage::HunkId, Vec<crate::types::HunkSymbol>>,
+        > {
+            *self.batch_calls.lock().unwrap() += 1;
+            Ok(std::collections::HashMap::new())
         }
         async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
             Ok(false)
@@ -634,6 +763,34 @@ mod tests {
             "fake"
         }
         async fn embed_batch(&self, texts: &[String]) -> crate::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![0.0_f32; 4]).collect())
+        }
+    }
+
+    /// Plan 24: instrumented embedder that counts how many times
+    /// `embed_batch` is called. Lets the lane-mask-hoist regression
+    /// test assert "vec lane disabled ⇒ embedder is never called".
+    #[derive(Default)]
+    struct CountingEmbedder {
+        calls: Mutex<usize>,
+    }
+
+    impl CountingEmbedder {
+        fn calls(&self) -> usize {
+            *self.calls.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl crate::EmbeddingProvider for CountingEmbedder {
+        fn dimension(&self) -> usize {
+            4
+        }
+        fn model_id(&self) -> &str {
+            "counting"
+        }
+        async fn embed_batch(&self, texts: &[String]) -> crate::Result<Vec<Vec<f32>>> {
+            *self.calls.lock().unwrap() += 1;
             Ok(texts.iter().map(|_| vec![0.0_f32; 4]).collect())
         }
     }
@@ -874,6 +1031,149 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn find_pattern_invokes_semantic_text_lane_and_fuses_into_rrf() {
+        // Plan 25: the semantic-text lane MUST be queried, and a hit
+        // surfaced ONLY by that lane MUST appear in the fused output. We
+        // construct lanes so the semantic lane is the *only* source for
+        // hunk_id=99; if the new lane is wired in, hunk 99 surfaces;
+        // otherwise it doesn't.
+        let now = 1_700_000_000;
+        let knn = vec![fake_hit(1, "a", now, 0.9, "diff-a")];
+        let fts_text = vec![fake_hit(2, "b", now, 0.5, "diff-b")];
+        let fts_sym = vec![fake_hit(3, "c", now, 0.3, "diff-c")];
+        let fts_semantic = vec![fake_hit(99, "z", now, 0.7, "diff-z-only-in-semantic")];
+        let storage = Arc::new(FakeStorage::new_with_semantic(
+            knn,
+            fts_text,
+            fts_sym,
+            fts_semantic,
+        ));
+        let embedder = Arc::new(FakeEmbedder);
+        let r = Retriever::new(storage.clone(), embedder);
+        let q = PatternQuery {
+            query: "anything".into(),
+            k: 10,
+            language: None,
+            since_unix: None,
+            no_rerank: true,
+        };
+        let id = RepoId::from_parts("x", "/y");
+        let out = r.find_pattern(&id, &q, now).await.unwrap();
+
+        let calls = storage.calls.lock().unwrap().clone();
+        assert!(
+            calls.contains(&"fts_semantic"),
+            "semantic-text lane MUST be invoked; calls = {calls:?}"
+        );
+        assert!(
+            out.iter().any(|h| h.commit_sha == "z"),
+            "hunk surfaced ONLY by the semantic-text lane MUST appear in fused output; \
+             got {:?}",
+            out.iter()
+                .map(|h| h.commit_sha.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_lanes_skip_storage_calls() {
+        // Plan 24: when the profile disables a lane, the corresponding
+        // storage method (or embedding call, for the vec lane) MUST NOT
+        // run. Pre-fix the retriever calls all four lanes unconditionally
+        // and only filters the results post-hoc.
+        let now = 1_700_000_000;
+        let storage = Arc::new(FakeStorage::new(vec![], vec![], vec![]));
+        let embedder = Arc::new(CountingEmbedder::default());
+        let r = Retriever::new(storage.clone(), embedder.clone());
+
+        // Profile: only the text lane is enabled.
+        let mut profile = crate::query_understanding::RetrievalProfile::default_unknown();
+        profile.vec_lane_enabled = false;
+        profile.symbol_lane_enabled = false;
+        // text_lane_enabled stays true.
+
+        let q = PatternQuery {
+            query: "anything".into(),
+            k: 5,
+            language: None,
+            since_unix: None,
+            no_rerank: true,
+        };
+        let id = RepoId::from_parts("x", "/y");
+        let _ = r
+            .find_pattern_with_explicit_profile(&id, &q, profile, now)
+            .await
+            .unwrap();
+
+        let calls = storage.calls.lock().unwrap().clone();
+        assert!(
+            !calls.contains(&"knn"),
+            "vec lane disabled: knn_hunks must not run; calls = {calls:?}"
+        );
+        assert!(
+            !calls.contains(&"fts_sym") && !calls.contains(&"fts_hist_sym"),
+            "symbol lane disabled: fts_sym / fts_hist_sym must not run; calls = {calls:?}"
+        );
+        assert!(
+            calls.contains(&"fts_text"),
+            "text lane enabled: fts_text MUST run; calls = {calls:?}"
+        );
+
+        let embed_calls = embedder.calls();
+        assert_eq!(
+            embed_calls, 0,
+            "vec lane disabled: embed_batch must not be called for the query; got {embed_calls}"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_pattern_calls_get_hunk_symbols_batch_exactly_once() {
+        // Plan 24 regression: hydration must be one batch call, not N
+        // sequential calls. We construct lanes that surface 5 distinct
+        // hunks; the retriever should make exactly 1 call to the batch
+        // method and 0 calls to the per-hit method.
+        let now = 1_700_000_000;
+        let knn = vec![
+            fake_hit(1, "a", now, 0.9, "diff-a"),
+            fake_hit(2, "b", now, 0.5, "diff-b"),
+            fake_hit(3, "c", now, 0.4, "diff-c"),
+            fake_hit(4, "d", now, 0.3, "diff-d"),
+            fake_hit(5, "e", now, 0.2, "diff-e"),
+        ];
+        let storage = Arc::new(FakeStorage::new(knn, vec![], vec![]));
+        let embedder = Arc::new(FakeEmbedder);
+        let r = Retriever::new(storage.clone(), embedder);
+        let q = PatternQuery {
+            query: "anything".into(),
+            k: 5,
+            language: None,
+            since_unix: None,
+            no_rerank: true,
+        };
+        let id = RepoId::from_parts("x", "/y");
+        let _ = r.find_pattern(&id, &q, now).await.unwrap();
+
+        let batch_calls = *storage.batch_calls.lock().unwrap();
+        assert_eq!(
+            batch_calls, 1,
+            "hydrate_symbols MUST issue exactly 1 batch call for ≥1 surviving hits, got {batch_calls}"
+        );
+
+        // The per-hit method must NOT have been called by the retriever.
+        let per_hit_calls = storage
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| **c == "get_hunk_symbols")
+            .count();
+        assert_eq!(
+            per_hit_calls, 0,
+            "per-hit get_hunk_symbols must not be called by the retriever after plan-24"
+        );
+    }
+
     // ---- Phase-event capture infrastructure ---------------------------------
     // Moved to crate::perf_trace::test_phase_capture to be shared with
     // explain::tests and any other modules that need phase-event assertions.
@@ -905,12 +1205,17 @@ mod tests {
         });
 
         let seen = seen.lock().unwrap();
+        // Plan 24 Phase C hoist: the "embed_query" phase span no longer
+        // exists — the embedder call is now inside `lane_knn` so we
+        // skip it entirely when the vec lane is disabled. Phase events
+        // therefore start at the lanes themselves. Plan 25 added
+        // `lane_fts_semantic` as a 5th lane.
         for required in [
-            "embed_query",
             "lane_knn",
             "lane_fts_text",
             "lane_fts_sym_hist",
             "lane_fts_sym_head",
+            "lane_fts_semantic",
             "rrf",
             "hydrate_symbols",
         ] {
