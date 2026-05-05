@@ -188,6 +188,72 @@ pub fn get_for_hunk(c: &Connection, hunk_id: i64) -> Result<Vec<HunkSymbol>> {
     Ok(out)
 }
 
+/// Plan 24 batch variant of `get_for_hunk`. Returns a map keyed by the
+/// requested `hunk_id`s; every requested id is present in the map (as
+/// an empty `Vec` when the hunk has no attribution rows). Ordering of
+/// each per-hunk `Vec` matches `get_for_hunk`: ExactSpan before
+/// HunkHeader before everything else, then `symbol_name` ASC.
+pub fn get_for_hunks(
+    c: &Connection,
+    hunk_ids: &[i64],
+) -> Result<std::collections::HashMap<i64, Vec<HunkSymbol>>> {
+    if hunk_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    // Seed every requested id with an empty Vec so callers can rely on
+    // "every id is present in the map" — matches the contract documented
+    // on the function.
+    let mut acc: std::collections::HashMap<i64, Vec<HunkSymbol>> =
+        hunk_ids.iter().map(|id| (*id, Vec::new())).collect();
+
+    let placeholders = hunk_ids
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT hunk_id, symbol_kind, symbol_name, qualified_name, attribution_kind \
+         FROM hunk_symbol \
+         WHERE hunk_id IN ({placeholders}) \
+         ORDER BY hunk_id ASC, \
+           CASE attribution_kind \
+             WHEN 'exact_span' THEN 0 \
+             WHEN 'hunk_header' THEN 1 \
+             ELSE 2 \
+           END ASC, symbol_name ASC"
+    );
+    let mut stmt = c.prepare(&sql)?;
+    let params: Vec<&dyn rusqlite::ToSql> = hunk_ids
+        .iter()
+        .map(|id| id as &dyn rusqlite::ToSql)
+        .collect();
+    let rows = stmt.query_map(params.as_slice(), |row| {
+        let hunk_id: i64 = row.get(0)?;
+        let kind_s: String = row.get(1)?;
+        let name: String = row.get(2)?;
+        let qualified_name: Option<String> = row.get(3)?;
+        let attribution_s: String = row.get(4)?;
+        let kind = str_to_symbol_kind(&kind_s).unwrap_or(SymbolKind::Function);
+        let attribution =
+            AttributionKind::from_str(&attribution_s).unwrap_or(AttributionKind::HunkHeader);
+        Ok((
+            hunk_id,
+            HunkSymbol {
+                kind,
+                name,
+                qualified_name,
+                attribution,
+            },
+        ))
+    })?;
+    for r in rows {
+        let (hunk_id, sym) = r?;
+        acc.entry(hunk_id).or_default().push(sym);
+    }
+    Ok(acc)
+}
+
 fn symbol_kind_to_str(kind: SymbolKind) -> &'static str {
     match kind {
         SymbolKind::Function => "function",
