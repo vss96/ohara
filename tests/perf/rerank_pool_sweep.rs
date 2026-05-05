@@ -291,14 +291,8 @@ fn recommend_default(rows: &[SweepRow]) -> usize {
     if rows.is_empty() {
         return RankingWeights::default().rerank_top_k;
     }
-    let best_recall_at_5 = rows
-        .iter()
-        .map(|r| r.recall_at_5)
-        .fold(0.0_f32, f32::max);
-    let smallest_p95 = rows
-        .iter()
-        .map(|r| r.p95_ms)
-        .fold(f32::INFINITY, f32::min);
+    let best_recall_at_5 = rows.iter().map(|r| r.recall_at_5).fold(0.0_f32, f32::max);
+    let smallest_p95 = rows.iter().map(|r| r.p95_ms).fold(f32::INFINITY, f32::min);
     let recall_floor = best_recall_at_5 - 0.01;
     let p95_ceiling = smallest_p95 * 1.5;
 
@@ -364,15 +358,8 @@ async fn rerank_pool_sweep() -> Result<()> {
             .with_reranker(reranker.clone())
             .with_weights(weights);
 
-        let row = run_sweep_iteration(
-            &retriever,
-            &repo_id,
-            &cases,
-            &label_to_sha,
-            now_unix,
-            pool,
-        )
-        .await?;
+        let row = run_sweep_iteration(&retriever, &repo_id, &cases, &label_to_sha, now_unix, pool)
+            .await?;
         eprintln!("{}", serde_json::to_string(&row)?);
         rows.push(row);
     }
