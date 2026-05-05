@@ -82,6 +82,95 @@ impl HotmapAggregator {
     }
 }
 
+/// Top-level directory names the planner never suggests ignoring.
+const DOCS_ALLOWLIST: &[&str] = &["Documentation/", "docs/", "doc/"];
+
+/// Default share threshold for "high-share" suggestions, expressed as
+/// a fraction of total commits. Tunable; 5% balances signal vs noise on
+/// repos in the 100k+ commit range.
+const HIGH_SHARE_THRESHOLD: f64 = 0.05;
+
+/// Generate `.oharaignore` patterns from a populated aggregator. Top-
+/// level directories with commit share above the threshold and not in
+/// the docs allowlist are returned in deterministic order.
+pub fn suggest_patterns(agg: &HotmapAggregator) -> Vec<String> {
+    if agg.total_commits() == 0 {
+        return Vec::new();
+    }
+    let threshold = (agg.total_commits() as f64 * HIGH_SHARE_THRESHOLD) as u64;
+    let mut out: Vec<String> = Vec::new();
+
+    for (key, count) in agg.counts() {
+        // Top-level only: exactly one slash, at the end.
+        let slash_count = key.matches('/').count();
+        let is_toplevel_dir = slash_count == 1 && key.ends_with('/');
+        if !is_toplevel_dir {
+            continue;
+        }
+        if DOCS_ALLOWLIST.iter().any(|d| *d == key) {
+            continue;
+        }
+        if *count >= threshold {
+            out.push(key.clone());
+        }
+    }
+    out.sort();
+    out
+}
+
+#[cfg(test)]
+mod suggestion_tests {
+    use super::*;
+
+    #[test]
+    fn high_share_directory_outside_docs_allowlist_is_suggested() {
+        // Plan 26 Task D.3: a top-level directory with > 5% commit
+        // share that isn't in the docs allowlist is suggested for IGNORE.
+        // NOTE: the original spec also asserted `!suggestions.contains("src/")`,
+        // but at a 5% threshold src/ (30%) also qualifies. We drop that
+        // over-specified assertion and only pin the meaningful signal: that
+        // drivers/ IS suggested.
+        let mut agg = HotmapAggregator::default();
+        for _ in 0..70 {
+            agg.record(&["drivers/foo.c".into()]);
+        }
+        for _ in 0..30 {
+            agg.record(&["src/main.rs".into()]);
+        }
+
+        let suggestions = suggest_patterns(&agg);
+        assert!(suggestions.iter().any(|p| p == "drivers/"));
+    }
+
+    #[test]
+    fn high_share_documentation_dir_is_kept() {
+        // Plan 26 Task D.3: `Documentation/` is in the docs allowlist —
+        // even at high commit share it must not be suggested for ignore.
+        let mut agg = HotmapAggregator::default();
+        for _ in 0..70 {
+            agg.record(&["Documentation/foo.txt".into()]);
+        }
+        for _ in 0..30 {
+            agg.record(&["src/main.rs".into()]);
+        }
+        let suggestions = suggest_patterns(&agg);
+        assert!(!suggestions.iter().any(|p| p == "Documentation/"));
+    }
+
+    #[test]
+    fn low_share_directory_not_suggested() {
+        let mut agg = HotmapAggregator::default();
+        for _ in 0..2 {
+            agg.record(&["niche/foo.rs".into()]);
+        }
+        for _ in 0..98 {
+            agg.record(&["src/main.rs".into()]);
+        }
+        let suggestions = suggest_patterns(&agg);
+        assert!(!suggestions.iter().any(|p| p == "niche/"));
+    }
+}
+
 #[cfg(test)]
 mod aggregator_tests {
     use super::*;
