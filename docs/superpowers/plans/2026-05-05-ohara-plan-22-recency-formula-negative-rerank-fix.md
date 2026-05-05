@@ -1,6 +1,6 @@
 # ohara plan-22 — Recency formula: handle negative rerank scores
 
-> **Status:** draft
+> **Status:** complete
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or
