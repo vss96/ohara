@@ -1,6 +1,6 @@
 # ohara plan-23 — Rerank pool sizing + perf-frontier benchmark
 
-> **Status:** draft
+> **Status:** complete
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or

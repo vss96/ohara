@@ -46,6 +46,14 @@ name = "context_engine_eval"
 path = "context_engine_eval.rs"
 
 [[test]]
+# Plan 23 Task A.1 — rerank-pool sweep over the context-engine eval
+# fixture. `#[ignore]`'d; opt in via:
+#   cargo test -p ohara-perf-tests -- --ignored rerank_pool_sweep --nocapture
+name = "rerank_pool_sweep"
+path = "rerank_pool_sweep.rs"
+harness = true
+
+[[test]]
 # Plan 14 Task E.1 — CLI cold-path perf harness. `#[ignore]`'d; opt
 # in via `cargo test -p ohara-perf-tests --release -- --ignored
 # cli_query_bench --nocapture`.
