@@ -615,3 +615,112 @@ fn explain_change_emits_blame_and_hydrate_phases() {
         );
     }
 }
+
+// --- Edge cases the public BlameSource contract may surface ---
+//
+// The real `Blamer::blame_range` returns `Ok(vec![])` when the file is
+// missing in HEAD, is a binary blob, or the range degenerates to nothing
+// after clamping. The orchestrator's contract is to return zero hits, a
+// `limitation` describing why, and a `coverage` of `0.0` rather than
+// erroring or panicking. These tests pin that contract.
+
+#[tokio::test]
+async fn explain_handles_empty_blame_as_missing_or_binary_file() {
+    // Blame returned no ranges — could be a binary blob, a deleted file,
+    // or an empty file. The orchestrator returns a clean empty result,
+    // not an error.
+    let storage = FakeStorageOrch::new();
+    let blamer = ScriptedBlamer {
+        out: vec![],
+        last_args: Mutex::new(None),
+    };
+    let q = ExplainQuery {
+        file: "src/binary.bin".into(),
+        line_start: 1,
+        line_end: 100,
+        k: 5,
+        include_diff: true,
+        include_related: false,
+    };
+    let id = RepoId::from_parts("first", "/r");
+    let (hits, meta) = explain_change(&storage, &blamer, &id, &q).await.unwrap();
+    assert!(hits.is_empty(), "no blame ranges -> no hits");
+    assert_eq!(meta.commits_unique, 0);
+    assert!(
+        (meta.blame_coverage - 0.0).abs() < f32::EPSILON,
+        "coverage is 0.0 when nothing is attributed",
+    );
+    let limitation = meta
+        .limitation
+        .as_ref()
+        .expect("invariant: empty blame must surface a limitation");
+    assert!(
+        limitation.contains("no attributable lines"),
+        "limitation should explain why hits is empty; got {limitation:?}",
+    );
+}
+
+#[tokio::test]
+async fn explain_handles_inverted_line_range_via_empty_blame() {
+    // line_start > line_end: the real Blamer clamps and yields no
+    // ranges. The orchestrator must not panic and must echo the raw
+    // (uninverted-by-it) range in `lines_queried` per existing
+    // semantics — `meta.lines_queried` reflects the queried inputs when
+    // blame is empty.
+    let storage = FakeStorageOrch::new();
+    let blamer = ScriptedBlamer {
+        out: vec![],
+        last_args: Mutex::new(None),
+    };
+    let q = ExplainQuery {
+        file: "src/a.rs".into(),
+        line_start: 50,
+        line_end: 10,
+        k: 5,
+        include_diff: false,
+        include_related: false,
+    };
+    let id = RepoId::from_parts("first", "/r");
+    let (hits, meta) = explain_change(&storage, &blamer, &id, &q).await.unwrap();
+    assert!(hits.is_empty());
+    assert_eq!(meta.lines_queried, (50, 10));
+    assert!(meta.limitation.is_some());
+}
+
+#[tokio::test]
+async fn explain_handles_single_line_range() {
+    // line_start == line_end is a valid query (one line). Lock in that
+    // the orchestrator threads the single-line value through the blamer
+    // and reports the same single-line range in meta.
+    let mut storage = FakeStorageOrch::new();
+    storage.seed_commit(cm("only", 1_000, "single-line origin"));
+    storage.seed_hunk("only", "src/a.rs", "+    just_one();\n");
+    let blamer = ScriptedBlamer {
+        out: vec![BlameRange {
+            commit_sha: "only".into(),
+            lines: vec![5],
+        }],
+        last_args: Mutex::new(None),
+    };
+    let q = ExplainQuery {
+        file: "src/a.rs".into(),
+        line_start: 5,
+        line_end: 5,
+        k: 5,
+        include_diff: true,
+        include_related: false,
+    };
+    let id = RepoId::from_parts("first", "/r");
+    let (hits, meta) = explain_change(&storage, &blamer, &id, &q).await.unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].blame_lines, vec![5]);
+    assert_eq!(meta.lines_queried, (5, 5));
+    let last = blamer
+        .last_args
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("invariant: blamer was called");
+    assert_eq!(last.1, 5);
+    assert_eq!(last.2, 5);
+}
