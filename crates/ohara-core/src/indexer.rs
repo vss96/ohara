@@ -87,7 +87,14 @@ impl AtomicSymbolExtractor for NullAtomicSymbolExtractor {
 /// Calls are best-effort — the indexer doesn't depend on the sink for
 /// correctness.
 pub trait ProgressSink: Send + Sync {
-    /// Called once at the start of the commit walk.
+    /// Pre-walk phase indicator: shown as a length-less spinner during
+    /// long startup phases (model load, commit walk) before the
+    /// per-commit bar materialises. Default impl is a no-op so existing
+    /// callers stay source-compatible. The `msg` is what the user sees
+    /// next to the spinner — keep it short.
+    fn pre_walk(&self, _msg: &str) {}
+    /// Called once when the per-commit indexing pass begins (after the
+    /// commit walk has produced a known total).
     fn start(&self, total_commits: usize);
     /// Called after each commit is fully persisted.
     fn commit_done(&self, commits_done: usize, total_hunks: usize);
@@ -204,9 +211,15 @@ impl Indexer {
     ) -> Result<IndexerReport> {
         use crate::indexer::coordinator::Coordinator;
 
-        // Delegate stages 1-5 to the coordinator.
+        // Delegate stages 1-5 to the coordinator. Pass the progress
+        // sink through so the coordinator can drive `pre_walk`,
+        // `start`, and `commit_done` from inside the per-commit loop.
+        // Issue #29 — without this thread-through the bar only got
+        // `start` / `commit_done(total, total)` / `finish` called at
+        // the end of the run, so the user saw no per-commit motion.
         let coordinator = Coordinator::new(self.storage.clone(), self.embedder.clone())
-            .with_embed_batch(self.embed_batch);
+            .with_embed_batch(self.embed_batch)
+            .with_progress(self.progress.clone());
 
         let result = coordinator
             .run_timed_with_extractor(
@@ -229,7 +242,6 @@ impl Indexer {
             total_hunks,
             "commit walk done; extracting HEAD symbols"
         );
-        self.progress.start(total_commits);
         self.progress.phase_symbols();
 
         // HEAD symbol extraction (outside coordinator scope — remains
@@ -252,7 +264,6 @@ impl Indexer {
                 .await?;
         }
 
-        self.progress.commit_done(total_commits, total_hunks);
         self.progress
             .finish(total_commits, total_hunks, symbols.len());
         Ok(IndexerReport {

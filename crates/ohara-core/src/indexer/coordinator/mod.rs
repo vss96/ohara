@@ -7,12 +7,21 @@ use crate::indexer::stages::{
     hunk_chunk::HunkChunkStage, persist::PersistStage,
 };
 use crate::indexer::{
-    AtomicSymbolExtractor, CommitSource, NullAtomicSymbolExtractor, PhaseTimings, SymbolSource,
+    AtomicSymbolExtractor, CommitSource, NullAtomicSymbolExtractor, NullProgress, PhaseTimings,
+    ProgressSink, SymbolSource,
 };
 use crate::types::{CommitMeta, RepoId};
 use crate::{EmbeddingProvider, Result, Storage};
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Liveness signal — emit an info-level event every N commits so
+/// `RUST_LOG=info` users without a visible progress bar still see
+/// steady forward motion. Also bounds resume-time worst-case to
+/// `PROGRESS_INTERVAL` re-walked commits after an abort. Issue #29 —
+/// at 100 a 5k-commit first-time run produced one tick every ~30s; 25
+/// gives ~one every few seconds without flooding.
+const PROGRESS_INTERVAL: usize = 25;
 
 /// Counts and phase timings returned by `Coordinator::run_timed`.
 /// Used by `Indexer::run` to populate `IndexerReport` after delegating
@@ -46,10 +55,12 @@ pub struct Coordinator {
     storage: Arc<dyn Storage + Send + Sync>,
     embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
     embed_batch: usize,
+    progress: Arc<dyn ProgressSink>,
 }
 
 impl Coordinator {
-    /// Construct a coordinator with the default `embed_batch` of 32.
+    /// Construct a coordinator with the default `embed_batch` of 32
+    /// and a no-op progress sink.
     pub fn new(
         storage: Arc<dyn Storage + Send + Sync>,
         embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
@@ -58,12 +69,21 @@ impl Coordinator {
             storage,
             embedder,
             embed_batch: 32,
+            progress: Arc::new(NullProgress),
         }
     }
 
     /// Override the embed stage's batch size.
     pub fn with_embed_batch(mut self, n: usize) -> Self {
         self.embed_batch = n.max(1);
+        self
+    }
+
+    /// Wire a [`ProgressSink`] so the coordinator can drive `pre_walk`,
+    /// `start`, and per-commit `commit_done` updates from inside the
+    /// pipeline. Defaults to [`NullProgress`].
+    pub fn with_progress(mut self, progress: Arc<dyn ProgressSink>) -> Self {
+        self.progress = progress;
         self
     }
 
@@ -127,16 +147,38 @@ impl Coordinator {
             .as_deref()
             .map(CommitWatermark::new);
 
-        // Stage 1: commit walk (timed).
+        // Stage 1: commit walk (timed). The walk is silent and can take
+        // seconds on multi-thousand-commit repos, so spin a pre-walk
+        // indicator and emit an info log so users without a TTY-rendered
+        // bar still see motion (issue #29).
+        self.progress.pre_walk("walking commit history");
+        tracing::info!("walking commit history");
         let walk_start = Instant::now();
         let commits = CommitWalkStage::run(commit_source, watermark.as_ref()).await?;
         result.timings.commit_walk_ms = walk_start.elapsed().as_millis() as u64;
+        tracing::info!(
+            new_commits = commits.len(),
+            walk_ms = result.timings.commit_walk_ms,
+            "commit walk complete; begin per-commit indexing"
+        );
+        self.progress.start(commits.len());
 
+        let mut commits_done = 0usize;
         for commit in &commits {
             // Skip commits that are already indexed.
             if self.storage.commit_exists(&commit.commit_sha).await? {
                 tracing::debug!(sha = %commit.commit_sha, "plan-19: skipping already-indexed commit");
                 result.latest_sha = Some(commit.commit_sha.clone());
+                commits_done += 1;
+                self.progress.commit_done(commits_done, result.new_hunks);
+                if commits_done % PROGRESS_INTERVAL == 0 {
+                    tracing::info!(
+                        commits_done,
+                        total = commits.len(),
+                        new_hunks = result.new_hunks,
+                        "indexing progress"
+                    );
+                }
                 continue;
             }
             self.run_commit_timed(
@@ -149,6 +191,16 @@ impl Coordinator {
             )
             .await?;
             result.latest_sha = Some(commit.commit_sha.clone());
+            commits_done += 1;
+            self.progress.commit_done(commits_done, result.new_hunks);
+            if commits_done % PROGRESS_INTERVAL == 0 {
+                tracing::info!(
+                    commits_done,
+                    total = commits.len(),
+                    new_hunks = result.new_hunks,
+                    "indexing progress"
+                );
+            }
         }
         Ok(result)
     }
