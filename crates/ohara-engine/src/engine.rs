@@ -290,10 +290,12 @@ impl RetrievalEngine {
                 self.blame_cache_hit_count.fetch_add(1, Ordering::Relaxed);
                 tracing::debug!(file = %query.file, "explain_change: BlameCache hit");
                 let hydrated = ohara_core::explain::hydrator::hydrate_blame_results(
-                    &*handle.storage,
-                    (*cached).clone(),
-                    &query,
-                    &handle.repo_id,
+                    ohara_core::explain::hydrator::HydrateInputs {
+                        storage: &*handle.storage,
+                        blame_ranges: (*cached).clone(),
+                        query: &query,
+                        repo_id: &handle.repo_id,
+                    },
                 )
                 .await
                 .map_err(EngineError::from)?;
@@ -319,10 +321,12 @@ impl RetrievalEngine {
         }
 
         let hydrated = ohara_core::explain::hydrator::hydrate_blame_results(
-            &*handle.storage,
-            raw_ranges,
-            &query,
-            &handle.repo_id,
+            ohara_core::explain::hydrator::HydrateInputs {
+                storage: &*handle.storage,
+                blame_ranges: raw_ranges,
+                query: &query,
+                repo_id: &handle.repo_id,
+            },
         )
         .await
         .map_err(EngineError::from)?;

@@ -35,6 +35,19 @@ pub struct HydratedBlame {
     pub clamped_range: (u32, u32),
 }
 
+/// Inputs to [`hydrate_blame_results`], grouped so the two call sites
+/// (the cache-miss orchestrator and the cache-hit engine path) can use
+/// named fields rather than four positional arguments. Adding a new
+/// input here only requires updating the call sites that need to set
+/// it explicitly — the rest can leave the field at its default once
+/// one is supplied.
+pub struct HydrateInputs<'a> {
+    pub storage: &'a dyn Storage,
+    pub blame_ranges: Vec<super::BlameRange>,
+    pub query: &'a super::ExplainQuery,
+    pub repo_id: &'a RepoId,
+}
+
 /// Hydrate a pre-computed `Vec<BlameRange>` into `HydratedBlame`.
 ///
 /// Deliberately does NOT call `BlameSource::blame_range` — callers
@@ -57,16 +70,19 @@ pub struct HydratedBlame {
 ///    retrieves already-computed `BlameRange`s from `BlameCache` and calls
 ///    this function directly, skipping the blamer entirely.
 ///
-/// This is a deliberate coupling surface, not a general public API.  Any
-/// signature change here requires coordinated updates at **both** call sites.
+/// Inputs are grouped into [`HydrateInputs`] so additions to the surface
+/// only break call sites that care about the new field — adding a default
+/// no longer requires touching every call site.
+///
 /// Consumers outside `ohara-core` and `ohara-engine` MUST NOT depend on this
 /// function — its stability is not guaranteed across releases.
-pub async fn hydrate_blame_results(
-    storage: &dyn Storage,
-    blame_ranges: Vec<super::BlameRange>,
-    query: &super::ExplainQuery,
-    repo_id: &RepoId,
-) -> Result<HydratedBlame> {
+pub async fn hydrate_blame_results(input: HydrateInputs<'_>) -> Result<HydratedBlame> {
+    let HydrateInputs {
+        storage,
+        blame_ranges,
+        query,
+        repo_id,
+    } = input;
     // Derive the clamped range and line attribution totals from the blame
     // output — mirrors the existing logic in `explain_change`.
     let (clamped_start, clamped_end, lines_attributed_total) = if blame_ranges.is_empty() {
@@ -455,9 +471,14 @@ mod tests {
             include_related: false,
         };
         let repo_id = RepoId::from_parts("aaa", "/r");
-        let h = hydrate_blame_results(&storage, ranges, &query, &repo_id)
-            .await
-            .unwrap();
+        let h = hydrate_blame_results(HydrateInputs {
+            storage: &storage,
+            blame_ranges: ranges,
+            query: &query,
+            repo_id: &repo_id,
+        })
+        .await
+        .unwrap();
 
         assert_eq!(h.hits.len(), 2);
         assert!(
@@ -494,9 +515,14 @@ mod tests {
             include_related: false,
         };
         let repo_id = RepoId::from_parts("aaa", "/r");
-        let h = hydrate_blame_results(&storage, ranges, &query, &repo_id)
-            .await
-            .unwrap();
+        let h = hydrate_blame_results(HydrateInputs {
+            storage: &storage,
+            blame_ranges: ranges,
+            query: &query,
+            repo_id: &repo_id,
+        })
+        .await
+        .unwrap();
 
         assert_eq!(h.hits.len(), 1);
         assert!(
