@@ -215,7 +215,7 @@ impl RetrievalEngine {
     ///
     /// `ResponseMeta` is served from [`MetaCache`] when a fresh entry
     /// exists (TTL = 5 s). On a miss the meta is computed via
-    /// [`compose_response_meta`] and stored in the cache before returning.
+    /// `compose_response_meta` and stored in the cache before returning.
     pub async fn find_pattern(
         &self,
         repo_path: impl AsRef<Path>,

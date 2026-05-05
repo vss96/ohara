@@ -44,7 +44,7 @@ pub enum ProviderArg {
 
 /// Resolve a `ProviderArg` into a concrete [`EmbedProvider`].
 ///
-/// `Auto` consults [`detect_provider`]. The CPU / CoreML / CUDA arms
+/// `Auto` consults `detect_provider`. The CPU / CoreML / CUDA arms
 /// are passed through unchanged so users can force a provider that
 /// differs from the auto pick (for benchmarking, or to confirm a
 /// fallback path is wired up).

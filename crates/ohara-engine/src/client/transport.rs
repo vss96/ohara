@@ -16,7 +16,7 @@ pub struct Client {
 impl Client {
     /// Create a client pointed at `socket`.
     ///
-    /// No I/O is performed here; the connection is established inside [`call`].
+    /// No I/O is performed here; the connection is established inside [`Self::call`].
     pub fn connect(socket: impl AsRef<Path>) -> Self {
         Self {
             socket: socket.as_ref().to_path_buf(),

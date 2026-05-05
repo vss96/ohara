@@ -81,9 +81,9 @@ impl Retriever {
             .map(|(hits, _profile)| hits)
     }
 
-    /// Plan 12 Task 2.1 / Plan 20: same as [`find_pattern`] but also returns
-    /// the [`RetrievalProfile`] picked from
-    /// `query_understanding::parse_query`. Lets callers surface the
+    /// Plan 12 Task 2.1 / Plan 20: same as [`Self::find_pattern`] but also
+    /// returns the [`RetrievalProfile`](crate::query_understanding::RetrievalProfile)
+    /// picked from `query_understanding::parse_query`. Lets callers surface the
     /// profile in their response metadata (`_meta.query_profile`)
     /// without re-running the parser.
     ///
