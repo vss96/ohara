@@ -456,6 +456,10 @@ mod tests {
         fts_text: Vec<HunkHit>,
         fts_sym: Vec<HunkHit>,
         calls: Mutex<Vec<&'static str>>,
+        // Plan 24: per-method batch-call counter so tests can assert the
+        // hydration step issues exactly one batch call rather than N
+        // sequential per-hit round-trips.
+        batch_calls: Mutex<usize>,
     }
 
     impl FakeStorage {
@@ -465,6 +469,7 @@ mod tests {
                 fts_text,
                 fts_sym,
                 calls: Mutex::new(vec![]),
+                batch_calls: Mutex::new(0),
             }
         }
     }
@@ -564,6 +569,10 @@ mod tests {
             _: &RepoId,
             _: crate::storage::HunkId,
         ) -> crate::Result<Vec<crate::types::HunkSymbol>> {
+            // Plan 24: record the per-hit call so the regression test
+            // can assert the retriever stopped using this loop in favor
+            // of `get_hunk_symbols_batch`.
+            self.calls.lock().unwrap().push("get_hunk_symbols");
             Ok(Vec::new())
         }
         async fn get_hunk_symbols_batch(
@@ -573,6 +582,7 @@ mod tests {
         ) -> crate::Result<
             std::collections::HashMap<crate::storage::HunkId, Vec<crate::types::HunkSymbol>>,
         > {
+            *self.batch_calls.lock().unwrap() += 1;
             Ok(std::collections::HashMap::new())
         }
         async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
@@ -864,6 +874,53 @@ mod tests {
         assert_eq!(
             out[0].commit_sha, "new",
             "newer commit should outrank older when scores are tied"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_pattern_calls_get_hunk_symbols_batch_exactly_once() {
+        // Plan 24 regression: hydration must be one batch call, not N
+        // sequential calls. We construct lanes that surface 5 distinct
+        // hunks; the retriever should make exactly 1 call to the batch
+        // method and 0 calls to the per-hit method.
+        let now = 1_700_000_000;
+        let knn = vec![
+            fake_hit(1, "a", now, 0.9, "diff-a"),
+            fake_hit(2, "b", now, 0.5, "diff-b"),
+            fake_hit(3, "c", now, 0.4, "diff-c"),
+            fake_hit(4, "d", now, 0.3, "diff-d"),
+            fake_hit(5, "e", now, 0.2, "diff-e"),
+        ];
+        let storage = Arc::new(FakeStorage::new(knn, vec![], vec![]));
+        let embedder = Arc::new(FakeEmbedder);
+        let r = Retriever::new(storage.clone(), embedder);
+        let q = PatternQuery {
+            query: "anything".into(),
+            k: 5,
+            language: None,
+            since_unix: None,
+            no_rerank: true,
+        };
+        let id = RepoId::from_parts("x", "/y");
+        let _ = r.find_pattern(&id, &q, now).await.unwrap();
+
+        let batch_calls = *storage.batch_calls.lock().unwrap();
+        assert_eq!(
+            batch_calls, 1,
+            "hydrate_symbols MUST issue exactly 1 batch call for ≥1 surviving hits, got {batch_calls}"
+        );
+
+        // The per-hit method must NOT have been called by the retriever.
+        let per_hit_calls = storage
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| **c == "get_hunk_symbols")
+            .count();
+        assert_eq!(
+            per_hit_calls, 0,
+            "per-hit get_hunk_symbols must not be called by the retriever after plan-24"
         );
     }
 
