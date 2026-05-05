@@ -35,6 +35,9 @@ enum Cmd {
     Init(commands::init::Args),
     /// Build or update the index for a repo.
     Index(commands::index::Args),
+    /// Survey a repo's history and write a `.oharaignore` with
+    /// suggested skip patterns. Plan-26.
+    Plan(commands::plan::Args),
     /// Run a debug pattern query against an indexed repo.
     Query(commands::query::Args),
     /// Print index status for a repo.
@@ -65,6 +68,7 @@ async fn main() -> Result<()> {
     let outcome = match cli.command {
         Cmd::Init(a) => commands::init::run(a).await,
         Cmd::Index(a) => commands::index::run(a).await.map(|_| ()),
+        Cmd::Plan(a) => commands::plan::run(a).await,
         Cmd::Query(a) => commands::query::run(a, no_daemon).await,
         Cmd::Status(a) => commands::status::run(a).await,
         Cmd::Explain(a) => commands::explain::run(a, no_daemon).await,
