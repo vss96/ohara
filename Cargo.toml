@@ -15,7 +15,7 @@ members = [
 [workspace.package]
 edition = "2021"
 rust-version = "1.85"
-version = "0.7.5"
+version = "0.7.6"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/vss96/ohara"
 
