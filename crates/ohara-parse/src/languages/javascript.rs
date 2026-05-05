@@ -167,6 +167,30 @@ mod tests {
     }
 
     #[test]
+    fn extracts_class_with_no_methods() {
+        // An empty class and a class with only field declarations both
+        // need to produce a Class symbol — earlier the class capture was
+        // nested inside the method-definition pattern, so classes
+        // without method bodies were silently dropped.
+        let src = "class Empty {}\n\
+                   class WithFields {\n  x;\n  y = 0;\n}\n";
+        let syms = extract("a.js", src, "deadbeef").unwrap();
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"Empty"), "Empty class missing: {names:?}");
+        assert!(
+            names.contains(&"WithFields"),
+            "WithFields class missing: {names:?}"
+        );
+        let empty = syms.iter().find(|s| s.name == "Empty").unwrap();
+        assert!(matches!(empty.kind, ohara_core::types::SymbolKind::Class));
+        let with_fields = syms.iter().find(|s| s.name == "WithFields").unwrap();
+        assert!(matches!(
+            with_fields.kind,
+            ohara_core::types::SymbolKind::Class
+        ));
+    }
+
+    #[test]
     fn extracts_arrow_function_const() {
         let src = "const handle = (req, res) => { return res.json({}); };\n\
                    export const greet = name => `hi ${name}`;\n";

@@ -173,6 +173,24 @@ mod tests {
     }
 
     #[test]
+    fn extracts_class_with_no_methods() {
+        // An empty class and a field-only DTO both need to produce a
+        // Class symbol — earlier the class capture was nested inside
+        // the method-definition pattern, so classes without method
+        // bodies were silently dropped.
+        let src = "class Empty {}\n\
+                   class Dto {\n  id: string;\n  name: string;\n}\n";
+        let syms = extract("a.ts", src, "deadbeef", TsFlavor::Ts).unwrap();
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"Empty"), "Empty class missing: {names:?}");
+        assert!(names.contains(&"Dto"), "Dto class missing: {names:?}");
+        let empty = syms.iter().find(|s| s.name == "Empty").unwrap();
+        assert!(matches!(empty.kind, ohara_core::types::SymbolKind::Class));
+        let dto = syms.iter().find(|s| s.name == "Dto").unwrap();
+        assert!(matches!(dto.kind, ohara_core::types::SymbolKind::Class));
+    }
+
+    #[test]
     fn extracts_tsx_components() {
         let src = "function App(): JSX.Element { return <div />; }\n\
                    const Button = (props: { label: string }) => <button>{props.label}</button>;\n";
