@@ -50,17 +50,12 @@ struct SweepRow {
 /// CONTRIBUTING.md (each runner readable end-to-end).
 #[derive(Debug, Deserialize)]
 struct GoldenCase {
-    #[allow(dead_code)]
     id: String,
-    #[allow(dead_code)]
     query: String,
-    #[allow(dead_code)]
     language: Option<String>,
-    #[allow(dead_code)]
     since_unix: Option<i64>,
     /// Ordered by importance. Each label resolves to a SHA at runtime
     /// via the fixture's commit-message lookup.
-    #[allow(dead_code)]
     expected_commit_labels: Vec<String>,
     /// Hint for failure-mode debugging. Not used in scoring.
     #[allow(dead_code)]
@@ -204,18 +199,101 @@ fn load_golden() -> Result<Vec<GoldenCase>> {
     Ok(cases)
 }
 
+fn percentile(sorted: &[f32], pct: f32) -> f32 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let n = sorted.len();
+    let idx_f = ((pct / 100.0) * n as f32).ceil() as usize;
+    let idx = idx_f.saturating_sub(1).min(n - 1);
+    sorted[idx]
+}
+
+async fn run_sweep_iteration(
+    retriever: &Retriever,
+    repo_id: &ohara_core::types::RepoId,
+    cases: &[GoldenCase],
+    label_to_sha: &HashMap<String, String>,
+    now_unix: i64,
+    pool: usize,
+) -> Result<SweepRow> {
+    let mut latencies_ms: Vec<f32> = Vec::with_capacity(cases.len());
+    let mut hits_at_1: usize = 0;
+    let mut hits_at_5: usize = 0;
+    let mut rr_sum: f32 = 0.0;
+
+    for case in cases {
+        let expected_shas: Vec<String> = case
+            .expected_commit_labels
+            .iter()
+            .map(|label| {
+                label_to_sha
+                    .get(label)
+                    .cloned()
+                    .unwrap_or_else(|| panic!("unknown label '{label}' in case {}", case.id))
+            })
+            .collect();
+
+        let q = PatternQuery {
+            query: case.query.clone(),
+            k: 5,
+            language: case.language.clone(),
+            since_unix: case.since_unix,
+            no_rerank: false,
+        };
+        let started = Instant::now();
+        let (hits, _profile) = retriever
+            .find_pattern_with_profile(repo_id, &q, now_unix)
+            .await
+            .with_context(|| format!("find_pattern {} (pool={pool})", case.id))?;
+        let elapsed_ms = started.elapsed().as_secs_f32() * 1000.0;
+        latencies_ms.push(elapsed_ms);
+
+        let any_in_top1 = hits
+            .first()
+            .map(|h| expected_shas.iter().any(|sha| sha == &h.commit_sha))
+            .unwrap_or(false);
+        if any_in_top1 {
+            hits_at_1 += 1;
+        }
+        let first_rank = hits
+            .iter()
+            .take(5)
+            .position(|h| expected_shas.iter().any(|sha| sha == &h.commit_sha));
+        if first_rank.is_some() {
+            hits_at_5 += 1;
+        }
+        if let Some(rank) = first_rank {
+            rr_sum += 1.0 / ((rank + 1) as f32);
+        }
+    }
+
+    latencies_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p50 = percentile(&latencies_ms, 50.0);
+    let p95 = percentile(&latencies_ms, 95.0);
+    let denom = cases.len().max(1) as f32;
+    Ok(SweepRow {
+        pool_size: pool,
+        cases: cases.len(),
+        recall_at_1: hits_at_1 as f32 / denom,
+        recall_at_5: hits_at_5 as f32 / denom,
+        mrr: rr_sum / denom,
+        p50_ms: p50,
+        p95_ms: p95,
+    })
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "perf sweep; opt-in via `--ignored rerank_pool_sweep`"]
 async fn rerank_pool_sweep() -> Result<()> {
-    // Skeleton — body filled in by Tasks A.4 through A.6.
+    // Skeleton — body filled in by Tasks A.5 (recommend) and A.6 (e2e).
     let _cases = load_golden()?;
     let _ = (POOL_SIZES, std::any::type_name::<SweepRow>());
-    let _ = std::any::type_name::<Retriever>();
     let _ = std::any::type_name::<RankingWeights>();
-    let _ = std::any::type_name::<PatternQuery>();
     let _ = ensure_fixture;
     let _ = resolve_labels;
     let _ = build_pipeline_components;
-    let _ = Instant::now();
+    let _ = run_sweep_iteration;
+    let _: Option<Arc<()>> = None;
     Ok(())
 }
