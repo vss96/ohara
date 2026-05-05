@@ -6,6 +6,7 @@ pub mod daemon;
 pub mod explain;
 pub mod index;
 pub mod init;
+pub mod plan;
 pub mod provider;
 pub mod query;
 pub mod serve;
