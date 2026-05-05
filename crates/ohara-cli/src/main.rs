@@ -94,11 +94,20 @@ async fn main() -> Result<()> {
 /// When `perf_acc` is `Some`, a [`PerfAccumulator`] layer is also installed
 /// that captures `ohara::phase` events for later summary printing.
 ///
-/// `EnvFilter` defaults to `info,ohara=debug` (override with `RUST_LOG`).
+/// `EnvFilter` defaults to `info,ohara=debug,refinery_core=warn`
+/// (override with `RUST_LOG`).
+///
+/// `refinery_core=warn` silences the "applying migration" / "no migrations
+/// to apply" / "preparing to apply N migrations: Map {…}" INFO chatter that
+/// otherwise lands on every `ohara status` / `ohara index` invocation
+/// (issue #28). Refinery dumps the full SQL of every migration as a Debug
+/// `Map` at INFO level, drowning every other line. Real migration failures
+/// still surface at WARN/ERROR.
 fn init_tracing(perf_acc: Option<PerfAccumulator>) {
     let indicatif_layer = IndicatifLayer::new();
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ohara=debug"));
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new("info,ohara=debug,refinery_core=warn")
+    });
     // When --trace-perf is on, force-enable `ohara::phase=info` so the
     // PerfAccumulator sees events even if RUST_LOG is set to filter
     // info-level messages globally (e.g. RUST_LOG=warn). Without this,

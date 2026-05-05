@@ -59,7 +59,7 @@ pub struct Args {
     #[arg(long)]
     pub threads: Option<usize>,
     /// Disable the progress bar even when stderr is a TTY. The indexer
-    /// still emits `tracing::info!` events every 100 commits.
+    /// still emits `tracing::info!` events every 25 commits.
     #[arg(long)]
     pub no_progress: bool,
     /// Emit the per-phase wall-time + hunk-inflation breakdown as a
@@ -303,20 +303,36 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
     let chosen_provider =
         resolve_and_warn(plan.embed_provider, &repo_id, &storage, &canonical).await?;
     tracing::info!(provider = ?chosen_provider, "embedder");
+
+    // Construct the progress sink BEFORE the embedder loads so the
+    // pre-walk spinner covers the model-load dead window. fastembed
+    // lazy-loads weights inside `with_provider`, which can take 15-25s
+    // on first run — without a spinner here the only output is the
+    // single "embedder provider=..." log followed by silence (issue
+    // #29). The same sink is later wired into the indexer so the
+    // spinner upgrades into a per-commit bar once the walk completes.
+    let progress: Arc<dyn ohara_core::ProgressSink> = if args.no_progress {
+        Arc::new(ohara_core::NullProgress)
+    } else {
+        Arc::new(crate::progress::IndicatifProgress::new())
+    };
+
+    progress.pre_walk("loading embedder model");
+    tracing::info!(model = ohara_embed::DEFAULT_MODEL_ID, "loading embedder");
+    let embedder_load_start = std::time::Instant::now();
     let embedder = Arc::new(
         tokio::task::spawn_blocking(move || {
             ohara_embed::FastEmbedProvider::with_provider(chosen_provider)
         })
         .await??,
     );
+    tracing::info!(
+        elapsed_ms = embedder_load_start.elapsed().as_millis() as u64,
+        "embedder loaded"
+    );
+
     let commit_source = ohara_git::GitCommitSource::open(&canonical)?;
     let symbol_source = ohara_parse::GitSymbolSource::open(&canonical)?;
-
-    let progress: Arc<dyn ohara_core::ProgressSink> = if args.no_progress {
-        Arc::new(ohara_core::NullProgress)
-    } else {
-        Arc::new(crate::progress::IndicatifProgress::new())
-    };
 
     // Plan 13: build the runtime metadata snapshot up front so a
     // successful pass records "this index was built with X embedder /

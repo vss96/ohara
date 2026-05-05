@@ -54,6 +54,22 @@ impl Default for IndicatifProgress {
 }
 
 impl ProgressSink for IndicatifProgress {
+    fn pre_walk(&self, msg: &str) {
+        // Length-less spinner so users see visible motion during the
+        // long startup phases (embedder lazy-load, libgit2 revwalk)
+        // before `total_commits` is known. The progress bar style
+        // installed here is replaced by the per-commit bar template
+        // when `start()` is later called with a known length.
+        let style = ProgressStyle::with_template("{spinner:.green} {msg} [{elapsed_precise}]")
+            .expect("static spinner template is valid");
+        let owned = msg.to_string();
+        self.with_span(|s| {
+            s.pb_set_style(&style);
+            s.pb_set_message(&owned);
+            s.pb_start();
+        });
+    }
+
     fn start(&self, total_commits: usize) {
         let style = ProgressStyle::with_template(
             "{spinner:.green} indexing [{elapsed_precise}] [{bar:40.cyan/blue}] \
@@ -65,7 +81,7 @@ impl ProgressSink for IndicatifProgress {
             s.pb_set_style(&style);
             s.pb_set_length(total_commits as u64);
             s.pb_set_position(0);
-            s.pb_set_message("walking commits");
+            s.pb_set_message("indexing");
             // pb_start materializes the bar in the layer's MultiProgress
             // (no-op if already started or layer is absent).
             s.pb_start();
@@ -102,6 +118,8 @@ mod tests {
     #[test]
     fn drives_without_layer() {
         let p = IndicatifProgress::new();
+        p.pre_walk("loading embedder");
+        p.pre_walk("walking commit history");
         p.start(10);
         p.commit_done(1, 0);
         p.commit_done(5, 0);
@@ -109,5 +127,6 @@ mod tests {
         p.finish(10, 42, 7);
         // After finish(), additional calls are still no-ops (span is None).
         p.commit_done(11, 0);
+        p.pre_walk("would no-op");
     }
 }
