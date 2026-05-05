@@ -319,9 +319,11 @@ async fn coordinator_resume_from_attributed_hunks_directly() {
 
 #[tokio::test]
 async fn coordinator_with_ignore_filter_field_is_set() {
-    // Plan 26 Task C.1: Coordinator must accept an optional
-    // IgnoreFilter via builder and stash it. We don't yet wire the
-    // filter into the loop — that's Task C.2.
+    // Plan 26: builder smoke test — `with_ignore_filter` accepts an
+    // `Arc<dyn IgnoreFilter>` and returns `Self`. Behavioural coverage
+    // (mixed-path filtering, 100%-ignored watermark advance) lives in
+    // `ignored_paths_drop_from_hunk_records_before_persist` and
+    // `fully_ignored_commit_advances_watermark_with_zero_persisted_rows`.
     use crate::ignore::LayeredIgnore;
 
     let storage = Arc::new(SpyStorage::default());
@@ -329,8 +331,6 @@ async fn coordinator_with_ignore_filter_field_is_set() {
 
     let filter: Arc<dyn crate::IgnoreFilter> = Arc::new(LayeredIgnore::builtins_only());
     let coord = Coordinator::new(storage, embedder).with_ignore_filter(filter);
-    // Smoke test: builder type-checks, returns Self. Behaviour is
-    // exercised in C.2/C.3.
     let _ = coord;
 }
 

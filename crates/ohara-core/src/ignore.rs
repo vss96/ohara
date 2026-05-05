@@ -128,6 +128,11 @@ fn build_gitignore_from_patterns(
 /// `linguist-vendored=true`. Lines without those attributes are
 /// ignored. Patterns are reused verbatim — gitattributes path patterns
 /// are gitignore-compatible.
+///
+/// Malformed individual patterns are logged at warn level and skipped
+/// (the rest of the layer still works); a `build()` failure (rare —
+/// affects the whole layer) falls back to an empty matcher with a
+/// warning so the user notices their `.gitattributes` was ignored.
 fn build_gitignore_from_gitattributes(root: &Path, contents: &str) -> Gitignore {
     let mut b = GitignoreBuilder::new(root);
     for line in contents.lines() {
@@ -150,12 +155,26 @@ fn build_gitignore_from_gitattributes(root: &Path, contents: &str) -> Gitignore 
             continue;
         }
         // gitattributes wildcards are gitignore-compatible.
-        let _ = b.add_line(None, pattern);
+        if let Err(e) = b.add_line(None, pattern) {
+            tracing::warn!(
+                pattern,
+                error = %e,
+                "skipped malformed .gitattributes linguist-* pattern"
+            );
+        }
     }
-    b.build().unwrap_or_else(|_| Gitignore::empty())
+    b.build().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, ".gitattributes ignore layer failed to build; treating as empty");
+        Gitignore::empty()
+    })
 }
 
 /// Parse a `.oharaignore` (gitignore-syntax) string into a matcher.
+///
+/// Malformed individual patterns are logged at warn level and skipped
+/// (the rest of the file still works); a `build()` failure (rare)
+/// falls back to an empty matcher with a warning so a typo in the
+/// user's file doesn't silently disable the entire layer.
 fn build_gitignore_from_lines(root: &Path, contents: &str) -> Gitignore {
     let mut b = GitignoreBuilder::new(root);
     for line in contents.lines() {
@@ -163,9 +182,18 @@ fn build_gitignore_from_lines(root: &Path, contents: &str) -> Gitignore {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let _ = b.add_line(None, line);
+        if let Err(e) = b.add_line(None, line) {
+            tracing::warn!(
+                pattern = line,
+                error = %e,
+                "skipped malformed .oharaignore line"
+            );
+        }
     }
-    b.build().unwrap_or_else(|_| Gitignore::empty())
+    b.build().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, ".oharaignore ignore layer failed to build; treating as empty");
+        Gitignore::empty()
+    })
 }
 
 fn read_to_string_or_empty(path: &Path) -> std::io::Result<String> {

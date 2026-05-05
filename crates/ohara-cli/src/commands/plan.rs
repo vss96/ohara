@@ -294,7 +294,7 @@ pub fn render_oharaignore_body(patterns: &[String], version: &str) -> String {
     out.push('\n');
     out.push('\n');
     out.push_str(
-        "# user-added lines below this marker are preserved by `ohara plan --keep-existing`\n",
+        "# user-added lines below this marker are preserved across `ohara plan` re-runs (use --replace to overwrite the entire file)\n",
     );
     out
 }
@@ -357,8 +357,8 @@ mod writer_tests {
 
     #[test]
     fn merge_replaces_only_auto_section_in_existing_file() {
-        // Plan 26 Task D.4: --keep-existing (default) preserves user
-        // lines outside the markers across re-runs.
+        // Plan 26 Task D.4: default merge preserves user lines outside
+        // the markers across re-runs (no flag needed; --replace opts out).
         let existing = "\
 # === ohara plan v0.7.6 — auto-generated 2026-05-04T12:00:00 ===
 old_pattern/
