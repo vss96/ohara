@@ -1,8 +1,13 @@
-; Kotlin symbol extraction query (Plan 4).
+; Kotlin symbol extraction query (tree-sitter-kotlin-ng 1.1).
 ;
-; Kotlin grammar 0.3.x does not expose a `name:` field on class /
-; object / companion declarations — the identifier is just a child of
-; type_identifier kind. Captures rely on positional patterns instead.
+; The kotlin-ng grammar replaced `type_identifier` and `simple_identifier`
+; with a single `identifier` node, and exposes a `name:` field on
+; class_declaration / object_declaration / companion_object /
+; function_declaration. Top-level declarations now sit under
+; (source_file (statement (declaration ...))), and class-body members
+; under (class_body (class_member_declaration (declaration ...))).
+; `statement`, `declaration`, and `class_member_declaration` are
+; supertype subtypes, so we navigate them with anonymous wildcards.
 ;
 ; sealed/data/inner/inline-value variants of class_declaration share
 ; the same AST node type, distinguished only by their `modifiers`
@@ -11,22 +16,25 @@
 ; what the Spring-flavored tests rely on.
 
 (class_declaration
-  (type_identifier) @class_name) @def_class
+  name: (identifier) @class_name) @def_class
 
 (object_declaration
-  (type_identifier) @class_name) @def_class
+  name: (identifier) @class_name) @def_class
 
 (companion_object
-  (type_identifier) @class_name) @def_class
+  name: (identifier) @class_name) @def_class
 
-; Top-level function: directly under source_file.
+; Top-level function: in kotlin-ng, function_declaration appears as a
+; direct child of source_file (the statement/declaration supertype
+; nodes from node-types.json are flattened in the concrete tree).
 (source_file
   (function_declaration
-    (simple_identifier) @func_name) @def_function)
+    name: (identifier) @func_name) @def_function)
 
 ; Member function: nested inside a class/object/companion body. The
 ; class_body wrapper is shared by class_declaration, object_declaration,
 ; and companion_object, so a single pattern covers all three contexts.
+; class_member_declaration is similarly a flattened supertype here.
 (class_body
   (function_declaration
-    (simple_identifier) @method_name) @def_method)
+    name: (identifier) @method_name) @def_method)

@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
 use ohara_core::types::{Symbol, SymbolKind};
 use std::collections::HashMap;
-use tree_sitter::{Parser, Query, QueryCursor};
+use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
 
 const QUERY_SRC: &str = include_str!("../../queries/python.scm");
 
 pub fn extract(file_path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symbol>> {
     let mut parser = Parser::new();
-    let language = tree_sitter_python::language();
+    let language: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
     parser
         .set_language(&language)
         .context("set python language")?;
@@ -17,7 +17,8 @@ pub fn extract(file_path: &str, source: &str, blob_sha: &str) -> Result<Vec<Symb
 
     let mut out: Vec<Symbol> = Vec::new();
 
-    for m in cursor.matches(&query, tree.root_node(), source.as_bytes()) {
+    let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    while let Some(m) = matches.next() {
         // Each match may carry up to two distinct symbols: a class definition
         // and (if the pattern matches a class containing a method) the method
         // itself. Track them independently so a single match can emit both.

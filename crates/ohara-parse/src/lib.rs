@@ -52,10 +52,12 @@ pub const CHUNKER_VERSION: &str = "2";
 /// output semantics change.
 pub fn parser_versions() -> BTreeMap<String, String> {
     [
-        ("rust", "1"),
-        ("python", "1"),
-        ("java", "1"),
-        ("kotlin", "1"),
+        ("rust", "2"),   // bumped: tree-sitter-rust 0.21 -> 0.24 may emit subtly different AST
+        ("python", "2"), // bumped: tree-sitter-python 0.21 -> 0.25
+        ("java", "2"),   // bumped: tree-sitter-java 0.21 -> 0.23
+        ("kotlin", "2"), // bumped: grammar swapped to tree-sitter-kotlin-ng
+        ("javascript", "1"), // plan-17: initial javascript extractor
+        ("typescript", "1"), // plan-17: initial typescript extractor
     ]
     .into_iter()
     .map(|(lang, ver)| (lang.to_string(), ver.to_string()))
@@ -91,6 +93,21 @@ pub fn extract_atomic_symbols(path: &str, source: &str, blob_sha: &str) -> Resul
         Some("py") => languages::python::extract(path, source, blob_sha)?,
         Some("java") => languages::java::extract(path, source, blob_sha)?,
         Some("kt") | Some("kts") => languages::kotlin::extract(path, source, blob_sha)?,
+        Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => {
+            languages::javascript::extract(path, source, blob_sha)?
+        }
+        Some("ts") => languages::typescript::extract(
+            path,
+            source,
+            blob_sha,
+            languages::typescript::TsFlavor::Ts,
+        )?,
+        Some("tsx") => languages::typescript::extract(
+            path,
+            source,
+            blob_sha,
+            languages::typescript::TsFlavor::Tsx,
+        )?,
         _ => return Ok(vec![]),
     };
     atoms.sort_by_key(|s| s.span_start);
@@ -187,6 +204,32 @@ impl SymbolSource for GitSymbolSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_atomic_symbols_dispatches_javascript_extensions() {
+        let src = "function alpha() {}\n";
+        for ext in ["js", "jsx", "mjs", "cjs"] {
+            let path = format!("a.{ext}");
+            let syms = extract_atomic_symbols(&path, src, "deadbeef").expect("dispatch");
+            assert!(
+                syms.iter().any(|s| s.name == "alpha"),
+                "{ext} did not dispatch to javascript extractor: {syms:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_atomic_symbols_dispatches_typescript_extensions() {
+        let src = "function alpha() {}\n";
+        for ext in ["ts", "tsx"] {
+            let path = format!("a.{ext}");
+            let syms = extract_atomic_symbols(&path, src, "deadbeef").expect("dispatch");
+            assert!(
+                syms.iter().any(|s| s.name == "alpha"),
+                "{ext} did not dispatch to typescript extractor: {syms:?}"
+            );
+        }
+    }
 
     #[test]
     fn extract_atomic_symbols_returns_pre_merge_atoms() {

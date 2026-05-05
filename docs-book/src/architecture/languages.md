@@ -21,6 +21,8 @@ extraction is the language-specific piece.
 | Python | v0.1 | Classes, methods, top-level functions. |
 | Java 17+ | v0.4 | Classes (incl. **sealed**), interfaces, **records**, enums, methods. |
 | Kotlin 1.9 / 2.0 | v0.4 | Classes (incl. **sealed**), **data classes**, **objects** + companion objects, interfaces, top-level + member functions. |
+| TypeScript | v0.8 | `.ts`, `.tsx`. Functions, classes, methods, arrow-function `const`s, **interfaces**, **type aliases**, **enums**. |
+| JavaScript | v0.8 | `.js`, `.jsx`, `.mjs`, `.cjs`. Functions, classes, methods, arrow-function `const`s. |
 
 ## Java + Kotlin specifics
 
@@ -38,9 +40,41 @@ Spring-flavored codebases, which means:
   "REST controller for user signup" matches symbols annotated with
   `@RestController` directly.
 
+## TypeScript + JavaScript specifics
+
+The v0.8 release adds first-class symbol extraction for the JS/TS
+ecosystem via the
+[`tree-sitter-typescript`](https://github.com/tree-sitter/tree-sitter-typescript)
+0.23 and
+[`tree-sitter-javascript`](https://github.com/tree-sitter/tree-sitter-javascript)
+0.23 grammars. Both grammars are loaded through the
+[`tree-sitter-language`](https://crates.io/crates/tree-sitter-language)
+ABI shim so they keep working as the host `tree-sitter` runtime
+advances.
+
+- **TypeScript** dispatches on `.ts` and `.tsx`; the latter is parsed
+  with the TSX dialect of the grammar so JSX expressions inside `.tsx`
+  components don't derail symbol extraction.
+- **JavaScript** dispatches on `.js`, `.jsx`, `.mjs`, and `.cjs`. JSX
+  inside `.jsx` parses cleanly via the same grammar.
+- **Symbols extracted (both languages):** `function` declarations,
+  `class` declarations, methods (including `constructor`, `get`/`set`,
+  `static`, and `async`), and arrow-function `const`s
+  (`export const Foo = (…) => {…}`) — the last one matters because the
+  modern React/Next idiom expresses components and hooks as arrow-bound
+  consts rather than `function` declarations.
+- **Symbols extracted (TypeScript only):** `interface` declarations,
+  `type` aliases, and `enum` declarations.
+- **Intentionally not extracted yet:** decorators (preserved inside
+  `source_text` like Java/Kotlin annotations, but not surfaced as
+  separate symbols), ambient declarations in `.d.ts` files (the file
+  extension dispatches normally but `declare` blocks aren't
+  symbolized), and `namespace` / `module` declarations (TS-only legacy
+  module syntax). These are tracked on the roadmap.
+
 ## Chunking
 
-All four languages share the v0.3 AST sibling-merge chunker
+All six languages share the v0.3 AST sibling-merge chunker
 (implemented in `ohara-parse`): depth-first traversal of the
 tree-sitter parse tree, accumulate sibling nodes into the current
 chunk while the running token total stays under a 500-token budget
@@ -56,6 +90,24 @@ symbols literally named X but symbols that share a parent with one.
 As of v0.6 the per-language extractors live under
 `crates/ohara-parse/src/languages/` (one module per language) — same
 behavior, tighter directory tree.
+
+## Grammar and parser versions
+
+Plan-18 (v0.7) modernized the tree-sitter stack: the workspace tracks
+`tree-sitter` 0.25, the rust/python/java grammars were bumped to their
+current upstream releases (rust 0.21 → 0.24, python 0.21 → 0.25, java
+0.21 → 0.23), and the kotlin grammar was swapped from the abandoned
+`fwcd/tree-sitter-kotlin` to the more-recently-maintained
+[`tree-sitter-grammars/tree-sitter-kotlin-ng`](https://github.com/tree-sitter-grammars/tree-sitter-kotlin-ng)
+fork.
+
+All four `parser_versions` bumped from `"1"` to `"2"` in lockstep, so
+indexes built before v0.7 receive a `query_compatible_needs_refresh`
+verdict per plan-13 (`docs/superpowers/plans/2026-05-02-ohara-plan-13-index-metadata-and-rebuild-safety.md`):
+queries still work, but the symbol/hunk derived rows can be
+out-of-date. Recovery is `ohara index --force`, which re-walks HEAD
+symbols and rewrites derived rows without touching the embedding
+vectors (model + dimension are unchanged).
 
 ## Future languages
 
