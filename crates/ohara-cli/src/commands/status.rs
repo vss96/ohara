@@ -46,6 +46,33 @@ pub fn render_compatibility(status: &CompatibilityStatus) -> String {
     }
 }
 
+/// Render the one-line summary printed by `ohara status` when the
+/// repo has any ignore rules active. Pulled out for unit testing.
+pub fn render_ignore_summary(builtins: usize, gitattrs: usize, user: usize) -> String {
+    let total = builtins + gitattrs + user;
+    format!(
+        "ignore_rules: {total} patterns ({builtins} built-in + {gitattrs} gitattributes + {user} user)"
+    )
+}
+
+fn count_ignore_layers(repo_root: &std::path::Path) -> (usize, usize, usize) {
+    let builtins = ohara_core::BUILT_IN_DEFAULTS.len();
+    let gitattrs = std::fs::read_to_string(repo_root.join(".gitattributes"))
+        .map(|s| s.lines().filter(|l| l.contains("linguist-")).count())
+        .unwrap_or(0);
+    let user = std::fs::read_to_string(repo_root.join(".oharaignore"))
+        .map(|s| {
+            s.lines()
+                .filter(|l| {
+                    let t = l.trim();
+                    !t.is_empty() && !t.starts_with('#')
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    (builtins, gitattrs, user)
+}
+
 pub async fn run(args: Args) -> Result<()> {
     let (repo_id, canonical, _) = super::resolve_repo_id(&args.path)?;
     let db_path = super::index_db_path(&repo_id)?;
@@ -66,6 +93,8 @@ pub async fn run(args: Args) -> Result<()> {
         st.commits_behind_head,
         render_compatibility(&compatibility),
     );
+    let (b, g, u) = count_ignore_layers(&canonical);
+    println!("{}", render_ignore_summary(b, g, u));
     Ok(())
 }
 
@@ -186,5 +215,23 @@ mod tests {
             CompatibilityStatus::assess(&runtime, &stored),
             CompatibilityStatus::Unknown { .. }
         ));
+    }
+
+    #[test]
+    fn render_ignore_summary_counts_by_layer() {
+        // Plan 26 Task E.1: a one-line summary of the active filter.
+        let s = render_ignore_summary(
+            /* builtins */ 18, /* gitattrs */ 0, /* user */ 5,
+        );
+        assert_eq!(
+            s,
+            "ignore_rules: 23 patterns (18 built-in + 0 gitattributes + 5 user)"
+        );
+    }
+
+    #[test]
+    fn render_ignore_summary_zero_user_no_gitattrs_still_prints() {
+        let s = render_ignore_summary(18, 0, 0);
+        assert!(s.contains("18 patterns"), "got: {s}");
     }
 }
