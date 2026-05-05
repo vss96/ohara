@@ -65,6 +65,17 @@ impl LayeredIgnore {
         }
     }
 
+    /// Load the three-layer filter from a repo root directory.
+    ///
+    /// Reads `<root>/.gitattributes` and `<root>/.oharaignore` if they
+    /// exist; missing files are treated as empty (no error). The
+    /// built-in defaults are always applied.
+    pub fn load(repo_root: &Path) -> std::io::Result<Self> {
+        let gitattributes = read_to_string_or_empty(&repo_root.join(".gitattributes"))?;
+        let user = read_to_string_or_empty(&repo_root.join(".oharaignore"))?;
+        Ok(Self::from_strings(BUILT_IN_DEFAULTS, &gitattributes, &user))
+    }
+
     /// Test/programmatic constructor: pass the three layers as in-memory
     /// strings. Used by unit tests and by `LayeredIgnore::load`.
     pub fn from_strings(builtins: &[&str], gitattributes: &str, user_oharaignore: &str) -> Self {
@@ -155,6 +166,14 @@ fn build_gitignore_from_lines(root: &Path, contents: &str) -> Gitignore {
         let _ = b.add_line(None, line);
     }
     b.build().unwrap_or_else(|_| Gitignore::empty())
+}
+
+fn read_to_string_or_empty(path: &Path) -> std::io::Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
@@ -257,5 +276,35 @@ mod tests {
         // The blank/comment lines must not have produced any matchers
         // that affect unrelated paths.
         assert!(!f.is_ignored("src/main.rs"));
+    }
+
+    #[test]
+    fn load_with_no_files_yields_builtins_only() {
+        // Plan 26 Task A.6: load() on an empty dir must succeed and
+        // behave like builtins_only.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let f = LayeredIgnore::load(dir.path()).expect("load empty repo");
+        assert!(f.is_ignored("node_modules/foo.js"));
+        assert!(!f.is_ignored("src/main.rs"));
+    }
+
+    #[test]
+    fn load_reads_oharaignore_at_repo_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(".oharaignore"), "drivers/\n").expect("write .oharaignore");
+        let f = LayeredIgnore::load(dir.path()).expect("load");
+        assert!(f.is_ignored("drivers/foo.c"));
+    }
+
+    #[test]
+    fn load_reads_gitattributes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "generated.rs linguist-generated=true\n",
+        )
+        .expect("write .gitattributes");
+        let f = LayeredIgnore::load(dir.path()).expect("load");
+        assert!(f.is_ignored("generated.rs"));
     }
 }
