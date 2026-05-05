@@ -517,6 +517,10 @@ mod tests {
         knn: Vec<HunkHit>,
         fts_text: Vec<HunkHit>,
         fts_sym: Vec<HunkHit>,
+        // Plan 25: scriptable hits for the semantic-text lane.
+        // Existing tests use `new(...)` and get an empty Vec; new
+        // tests use `new_with_semantic(...)` to seed it.
+        fts_semantic: Vec<HunkHit>,
         calls: Mutex<Vec<&'static str>>,
         // Plan 24: per-method batch-call counter so tests can assert the
         // hydration step issues exactly one batch call rather than N
@@ -526,10 +530,22 @@ mod tests {
 
     impl FakeStorage {
         fn new(knn: Vec<HunkHit>, fts_text: Vec<HunkHit>, fts_sym: Vec<HunkHit>) -> Self {
+            Self::new_with_semantic(knn, fts_text, fts_sym, vec![])
+        }
+
+        // Plan 25: secondary constructor for tests that need to script
+        // the semantic-text lane. Existing tests keep using `new(...)`.
+        fn new_with_semantic(
+            knn: Vec<HunkHit>,
+            fts_text: Vec<HunkHit>,
+            fts_sym: Vec<HunkHit>,
+            fts_semantic: Vec<HunkHit>,
+        ) -> Self {
             Self {
                 knn,
                 fts_text,
                 fts_sym,
+                fts_semantic,
                 calls: Mutex::new(vec![]),
                 batch_calls: Mutex::new(0),
             }
@@ -596,10 +612,12 @@ mod tests {
             _: Option<&str>,
             _: Option<i64>,
         ) -> crate::Result<Vec<HunkHit>> {
-            // Plan 11: keep retriever tests focused on the existing
-            // three lanes until Task 4.1 wires the semantic lane in.
+            // Plan 25: return scripted hits so retriever tests can
+            // exercise the lane. The "fts_semantic" call-record entry
+            // is what the test assertion checks for; the lane is now
+            // expected to actually contribute to the fused output.
             self.calls.lock().unwrap().push("fts_semantic");
-            Ok(Vec::new())
+            Ok(self.fts_semantic.clone())
         }
         async fn bm25_hunks_by_symbol_name(
             &self,
@@ -964,6 +982,51 @@ mod tests {
         assert_eq!(
             out[0].commit_sha, "new",
             "newer commit should outrank older when scores are tied"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_pattern_invokes_semantic_text_lane_and_fuses_into_rrf() {
+        // Plan 25: the semantic-text lane MUST be queried, and a hit
+        // surfaced ONLY by that lane MUST appear in the fused output. We
+        // construct lanes so the semantic lane is the *only* source for
+        // hunk_id=99; if the new lane is wired in, hunk 99 surfaces;
+        // otherwise it doesn't.
+        let now = 1_700_000_000;
+        let knn = vec![fake_hit(1, "a", now, 0.9, "diff-a")];
+        let fts_text = vec![fake_hit(2, "b", now, 0.5, "diff-b")];
+        let fts_sym = vec![fake_hit(3, "c", now, 0.3, "diff-c")];
+        let fts_semantic = vec![fake_hit(99, "z", now, 0.7, "diff-z-only-in-semantic")];
+        let storage = Arc::new(FakeStorage::new_with_semantic(
+            knn,
+            fts_text,
+            fts_sym,
+            fts_semantic,
+        ));
+        let embedder = Arc::new(FakeEmbedder);
+        let r = Retriever::new(storage.clone(), embedder);
+        let q = PatternQuery {
+            query: "anything".into(),
+            k: 10,
+            language: None,
+            since_unix: None,
+            no_rerank: true,
+        };
+        let id = RepoId::from_parts("x", "/y");
+        let out = r.find_pattern(&id, &q, now).await.unwrap();
+
+        let calls = storage.calls.lock().unwrap().clone();
+        assert!(
+            calls.contains(&"fts_semantic"),
+            "semantic-text lane MUST be invoked; calls = {calls:?}"
+        );
+        assert!(
+            out.iter().any(|h| h.commit_sha == "z"),
+            "hunk surfaced ONLY by the semantic-text lane MUST appear in fused output; \
+             got {:?}",
+            out.iter()
+                .map(|h| h.commit_sha.as_str())
+                .collect::<Vec<_>>()
         );
     }
 
