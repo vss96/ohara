@@ -22,7 +22,7 @@ pub mod storage;
 pub mod types;
 
 pub use diff_text::{count_lines, truncate_diff, DIFF_EXCERPT_MAX_LINES};
-pub use embed::EmbeddingProvider;
+pub use embed::{EmbedMode, EmbeddingProvider};
 pub use error::{OhraError, Result};
 pub use explain::{BlameRange, BlameSource, ExplainHit, ExplainMeta, ExplainQuery};
 pub use ignore::{IgnoreFilter, LayeredIgnore, BUILT_IN_DEFAULTS};

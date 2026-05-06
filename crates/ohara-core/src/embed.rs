@@ -34,6 +34,39 @@ pub trait RerankProvider: Send + Sync {
     async fn rerank(&self, query: &str, candidates: &[&str]) -> Result<Vec<f32>>;
 }
 
+/// Plan-27 chunk-embed cache mode. Selects whether the embedder is
+/// fronted by the `chunk_embed_cache` table and, in `Diff` mode,
+/// what input the embedder consumes.
+///
+/// - `Off`: no cache; embedder consumes today's `effective_semantic_text`.
+/// - `Semantic`: cache keyed by `sha256(effective_semantic_text)`;
+///   embedder input unchanged.
+/// - `Diff`: cache keyed by `sha256(diff_text)`; embedder input is
+///   `diff_text` only (commit message dropped from the vector lane).
+///
+/// `Off` and `Semantic` produce vector-equivalent indices (same
+/// embedder input). `Diff` produces a different vector lane and so
+/// requires a `--rebuild` to switch into or out of.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub enum EmbedMode {
+    #[default]
+    Off,
+    Semantic,
+    Diff,
+}
+
+impl EmbedMode {
+    /// Stable string used as the `embed_input_mode` value in
+    /// `RuntimeIndexMetadata`. Off and Semantic share `"semantic"`
+    /// because they're vector-equivalent; Diff has its own class.
+    pub fn index_metadata_value(self) -> &'static str {
+        match self {
+            EmbedMode::Off | EmbedMode::Semantic => "semantic",
+            EmbedMode::Diff => "diff",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,5 +92,34 @@ mod tests {
         assert_eq!(out.len(), candidates.len(), "score-per-candidate contract");
         // FakeReranker returns char-length so we can verify positional alignment.
         assert_eq!(out, vec![5.0, 9.0, 1.0]);
+    }
+}
+
+#[cfg(test)]
+mod embed_mode_tests {
+    use super::*;
+
+    #[test]
+    fn embed_mode_off_and_semantic_are_distinct_variants() {
+        assert_ne!(EmbedMode::Off, EmbedMode::Semantic);
+        assert_ne!(EmbedMode::Off, EmbedMode::Diff);
+        assert_ne!(EmbedMode::Semantic, EmbedMode::Diff);
+    }
+
+    #[test]
+    fn embed_mode_default_is_off() {
+        // Plan 27 Task B.2: the default mode must match today's
+        // behavior — no cache lookups.
+        assert_eq!(EmbedMode::default(), EmbedMode::Off);
+    }
+
+    #[test]
+    fn embed_mode_index_metadata_value_distinguishes_diff() {
+        // Plan 27 Task B.2: Off and Semantic both embed semantic_text
+        // and so are vector-equivalent; they share the same
+        // index_metadata value. Diff is a separate compatibility class.
+        assert_eq!(EmbedMode::Off.index_metadata_value(), "semantic");
+        assert_eq!(EmbedMode::Semantic.index_metadata_value(), "semantic");
+        assert_eq!(EmbedMode::Diff.index_metadata_value(), "diff");
     }
 }
