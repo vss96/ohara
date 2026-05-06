@@ -95,11 +95,16 @@ fn mode_mismatch_on_incremental_errors_with_rebuild_hint() {
     git_add_all(repo);
     git_commit(repo, "feat: initial");
 
-    // First run: index with --embed-cache=semantic.
+    // First run: --incremental index with --embed-cache=semantic.
+    // Both runs pass --incremental so the test actually exercises the
+    // incremental path the test name advertises (per plan-27 spec
+    // success criteria: "index with --embed-cache=semantic, then run
+    // --incremental --embed-cache=diff → must error").
     let idx1 = Command::new(ohara_bin())
         .env("OHARA_HOME", ohara_home.path())
         .args([
             "index",
+            "--incremental",
             "--embed-provider",
             "cpu",
             "--embed-cache",
@@ -110,10 +115,18 @@ fn mode_mismatch_on_incremental_errors_with_rebuild_hint() {
         .unwrap();
     assert!(idx1.status.success());
 
-    // Second run: --embed-cache=diff is a different mode → must error.
+    // Second run: --incremental --embed-cache=diff is a different mode
+    // → mode-mismatch guard must fire before the embedder loads.
     let idx2 = Command::new(ohara_bin())
         .env("OHARA_HOME", ohara_home.path())
-        .args(["index", "--embed-provider", "cpu", "--embed-cache", "diff"])
+        .args([
+            "index",
+            "--incremental",
+            "--embed-provider",
+            "cpu",
+            "--embed-cache",
+            "diff",
+        ])
         .arg(repo)
         .output()
         .unwrap();
