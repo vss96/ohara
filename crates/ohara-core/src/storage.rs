@@ -271,6 +271,40 @@ pub trait Storage: Send + Sync {
     /// Idempotent on the pair.
     async fn record_blob_seen(&self, blob_sha: &str, embedding_model: &str) -> Result<()>;
 
+    // --- Chunk-level embed cache (plan 27) ---
+
+    /// Plan 27: chunk-level embed cache. Look up cached vectors for
+    /// `hashes` under the given `embed_model`. Returns a map keyed by
+    /// the `ContentHash` values that hit; misses are simply absent
+    /// from the map.
+    ///
+    /// Default impl returns an empty map — appropriate for in-memory
+    /// test storages that don't carry a cache. `SqliteStorage`
+    /// overrides with a real batched SELECT.
+    async fn embed_cache_get_many(
+        &self,
+        hashes: &[crate::types::ContentHash],
+        embed_model: &str,
+    ) -> Result<std::collections::HashMap<crate::types::ContentHash, Vec<f32>>> {
+        let _ = (hashes, embed_model);
+        Ok(std::collections::HashMap::new())
+    }
+
+    /// Plan 27: chunk-level embed cache write. Insert one row per
+    /// `(hash, model)` pair (composite primary key). Re-insertion of
+    /// an existing key is a no-op via `INSERT OR IGNORE`.
+    ///
+    /// Default impl is a no-op. `SqliteStorage` overrides with a
+    /// real batched INSERT.
+    async fn embed_cache_put_many(
+        &self,
+        entries: &[(crate::types::ContentHash, Vec<f32>)],
+        embed_model: &str,
+    ) -> Result<()> {
+        let _ = (entries, embed_model);
+        Ok(())
+    }
+
     // --- Explain support ---
 
     /// Fetch a single commit's metadata. Returns `Ok(None)` if the SHA
