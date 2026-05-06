@@ -8,6 +8,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-06
+
+### Added
+
+- **`ohara plan` + `.oharaignore`** (plan-26 / Spec A). New
+  `ohara plan [path]` subcommand surveys a repo's commit-share hotmap
+  via a paths-only libgit2 walk, suggests high-share top-level
+  directories outside a small documentation allowlist, and writes a
+  marker-fenced `.oharaignore` at the repo root. The indexer consults
+  a layered filter (built-in defaults + `.gitattributes` `linguist-*`
+  + user `.oharaignore`); commits whose changed paths are 100% ignored
+  are dropped entirely while their watermark advances. Mixed commits
+  keep their non-ignored hunks
+  ([ba26fb6](https://github.com/vss96/ohara/commit/ba26fb6)) ([#32](https://github.com/vss96/ohara/pull/32)).
+
+- **`ohara index --embed-cache off|semantic|diff`** (plan-27 / Spec B).
+  Content-addressable chunk-level embed cache so identical chunk
+  content costs one embed call instead of one per occurrence. Three
+  modes: `off` (default; today's behavior), `semantic` (cache keyed by
+  `sha256(commit_msg + diff_text)`; conservative), `diff` (cache keyed
+  by `sha256(diff_text)` and embedder input drops the commit message;
+  high hit-rate on vendor refreshes / mass renames). Mode is part of
+  the index identity — switching between `Diff` and `non-Diff` triggers
+  the existing `--rebuild` flow. `ohara status` prints
+  `embed_cache: <mode> (<rows> cached / <KB>)` when populated
+  ([ae4f69c](https://github.com/vss96/ohara/commit/ae4f69c)) ([#33](https://github.com/vss96/ohara/pull/33)).
+
+- **`ohara index --workers <N>`** (plan-28 / Spec D). Actor-style
+  commit pipeline: walker task + N worker tasks + bounded
+  `tokio::sync::mpsc` channel. Each worker owns a commit end-to-end
+  (hunk_chunk → attribute → embed-with-plan-27-cache → persist).
+  Default `--workers num_cpus::get()`; `--workers 1` reproduces today's
+  serial path. Each commit gets a deterministic ULID derived from
+  `(commit_time, commit_sha)` (V6 migration adds `commit.ulid` column +
+  index); persistence is order-free; ULID-keyed reads recover
+  chronological order. `ohara status` derives `last_indexed_commit`
+  from `MAX(ulid)`. Per-commit failure isolation: bad commits log warn
+  and the run continues
+  ([288db20](https://github.com/vss96/ohara/commit/288db20)) ([#34](https://github.com/vss96/ohara/pull/34)).
+
+### Fixed
+
+- `Coordinator::run_from_attributed` now honors `embed_mode` and
+  `cache_storage` instead of always running with `EmbedMode::Off` —
+  resume-from-checkpoint paths can correctly use the chunk cache
+  ([551f204](https://github.com/vss96/ohara/commit/551f204)) ([#35](https://github.com/vss96/ohara/pull/35)).
+- `embed_cache_get_many` chunks lookups at 500 hashes per query to
+  stay under SQLite's `SQLITE_MAX_VARIABLE_NUMBER` (default 999), so
+  large commits with thousands of unique chunk hashes succeed
+  ([551f204](https://github.com/vss96/ohara/commit/551f204)) ([#35](https://github.com/vss96/ohara/pull/35)).
+
 ## [0.7.7] - 2026-05-05
 
 ### Fixed
