@@ -43,12 +43,12 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             .context("spawn_blocking FastEmbedProvider")?
             .context("FastEmbedProvider::new")?,
     );
-    let reranker: Arc<dyn ohara_core::embed::RerankProvider> = Arc::new(
-        tokio::task::spawn_blocking(ohara_embed::FastEmbedReranker::new)
-            .await
-            .context("spawn_blocking FastEmbedReranker")?
-            .context("FastEmbedReranker::new")?,
-    );
+    // Issue #58: defer the ~110 MB cross-encoder load until the first
+    // rerank call. The daemon may receive zero requests (idle-timeout
+    // exit) or only `no_rerank: true` requests, in which case we never
+    // pay the load cost.
+    let reranker: Arc<dyn ohara_core::embed::RerankProvider> =
+        Arc::new(ohara_embed::LazyFastEmbedReranker::new());
     let engine = Arc::new(RetrievalEngine::new(embedder, reranker));
 
     let stop = CancellationToken::new();

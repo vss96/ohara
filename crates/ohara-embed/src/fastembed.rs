@@ -13,7 +13,7 @@ use fastembed::{
 use ohara_core::embed::RerankProvider;
 use ohara_core::{EmbeddingProvider, Result as CoreResult};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 
 /// Stable id of the default embedder model. Mirrored on every
 /// `FastEmbedProvider::model_id()` and recorded in `index_metadata`
@@ -236,6 +236,85 @@ impl RerankProvider for FastEmbedReranker {
     }
 }
 
+/// Lazy wrapper around [`FastEmbedReranker`]: defers loading the
+/// ~110 MB BGE-reranker-base ONNX session until the first
+/// [`RerankProvider::rerank`] call.
+///
+/// Both `ohara-mcp` and `ohara serve` start long-lived processes that
+/// may receive zero `find_pattern` calls, or may receive only
+/// `no_rerank: true` calls (which short-circuit the reranker via the
+/// retriever's `no_rerank` filter). Eagerly loading the model at
+/// startup paid the cold-init cost on every boot — issue #58.
+///
+/// First-call init uses [`tokio::sync::OnceCell`] so concurrent first
+/// callers serialize on a single load; subsequent calls bypass the
+/// cell entirely and dispatch straight into the inner reranker.
+///
+/// Init failures are surfaced through [`ohara_core::OhraError::Embedding`]
+/// because the [`RerankProvider`] trait can't return `anyhow::Error`.
+/// `OnceCell::get_or_try_init` only stores the success value, so a
+/// failed first init is retried on the next call (which matches the
+/// behavior of an eagerly-constructed reranker that would have failed
+/// at startup).
+pub struct LazyFastEmbedReranker {
+    cell: OnceCell<FastEmbedReranker>,
+    provider: EmbedProvider,
+}
+
+impl LazyFastEmbedReranker {
+    /// Create a lazy reranker that will load with the CPU execution
+    /// provider on first use. Mirrors [`FastEmbedReranker::new`].
+    pub fn new() -> Self {
+        Self::with_provider(EmbedProvider::Cpu)
+    }
+
+    /// Create a lazy reranker that will load with the requested
+    /// execution provider on first use.
+    pub fn with_provider(provider: EmbedProvider) -> Self {
+        Self {
+            cell: OnceCell::new(),
+            provider,
+        }
+    }
+
+    /// Stable id of the model that will be loaded on first use. Safe
+    /// to call before initialization — does not trigger a load.
+    pub fn model_id(&self) -> &'static str {
+        DEFAULT_RERANKER_ID
+    }
+
+    async fn get_or_init(&self) -> CoreResult<&FastEmbedReranker> {
+        let provider = self.provider;
+        self.cell
+            .get_or_try_init(|| async move {
+                tokio::task::spawn_blocking(move || FastEmbedReranker::with_provider(provider))
+                    .await
+                    .map_err(|e| ohara_core::OhraError::Embedding(format!("join: {e}")))?
+                    .map_err(|e| ohara_core::OhraError::Embedding(e.to_string()))
+            })
+            .await
+    }
+}
+
+impl Default for LazyFastEmbedReranker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl RerankProvider for LazyFastEmbedReranker {
+    async fn rerank(&self, query: &str, candidates: &[&str]) -> CoreResult<Vec<f32>> {
+        // Short-circuit before init so an empty-candidates call (the
+        // retriever's "no candidates survived RRF" path) never pays
+        // the ~110 MB load cost.
+        if candidates.is_empty() {
+            return Ok(vec![]);
+        }
+        self.get_or_init().await?.rerank(query, candidates).await
+    }
+}
+
 /// Reorder fastembed's score-descending `Vec<RerankResult>` so the output
 /// `Vec<f32>` aligns positionally with the caller's `candidates` slice
 /// (i.e. `out[i]` is the score for the original `candidates[i]`).
@@ -353,6 +432,39 @@ mod tests {
         // resolution layer falls back to `EmbedProvider::default()` for
         // unrecognized hosts, so the default must stay CPU.
         assert_eq!(EmbedProvider::default(), EmbedProvider::Cpu);
+    }
+
+    #[tokio::test]
+    async fn lazy_reranker_empty_candidates_does_not_load_model() {
+        // Regression: the empty-candidates short-circuit in
+        // `LazyFastEmbedReranker::rerank` is the entire performance claim
+        // of issue #58 — without it, `OnceCell::get_or_init` would fire on
+        // the first query (even with zero survivors after RRF) and pay the
+        // ~110 MB cold-init cost. If someone reorders the empty-check to
+        // run after `get_or_init`, the inner `OnceCell` will transition to
+        // initialized and this assertion will fail.
+        //
+        // Strict-distinguisher check: mentally swap the two lines in
+        // `rerank` so `get_or_init().await?` runs before the
+        // `candidates.is_empty()` guard — the cell would be populated and
+        // `cell.get()` would return `Some`, failing the assertion below.
+        let lazy = LazyFastEmbedReranker::new();
+        assert!(
+            lazy.cell.get().is_none(),
+            "freshly-constructed lazy reranker must not have loaded the model"
+        );
+
+        let scores = lazy
+            .rerank("any query", &[])
+            .await
+            .expect("empty rerank must succeed without loading the model");
+        assert!(scores.is_empty(), "empty input must yield empty output");
+
+        assert!(
+            lazy.cell.get().is_none(),
+            "rerank(_, &[]) must short-circuit BEFORE get_or_init — \
+             OnceCell should still be uninitialized"
+        );
     }
 
     #[tokio::test]
