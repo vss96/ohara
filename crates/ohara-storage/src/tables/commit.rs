@@ -64,6 +64,42 @@ pub fn commit_exists(c: &Connection, sha: &str) -> Result<bool> {
     Ok(found.is_some())
 }
 
+/// Plan 28: return the commit with the highest ULID (excluding empty-ULID
+/// pre-V6 rows). Returns `Ok(None)` when the index is empty or all rows
+/// pre-date V6 and have not been rebuilt.
+///
+/// `commit_record` has no `repo_id` column — the table is global and the
+/// ULID ordering is a time-stable proxy for "most recently committed".
+pub fn latest_by_ulid(c: &Connection) -> Result<Option<CommitMeta>> {
+    // ulid != '' excludes pre-V6 rows written without a ULID.
+    let row = c
+        .query_row(
+            "SELECT sha, parent_sha, is_merge, ts, author, message
+             FROM commit_record
+             WHERE ulid != ''
+             ORDER BY ulid DESC LIMIT 1",
+            [],
+            |r| {
+                let commit_sha: String = r.get(0)?;
+                let parent_sha: Option<String> = r.get(1)?;
+                let is_merge: i64 = r.get(2)?;
+                let ts: i64 = r.get(3)?;
+                let author: Option<String> = r.get(4)?;
+                let message: String = r.get(5)?;
+                Ok(CommitMeta {
+                    commit_sha,
+                    parent_sha,
+                    is_merge: is_merge != 0,
+                    author,
+                    ts,
+                    message,
+                })
+            },
+        )
+        .optional()?;
+    Ok(row)
+}
+
 /// Fetch a single commit's metadata by SHA. Returns `Ok(None)` if the
 /// SHA isn't present in `commit_record` (e.g., the commit is older than
 /// the local index watermark). Used by the `explain_change` orchestrator
@@ -103,6 +139,64 @@ mod tests {
     use ohara_core::storage::{CommitRecord, Storage};
     use ohara_core::types::{CommitMeta, RepoId};
     use ohara_core::ulid_for_commit;
+
+    #[tokio::test]
+    async fn latest_by_ulid_returns_highest_ulid() {
+        // Plan 28 Task B.1: insert two commits at different timestamps;
+        // latest_by_ulid must return the later one (higher ULID).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ulid_test.db");
+        let s = SqliteStorage::open(&path).await.unwrap();
+        let repo_id = RepoId::from_parts("0".repeat(40).as_str(), "/tmp/ulid");
+        s.open_repo(&repo_id, "/tmp/ulid", &"0".repeat(40))
+            .await
+            .unwrap();
+
+        let earlier_ts: i64 = 1_700_000_000;
+        let later_ts: i64 = 1_710_000_000;
+
+        let earlier_sha = "aaaa1111".repeat(5);
+        let later_sha = "bbbb2222".repeat(5);
+
+        for (sha, ts) in [(&earlier_sha, earlier_ts), (&later_sha, later_ts)] {
+            let meta = CommitMeta {
+                commit_sha: sha.clone(),
+                parent_sha: None,
+                is_merge: false,
+                author: None,
+                ts,
+                message: format!("commit at {ts}"),
+            };
+            let ulid = ulid_for_commit(ts, sha).to_string();
+            s.put_commit(
+                &repo_id,
+                &CommitRecord {
+                    ulid,
+                    meta,
+                    message_emb: vec![0.0_f32; 384],
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let conn = s.pool().get().await.unwrap();
+        let result = conn
+            .interact(|c| super::latest_by_ulid(c))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            result.is_some(),
+            "latest_by_ulid must return Some when commits are indexed"
+        );
+        assert_eq!(
+            result.unwrap().commit_sha,
+            later_sha,
+            "latest_by_ulid must return the commit with the highest ULID"
+        );
+    }
 
     async fn temp_storage() -> (tempfile::TempDir, SqliteStorage) {
         let dir = tempfile::tempdir().unwrap();

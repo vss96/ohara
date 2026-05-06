@@ -407,4 +407,16 @@ pub trait Storage: Send + Sync {
     fn metrics_snapshot(&self) -> StorageMetricsSnapshot {
         StorageMetricsSnapshot::default()
     }
+
+    /// Plan 28: return the commit with the highest ULID for this repo
+    /// (most-recently-committed of the indexed commits, by commit_time).
+    /// Returns None when no commits are indexed or all rows have empty
+    /// ULID (pre-V6).
+    ///
+    /// Default returns None — appropriate for in-memory test storages.
+    /// SqliteStorage overrides with a real query.
+    async fn latest_indexed_by_ulid(&self, repo_id: &RepoId) -> Result<Option<CommitMeta>> {
+        let _ = repo_id;
+        Ok(None)
+    }
 }

@@ -443,6 +443,13 @@ impl Storage for SqliteStorage {
     fn metrics_snapshot(&self) -> StorageMetricsSnapshot {
         self.counters.snapshot()
     }
+
+    async fn latest_indexed_by_ulid(
+        &self,
+        _repo_id: &ohara_core::types::RepoId,
+    ) -> ohara_core::Result<Option<ohara_core::types::CommitMeta>> {
+        with_conn(&self.pool, |c| crate::tables::commit::latest_by_ulid(c)).await
+    }
 }
 
 #[cfg(test)]
