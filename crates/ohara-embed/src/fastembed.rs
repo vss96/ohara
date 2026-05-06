@@ -434,6 +434,24 @@ mod tests {
         assert_eq!(EmbedProvider::default(), EmbedProvider::Cpu);
     }
 
+    #[test]
+    fn default_model_id_pins_quantized_variant() {
+        // Issue #54: the default embedder is the quantized BGE-small
+        // variant. The model id MUST be distinct from the full-precision
+        // `"bge-small-en-v1.5"` so that an index built with the old
+        // binary is detected as `NeedsRebuild` after upgrade (vector
+        // geometry differs between the two models).
+        assert_eq!(DEFAULT_MODEL_ID, "bge-small-en-v1.5-q");
+        assert_ne!(
+            DEFAULT_MODEL_ID, "bge-small-en-v1.5",
+            "Q variant must not share the full-precision model id"
+        );
+        // Dimension is unchanged (384 for both variants), but pin it so
+        // a future model swap that changes dim updates this test in
+        // lockstep with `RuntimeIndexMetadata`.
+        assert_eq!(DEFAULT_DIM, 384);
+    }
+
     #[tokio::test]
     async fn lazy_reranker_empty_candidates_does_not_load_model() {
         // Regression: the empty-candidates short-circuit in
