@@ -1,9 +1,16 @@
 # ohara — `ohara plan` + `.oharaignore` (smart indexing, part 1 of 3)
 
-**Status:** RFC — ready to plan.
+**Status:** RFC — ready to plan. Auto-write behavior superseded by
+[issue #37](https://github.com/vss96/ohara/issues/37); see notes inline.
 
 **Supersedes:** `docs/superpowers/specs/2026-05-04-ohara-max-commits-design.md`
 (same problem class — making giant repos viable — but with a blunter answer).
+
+**Superseded in part by:** issue #37 — the auto-write default and the
+`--yes` / `--no-write` / confirmation-prompt surface described below
+were demoted. `ohara plan` is now print-only by default; writing is an
+explicit `--write` opt-in. Historical text below preserved for
+context; affected sections flagged inline.
 
 **Companion specs (separately scoped, brainstormed later):**
 - Spec B — chunk-level content dedup (embed reuse via content hash).
@@ -56,6 +63,12 @@ both.
 New CLI subcommand. Pre-flight planner that runs a diff-only libgit2
 walk, scores directories, prints suggestions, and (with confirmation)
 writes `.oharaignore`.
+
+> **Superseded by #37.** The flag surface below — `--yes`,
+> `--no-write`, the y/N confirmation prompt — was replaced with a
+> single `--write` opt-in. Default is print-only; `--replace` now
+> requires `--write`. See the issue and `commands/plan.rs` for the
+> shipping shape.
 
 ```
 ohara plan [PATH]                  # PATH defaults to "."
@@ -240,6 +253,9 @@ just surfaces an existing capability.
 - **No silent skips.** `ohara plan` always prompts unless `--yes` /
   `--no-write` make consent explicit at the CLI level. Agents using
   `--yes` are explicit about their intent.
+  *(Superseded by #37: the prompt + `--yes` / `--no-write` are gone;
+  `--write` is the single explicit opt-in and the default is
+  print-only.)*
 - **`.oharaignore` lives at repo root, not `.ohara/`.** It's checked
   into the repo and shared by all team members; it's a team artifact,
   not a per-user setting.

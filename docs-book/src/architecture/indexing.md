@@ -80,11 +80,20 @@ are merged, with the user layer winning so `!negate` patterns work:
    `linguist-vendored=true`.
 3. **`.oharaignore`** at repo root — gitignore-syntax, team-shared.
 
-Run `ohara plan` to survey a repo's commit-share hotmap and write a
-suggested `.oharaignore`. The planner runs a paths-only libgit2 walk
-(seconds-to-minutes even on giant repos), groups commits by top-level
-directory, and proposes ignoring high-share directories outside a
-small documentation allowlist.
+Run `ohara plan` to survey a repo's commit-share hotmap and print
+suggested `.oharaignore` patterns. The planner runs a paths-only
+libgit2 walk (seconds-to-minutes even on giant repos), groups commits
+by top-level directory, and proposes ignoring high-share directories
+outside a small documentation allowlist.
+
+`ohara plan` is **print-only by default** — it never edits
+`.oharaignore` unless you pass `--write`. With `--write`, the
+suggestions are merged into a marker-fenced auto-generated section at
+the repo root; user-added lines below the closing marker survive
+re-runs (use `--write --replace` to overwrite the whole file). The
+share-based heuristic is a hint, not a verdict — review the suggested
+patterns before applying, especially on repos where the most-touched
+top-level directory is the engine itself.
 
 When a commit's changed paths are 100% ignored, the indexer skips it
 entirely (no rows written) but advances `last_indexed_commit` past it,

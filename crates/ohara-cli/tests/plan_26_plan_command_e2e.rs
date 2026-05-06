@@ -1,8 +1,8 @@
 //! `ohara plan` e2e: print-only by default (issue #37); `--write` opts in
 //! to writing a marker-fenced `.oharaignore`.
 
-use std::process::Command;
 use std::path::Path;
+use std::process::Command;
 
 fn ohara_bin() -> String {
     env!("CARGO_BIN_EXE_ohara").to_string()
