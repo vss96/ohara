@@ -210,7 +210,7 @@ mod tests {
         // expectation without loading the embedder model. This test
         // pins that the helper sources every value from a constant
         // (no I/O, no model download).
-        let m = current_runtime_metadata();
+        let m = current_runtime_metadata(ohara_core::EmbedMode::Semantic);
         assert_eq!(m.schema_version, ohara_core::index_metadata::SCHEMA_VERSION);
         assert_eq!(m.embedding_model, ohara_embed::DEFAULT_MODEL_ID);
         assert_eq!(m.embedding_dimension, ohara_embed::DEFAULT_DIM as u32);
@@ -227,8 +227,23 @@ mod tests {
                 "parser_versions missing language {lang}"
             );
         }
-        // Plan 27: status helper always reports "semantic" (default mode).
-        assert_eq!(m.embed_input_mode, "semantic");
+        // Issue #40: helper must report the mode it was given, not a hardcoded literal.
+        assert_eq!(
+            m.embed_input_mode,
+            ohara_core::EmbedMode::Semantic.index_metadata_value()
+        );
+    }
+
+    #[test]
+    fn current_runtime_metadata_reports_diff_mode_when_requested() {
+        // Issue #40 regression: passing EmbedMode::Diff must yield the
+        // "diff" string, not the previously-hardcoded "semantic".
+        let m = current_runtime_metadata(ohara_core::EmbedMode::Diff);
+        assert_eq!(
+            m.embed_input_mode,
+            ohara_core::EmbedMode::Diff.index_metadata_value()
+        );
+        assert_eq!(m.embed_input_mode, "diff");
     }
 
     #[test]
