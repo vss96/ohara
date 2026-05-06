@@ -351,7 +351,12 @@ impl Coordinator {
         commit: &CommitMeta,
         attributed: Vec<AttributedHunk>,
     ) -> Result<()> {
-        let embed_stage = EmbedStage::new(self.embedder.clone()).with_embed_batch(self.embed_batch);
+        let mut embed_stage = EmbedStage::new(self.embedder.clone())
+            .with_embed_batch(self.embed_batch)
+            .with_embed_mode(self.embed_mode);
+        if let Some(cache) = self.cache_storage.as_ref() {
+            embed_stage = embed_stage.with_cache(cache.clone());
+        }
 
         // Stage 4: embed.
         let embed_output = embed_stage.run(&commit.message, &attributed).await?;
