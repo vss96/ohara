@@ -76,6 +76,15 @@ name = "perf_diff"
 path = "perf_diff.rs"
 
 [[test]]
+# Plan 27 Task E.2 — embed-cache sweep: runs `ohara index` with
+# --embed-cache off|semantic|diff and reports wall-time + cache row
+# counts side-by-side. `#[ignore]`'d; opt in via:
+#   cargo test -p ohara-perf-tests --release -- \
+#       --ignored embed_cache_sweep --nocapture
+name = "embed_cache_sweep"
+path = "embed_cache_sweep.rs"
+
+[[test]]
 # Plan 15 Task A.2 — indexing-path peak-RSS + wall-clock harness.
 # `#[ignore]`'d; opt in via:
 #   cargo test -p ohara-perf-tests --release -- \
