@@ -1,5 +1,7 @@
 //! Coordinator: drives the 5-stage pipeline per commit.
 
+use num_cpus;
+
 use crate::indexer::stages::attribute::AttributedHunk;
 use crate::indexer::stages::commit_walk::CommitWatermark;
 use crate::indexer::stages::{
@@ -61,6 +63,8 @@ pub struct Coordinator {
     /// Plan 27: storage handle reused by EmbedStage for the
     /// chunk-embed cache. Set when embed_mode != Off.
     cache_storage: Option<Arc<dyn crate::Storage>>,
+    #[allow(dead_code)]
+    workers: usize,
 }
 
 impl Coordinator {
@@ -78,6 +82,7 @@ impl Coordinator {
             ignore_filter: None,
             embed_mode: crate::EmbedMode::default(),
             cache_storage: None,
+            workers: num_cpus::get().max(1),
         }
     }
 
@@ -102,6 +107,12 @@ impl Coordinator {
     /// either case). Plumbing-only in C.1; behaviour added in C.2.
     pub fn with_ignore_filter(mut self, f: Arc<dyn crate::IgnoreFilter>) -> Self {
         self.ignore_filter = Some(f);
+        self
+    }
+
+    /// Plan 28: set the number of worker tasks. `n.max(1)` is enforced.
+    pub fn with_workers(mut self, n: usize) -> Self {
+        self.workers = n.max(1);
         self
     }
 
