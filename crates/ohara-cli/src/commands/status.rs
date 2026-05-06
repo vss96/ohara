@@ -56,6 +56,23 @@ pub fn render_ignore_summary(builtins: usize, gitattrs: usize, user: usize) -> S
     )
 }
 
+/// Plan 27: render the embed-cache summary line for `ohara status`,
+/// or None when the cache is empty (line is omitted entirely).
+pub fn render_embed_cache_summary(
+    mode: &str,
+    stats: &ohara_core::storage::EmbedCacheStats,
+) -> Option<String> {
+    if stats.row_count == 0 {
+        return None;
+    }
+    Some(format!(
+        "embed_cache: {} ({} cached vectors / {} KB)",
+        mode,
+        stats.row_count,
+        stats.total_bytes / 1024
+    ))
+}
+
 fn count_ignore_layers(repo_root: &std::path::Path) -> (usize, usize, usize) {
     let builtins = ohara_core::BUILT_IN_DEFAULTS.len();
     let gitattrs = std::fs::read_to_string(repo_root.join(".gitattributes"))
@@ -96,6 +113,17 @@ pub async fn run(args: Args) -> Result<()> {
     );
     let (b, g, u) = count_ignore_layers(&canonical);
     println!("{}", render_ignore_summary(b, g, u));
+    let cache_stats = storage.embed_cache_stats().await?;
+    if let Some(line) = render_embed_cache_summary(
+        stored
+            .components
+            .get("embed_input_mode")
+            .map(|s| s.as_str())
+            .unwrap_or("(unset)"),
+        &cache_stats,
+    ) {
+        println!("{line}");
+    }
     Ok(())
 }
 
@@ -236,5 +264,23 @@ mod tests {
     fn render_ignore_summary_zero_user_no_gitattrs_still_prints() {
         let s = render_ignore_summary(18, 0, 0);
         assert!(s.contains("18 patterns"), "got: {s}");
+    }
+
+    #[test]
+    fn render_embed_cache_summary_omits_when_empty() {
+        let stats = ohara_core::storage::EmbedCacheStats::default();
+        assert_eq!(render_embed_cache_summary("semantic", &stats), None);
+    }
+
+    #[test]
+    fn render_embed_cache_summary_formats_kb() {
+        let stats = ohara_core::storage::EmbedCacheStats {
+            row_count: 100,
+            total_bytes: 153_600, // 150 KB
+        };
+        assert_eq!(
+            render_embed_cache_summary("diff", &stats),
+            Some("embed_cache: diff (100 cached vectors / 150 KB)".to_string())
+        );
     }
 }

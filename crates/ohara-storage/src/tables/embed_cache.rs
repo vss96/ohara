@@ -70,6 +70,24 @@ pub fn put_many(
     Ok(())
 }
 
+/// Plan 27: read-only stats over the chunk_embed_cache table.
+pub fn stats(c: &Connection) -> Result<ohara_core::storage::EmbedCacheStats> {
+    let row_count: u64 = c.query_row("SELECT COUNT(*) FROM chunk_embed_cache", [], |r| {
+        r.get::<_, i64>(0).map(|v| v as u64)
+    })?;
+    // sum of LENGTH(diff_emb) is an over-approximation that ignores
+    // SQLite overhead but is close enough for the status display.
+    let total_bytes: u64 = c.query_row(
+        "SELECT COALESCE(SUM(LENGTH(diff_emb)), 0) FROM chunk_embed_cache",
+        [],
+        |r| r.get::<_, i64>(0).map(|v| v as u64),
+    )?;
+    Ok(ohara_core::storage::EmbedCacheStats {
+        row_count,
+        total_bytes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

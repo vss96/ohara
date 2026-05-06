@@ -115,6 +115,13 @@ pub struct HunkHit {
     pub similarity: f32,
 }
 
+/// Plan 27: snapshot of the chunk_embed_cache state for `ohara status`.
+#[derive(Debug, Clone, Default)]
+pub struct EmbedCacheStats {
+    pub row_count: u64,
+    pub total_bytes: u64,
+}
+
 #[async_trait]
 pub trait Storage: Send + Sync {
     // --- Repo lifecycle ---
@@ -288,6 +295,12 @@ pub trait Storage: Send + Sync {
     ) -> Result<std::collections::HashMap<crate::types::ContentHash, Vec<f32>>> {
         let _ = (hashes, embed_model);
         Ok(std::collections::HashMap::new())
+    }
+
+    /// Plan 27: read-only stats over the chunk_embed_cache. Default
+    /// returns an all-zero snapshot for in-memory storages.
+    async fn embed_cache_stats(&self) -> Result<EmbedCacheStats> {
+        Ok(EmbedCacheStats::default())
     }
 
     /// Plan 27: chunk-level embed cache write. Insert one row per

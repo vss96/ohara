@@ -289,6 +289,10 @@ impl Storage for SqliteStorage {
         .await
     }
 
+    async fn embed_cache_stats(&self) -> CoreResult<ohara_core::storage::EmbedCacheStats> {
+        with_conn(&self.pool, |c| crate::tables::embed_cache::stats(c)).await
+    }
+
     async fn embed_cache_put_many(
         &self,
         entries: &[(ohara_core::types::ContentHash, Vec<f32>)],
