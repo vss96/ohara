@@ -122,9 +122,11 @@ impl Retriever {
                 .unwrap_or(self.weights.recency_half_life_days),
             rerank_top_k: profile.rerank_top_k.unwrap_or(self.weights.rerank_top_k),
             lane_top_k: profile.lane_top_k.unwrap_or(self.weights.lane_top_k),
+            rrf_k: self.weights.rrf_k,
         };
 
         let rerank_top_k = effective_weights.rerank_top_k;
+        let rrf_k = effective_weights.rrf_k;
 
         // Build lanes (profile-gating is inside each lane via is_lane_enabled).
         // Plan 25: 5 lanes now — vec / bm25_text (raw diff_text) /
@@ -155,8 +157,16 @@ impl Retriever {
 
         // Run coordinator.
         let final_k = query.k.clamp(1, 20) as usize;
-        let raw_hits =
-            coordinator::run(&lanes, &refiners, query, repo_id, rerank_top_k, final_k).await?;
+        let raw_hits = coordinator::run(
+            &lanes,
+            &refiners,
+            query,
+            repo_id,
+            rrf_k,
+            rerank_top_k,
+            final_k,
+        )
+        .await?;
 
         if raw_hits.is_empty() {
             return Ok((vec![], profile));

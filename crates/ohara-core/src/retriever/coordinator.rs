@@ -19,6 +19,7 @@ use std::collections::HashMap;
 ///
 /// - `lanes`: all lane instances (disabled lanes self-skip by returning empty).
 /// - `refiners`: applied in order to the post-RRF candidate list.
+/// - `rrf_k`: smoothing constant for Reciprocal Rank Fusion (Cormack 2009 baseline = 60).
 /// - `rerank_pool_k`: how many post-RRF candidates to feed into refiners.
 /// - `final_k`: hard truncation after refiners.
 pub async fn run(
@@ -26,6 +27,7 @@ pub async fn run(
     refiners: &[Box<dyn ScoreRefiner>],
     query: &PatternQuery,
     repo_id: &RepoId,
+    rrf_k: u32,
     rerank_pool_k: usize,
     final_k: usize,
 ) -> crate::Result<Vec<HunkHit>> {
@@ -49,9 +51,11 @@ pub async fn run(
         rankings.push(ranking);
     }
 
-    // 3. RRF merge (k=60, Cormack 2009) → truncate to rerank pool.
+    // 3. RRF merge → truncate to rerank pool. `rrf_k` is configurable via
+    //    `RankingWeights::rrf_k`; the Cormack 2009 baseline (60) is the
+    //    default but profiles or callers can tune it.
     let fused: Vec<HunkId> =
-        timed_phase("rrf", async { reciprocal_rank_fusion(&rankings, 60) }).await;
+        timed_phase("rrf", async { reciprocal_rank_fusion(&rankings, rrf_k) }).await;
     let pool: Vec<HunkHit> = fused
         .into_iter()
         .take(rerank_pool_k)
@@ -153,12 +157,42 @@ mod tests {
             no_rerank: false,
         };
         let repo_id = RepoId::from_parts("sha", "/repo");
-        let out = run(&lanes, &refiners, &q, &repo_id, 10, 20).await.unwrap();
+        let out = run(&lanes, &refiners, &q, &repo_id, 60, 10, 20)
+            .await
+            .unwrap();
         assert_eq!(out.len(), 3, "all three unique ids survive rrf");
         assert!(
             out.iter().position(|h| h.hunk_id == 3).unwrap() > 0,
             "id=3 (single-lane) must rank below the two-lane ids"
         );
+    }
+
+    #[tokio::test]
+    async fn coordinator_threads_rrf_k_into_fusion() {
+        // With two single-element lanes whose entries don't overlap, RRF
+        // assigns each id score 1/(k + 1). The two ids therefore tie at
+        // every k, but increasing k makes the gap between "score" and
+        // "missing" shrink. We can't observe k from output ordering
+        // directly (ties), so this test documents that callers can pass
+        // a non-default k without panic and that the surface is wired —
+        // the unit-tested math lives in `query::reciprocal_rank_fusion`.
+        let lanes: Vec<Box<dyn RetrievalLane>> = vec![
+            Box::new(StaticLane(LaneId::Vec, vec![make_hit(1, 0.9)])),
+            Box::new(StaticLane(LaneId::Bm25Text, vec![make_hit(2, 0.8)])),
+        ];
+        let refiners: Vec<Box<dyn ScoreRefiner>> = vec![Box::new(IdentityRefiner)];
+        let q = PatternQuery {
+            query: "test".into(),
+            k: 5,
+            language: None,
+            since_unix: None,
+            no_rerank: false,
+        };
+        let repo_id = RepoId::from_parts("sha", "/repo");
+        let out = run(&lanes, &refiners, &q, &repo_id, 1, 10, 20)
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 2, "both unique ids survive rrf with k=1");
     }
 
     #[tokio::test]
@@ -184,7 +218,9 @@ mod tests {
             no_rerank: false,
         };
         let repo_id = RepoId::from_parts("sha", "/repo");
-        let out = run(&lanes, &refiners, &q, &repo_id, 10, 20).await.unwrap();
+        let out = run(&lanes, &refiners, &q, &repo_id, 60, 10, 20)
+            .await
+            .unwrap();
         assert_eq!(out[0].hunk_id, 11);
         assert_eq!(out[1].hunk_id, 10);
     }
