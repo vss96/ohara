@@ -140,6 +140,35 @@ pub fn phase_timings_json(pt: &PhaseTimings) -> String {
     serde_json::to_string(pt).expect("PhaseTimings serializes via derive(Serialize)")
 }
 
+/// Render a multi-line cosmetic summary printed at the end of
+/// `ohara index`. Includes commit/hunk/symbol counts, wall-clock total,
+/// and a per-phase bar chart sorted by descending cost so the dominant
+/// stage leads. Phases with zero recorded ms are omitted.
+///
+/// Example output:
+///
+/// ```text
+/// indexed in 47.3s — 1670 commits, 5951 hunks, 36976 HEAD symbols
+///
+///   embed     38.1s  ████████████████████████████████   80%
+///   storage    4.2s  ███                                 9%
+///   diff       2.6s  ██                                  5%
+///   parse      1.8s  █                                   4%
+///   symbols    1.2s  █                                   2%
+///   fts        0.4s                                     <1%
+/// ```
+pub fn index_summary_human(
+    _pt: &PhaseTimings,
+    _total_ms: u64,
+    _new_commits: u64,
+    _new_hunks: u64,
+    _head_symbols: u64,
+) -> String {
+    // Stub — implementation lands in the next commit. See tests below
+    // for the format contract.
+    String::new()
+}
+
 /// Plan 13 Task 3.3 Step 2: refuse `--rebuild` unless the index DB
 /// path resolves under `OHARA_HOME`. Defensive belt against an edge
 /// case where the path resolver is replaced or `OHARA_HOME` is later
@@ -429,19 +458,28 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         Some(n) => indexer.with_workers(n),
         None => indexer,
     };
+    let run_start = std::time::Instant::now();
     let report = indexer.run(&repo_id, commit_source, symbol_source).await?;
-    // Two-sink summary: human-readable on stdout, structured event on
-    // stderr so log aggregators / CI watchdogs / a future `--json` flag
-    // see the same numbers.
+    let total_ms = run_start.elapsed().as_millis() as u64;
+    // Two-sink summary: human-readable cosmetic block on stdout,
+    // structured event on stderr (via tracing) so log aggregators /
+    // CI watchdogs / a future `--json` flag see the same numbers.
     tracing::info!(
         new_commits = report.new_commits,
         new_hunks = report.new_hunks,
         head_symbols = report.head_symbols,
+        total_ms = total_ms,
         "indexed"
     );
-    println!(
-        "indexed: {} new commits, {} hunks, {} HEAD symbols",
-        report.new_commits, report.new_hunks, report.head_symbols
+    print!(
+        "{}",
+        index_summary_human(
+            &report.phase_timings,
+            total_ms,
+            report.new_commits as u64,
+            report.new_hunks as u64,
+            report.head_symbols as u64,
+        )
     );
     if args.profile {
         // Single-line JSON keeps it `jq`-friendly and easy to
@@ -574,6 +612,98 @@ mod profile_json_tests {
         }
         assert_eq!(v.get("commit_walk_ms").and_then(|x| x.as_u64()), Some(1));
         assert_eq!(v.get("total_added_lines").and_then(|x| x.as_u64()), Some(9));
+    }
+
+    fn pt_for_summary() -> PhaseTimings {
+        PhaseTimings {
+            commit_walk_ms: 0,
+            diff_extract_ms: 2_600,
+            tree_sitter_parse_ms: 1_800,
+            embed_ms: 38_100,
+            storage_write_ms: 4_200,
+            fts_insert_ms: 400,
+            head_symbols_ms: 1_200,
+            total_diff_bytes: 0,
+            total_added_lines: 0,
+        }
+    }
+
+    #[test]
+    fn index_summary_header_pluralizes_and_renders_total() {
+        let s = index_summary_human(&pt_for_summary(), 47_300, 1670, 5951, 36976);
+        let header = s.lines().next().expect("header line");
+        assert_eq!(
+            header,
+            "indexed in 47.3s — 1670 commits, 5951 hunks, 36976 HEAD symbols"
+        );
+    }
+
+    #[test]
+    fn index_summary_header_singular_when_count_is_one() {
+        let s = index_summary_human(&pt_for_summary(), 1_000, 1, 1, 1);
+        let header = s.lines().next().expect("header line");
+        assert_eq!(
+            header,
+            "indexed in 1.0s — 1 commit, 1 hunk, 1 HEAD symbol"
+        );
+    }
+
+    #[test]
+    fn index_summary_phases_sorted_descending_by_ms() {
+        let s = index_summary_human(&pt_for_summary(), 47_300, 1670, 5951, 36976);
+        let phase_lines: Vec<&str> = s
+            .lines()
+            .filter(|l| l.starts_with("  ") && !l.trim().is_empty())
+            .collect();
+        let names: Vec<String> = phase_lines
+            .iter()
+            .map(|l| l.split_whitespace().next().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["embed", "storage", "diff", "parse", "symbols", "fts"]
+        );
+    }
+
+    #[test]
+    fn index_summary_omits_zero_phases() {
+        // commit_walk_ms = 0 in the fixture; "walk" must not appear.
+        let s = index_summary_human(&pt_for_summary(), 47_300, 1670, 5951, 36976);
+        assert!(
+            !s.contains("walk "),
+            "zero-duration `walk` phase should be omitted; got:\n{s}"
+        );
+    }
+
+    #[test]
+    fn index_summary_pct_uses_lt_one_for_sub_percent_phases() {
+        // fts: 400ms / 47_300ms = 0.85% → "<1%"
+        let s = index_summary_human(&pt_for_summary(), 47_300, 1670, 5951, 36976);
+        let fts_line = s
+            .lines()
+            .find(|l| l.trim_start().starts_with("fts"))
+            .expect("fts line");
+        assert!(
+            fts_line.ends_with("<1%"),
+            "fts (~0.8% of total) should show `<1%`; got: `{fts_line}`"
+        );
+    }
+
+    #[test]
+    fn index_summary_no_phases_just_emits_header() {
+        let pt = PhaseTimings {
+            commit_walk_ms: 0,
+            diff_extract_ms: 0,
+            tree_sitter_parse_ms: 0,
+            embed_ms: 0,
+            storage_write_ms: 0,
+            fts_insert_ms: 0,
+            head_symbols_ms: 0,
+            total_diff_bytes: 0,
+            total_added_lines: 0,
+        };
+        let s = index_summary_human(&pt, 0, 0, 0, 0);
+        assert_eq!(s, "indexed in 0ms — 0 commits, 0 hunks, 0 HEAD symbols\n");
     }
 }
 
