@@ -41,8 +41,11 @@ pub async fn run(
     now_unix: i64,
 ) -> crate::Result<Vec<HunkHit>> {
     // 1. Fire all lanes in parallel. Disabled lanes return Ok(vec![])
-    //    without touching storage.
-    let lane_futures = lanes.iter().map(|l| l.search(query, repo_id, final_k));
+    //    without touching storage. Lanes gather up to `lane_top_k`
+    //    candidates each (the documented per-lane fan-in for RRF);
+    //    the caller's `final_k` truncation is applied at step 6 only.
+    let lane_k = weights.lane_top_k as usize;
+    let lane_futures = lanes.iter().map(|l| l.search(query, repo_id, lane_k));
     let lane_results: Vec<crate::Result<Vec<HunkHit>>> = join_all(lane_futures).await;
 
     // 2. Build per-lane ranked id lists + a HunkId -> HunkHit lookup.
@@ -99,6 +102,7 @@ mod tests {
     use crate::storage::{HunkHit, HunkId};
     use crate::types::RepoId;
     use async_trait::async_trait;
+    use std::sync::Mutex;
 
     fn make_hit(id: HunkId, sim: f32) -> HunkHit {
         use crate::types::{ChangeKind, CommitMeta, Hunk};
@@ -202,6 +206,70 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.len(), 2, "both unique ids survive rrf with k=1");
+    }
+
+    /// Lane that records every `k` it was called with so a regression
+    /// test can assert what the coordinator threaded into `.search(...)`.
+    struct CapturingLane {
+        id: LaneId,
+        hits: Vec<HunkHit>,
+        observed_k: Arc<Mutex<Vec<usize>>>,
+    }
+
+    #[async_trait]
+    impl RetrievalLane for CapturingLane {
+        fn id(&self) -> LaneId {
+            self.id
+        }
+        async fn search(
+            &self,
+            _: &PatternQuery,
+            _: &RepoId,
+            k: usize,
+        ) -> crate::Result<Vec<HunkHit>> {
+            self.observed_k.lock().unwrap().push(k);
+            Ok(self.hits.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn coordinator_passes_lane_top_k_not_final_k_to_lanes() {
+        // Issue #51 regression: `RankingWeights.lane_top_k` (default
+        // 100) is the per-lane gather size before RRF — NOT the
+        // caller's `final_k` truncation. Pre-fix the coordinator
+        // routed `final_k` into `.search(...)`, so each lane gathered
+        // only `final_k` candidates and RRF saw a smaller pool than
+        // the documented design.
+        let observed_vec: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(vec![]));
+        let observed_text: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(vec![]));
+        let lanes: Vec<Box<dyn RetrievalLane>> = vec![
+            Box::new(CapturingLane {
+                id: LaneId::Vec,
+                hits: vec![make_hit(1, 0.9)],
+                observed_k: observed_vec.clone(),
+            }),
+            Box::new(CapturingLane {
+                id: LaneId::Bm25Text,
+                hits: vec![make_hit(2, 0.8)],
+                observed_k: observed_text.clone(),
+            }),
+        ];
+        let weights = RankingWeights {
+            lane_top_k: 100,
+            ..weights_with_zero_recency()
+        };
+        let q = default_query();
+        let repo_id = RepoId::from_parts("sha", "/repo");
+        // Caller asks for final_k = 5; lanes MUST still gather
+        // `lane_top_k` = 100 candidates each.
+        let _ = run(&lanes, &weights, None, &q, &repo_id, 5, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let vec_calls = observed_vec.lock().unwrap().clone();
+        let text_calls = observed_text.lock().unwrap().clone();
+        assert_eq!(vec_calls, vec![100], "vec lane k must equal lane_top_k");
+        assert_eq!(text_calls, vec![100], "text lane k must equal lane_top_k");
     }
 
     #[tokio::test]
