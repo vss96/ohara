@@ -98,8 +98,17 @@ pub async fn run(args: Args) -> Result<()> {
     let behind = ohara_git::GitCommitsBehind::open(&canonical)?;
     let st = compute_index_status(storage.as_ref(), &repo_id, &behind).await?;
 
-    let runtime = current_runtime_metadata();
+    let mut runtime = current_runtime_metadata();
     let stored = storage.get_index_metadata(&repo_id).await?;
+    // Plan 27: ohara status has no --embed-cache flag, so it can't
+    // know the user's intent. Adopt the stored mode for assessment
+    // so an internally-consistent index doesn't false-alarm as
+    // NeedsRebuild. The compatibility check inside `ohara index`
+    // uses the *requested* mode and remains the source of truth for
+    // mode-switch detection.
+    if let Some(stored_mode) = stored.components.get("embed_input_mode") {
+        runtime.embed_input_mode = stored_mode.clone();
+    }
     let compatibility = CompatibilityStatus::assess(&runtime, &stored);
 
     println!(
@@ -246,6 +255,27 @@ mod tests {
             CompatibilityStatus::assess(&runtime, &stored),
             CompatibilityStatus::Unknown { .. }
         ));
+    }
+
+    #[test]
+    fn assess_with_stored_diff_mode_is_compatible_after_override() {
+        // Plan 27: when the stored embed_input_mode is "diff" and all other
+        // components match runtime, adopting the stored mode before calling
+        // assess must yield Compatible (not NeedsRebuild).
+        let mut runtime = current_runtime_metadata();
+        let mut stored = stored_complete_for(&runtime);
+        // Simulate a user who indexed with --embed-cache=diff.
+        stored
+            .components
+            .insert("embed_input_mode".into(), "diff".into());
+        // Apply the same override that run() does.
+        if let Some(stored_mode) = stored.components.get("embed_input_mode") {
+            runtime.embed_input_mode = stored_mode.clone();
+        }
+        assert_eq!(
+            CompatibilityStatus::assess(&runtime, &stored),
+            CompatibilityStatus::Compatible
+        );
     }
 
     #[test]
