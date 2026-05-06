@@ -24,13 +24,14 @@ impl OharaServer {
         // Plan 3: attach the cross-encoder reranker by default. Per-call
         // opt-out is the MCP `no_rerank: true` flag, plumbed through
         // `PatternQuery`. First boot downloads ~110 MB for bge-reranker-base.
-        let reranker: Arc<dyn RerankProvider> = Arc::new(
-            ohara_core::perf_trace::timed_phase(
-                "rerank_load",
-                tokio::task::spawn_blocking(ohara_embed::FastEmbedReranker::new),
-            )
-            .await??,
-        );
+        //
+        // Issue #58: defer the ~110 MB ONNX session load until the first
+        // `find_pattern` call that doesn't pass `no_rerank: true`. MCP
+        // clients (Claude Code, Cursor, etc.) spawn the server on every
+        // session — eagerly loading the model paid that cost on every
+        // boot, even for sessions that never query or only ask
+        // `explain_change` (which doesn't touch the reranker at all).
+        let reranker: Arc<dyn RerankProvider> = Arc::new(ohara_embed::LazyFastEmbedReranker::new());
 
         let engine = Arc::new(RetrievalEngine::new(embedder, reranker));
         // Warm the per-repo handle so the first MCP call doesn't pay

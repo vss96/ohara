@@ -3,6 +3,6 @@
 
 pub mod fastembed;
 pub use fastembed::{
-    EmbedProvider, FastEmbedProvider, FastEmbedReranker, DEFAULT_DIM, DEFAULT_MODEL_ID,
-    DEFAULT_RERANKER_ID,
+    EmbedProvider, FastEmbedProvider, FastEmbedReranker, LazyFastEmbedReranker, DEFAULT_DIM,
+    DEFAULT_MODEL_ID, DEFAULT_RERANKER_ID,
 };
