@@ -317,6 +317,59 @@ mod content_hash_tests {
     }
 }
 
+/// Plan 28: derives a stable ULID from a commit's timestamp and SHA.
+///
+/// The timestamp (seconds) becomes the ULID's millisecond timestamp component.
+/// The first 10 bytes of the 40-character commit SHA (20 hex chars) become the
+/// randomness component, padded to 16 bytes. This ensures:
+/// - Same `(time, sha)` always produces the same ULID.
+/// - Commits sort chronologically by their ULID string form.
+/// - No risk of collision: the SHA's randomness dominates the final bits.
+pub fn ulid_for_commit(commit_time_seconds: i64, sha: &str) -> ulid::Ulid {
+    let ms = (commit_time_seconds.max(0) as u64).saturating_mul(1000);
+    let mut rand_bytes = [0u8; 10];
+    hex::decode_to_slice(&sha[..20], &mut rand_bytes).expect("invariant: commit_sha is 40-hex");
+    let mut rand_buf = [0u8; 16];
+    rand_buf[6..].copy_from_slice(&rand_bytes);
+    let rand_u128 = u128::from_be_bytes(rand_buf);
+    ulid::Ulid::from_parts(ms, rand_u128)
+}
+
+#[cfg(test)]
+mod ulid_for_commit_tests {
+    use super::*;
+
+    #[test]
+    fn deterministic() {
+        let ulid1 = ulid_for_commit(1620000000, "aabbccddeeff00112233445566778899aabbccdd");
+        let ulid2 = ulid_for_commit(1620000000, "aabbccddeeff00112233445566778899aabbccdd");
+        assert_eq!(ulid1, ulid2);
+    }
+
+    #[test]
+    fn earlier_time_sorts_before_later() {
+        let sha = "aabbccddeeff00112233445566778899aabbccdd";
+        let ulid_early = ulid_for_commit(1620000000, sha);
+        let ulid_late = ulid_for_commit(1620000100, sha);
+        assert!(ulid_early.to_string() < ulid_late.to_string());
+    }
+
+    #[test]
+    fn different_shas_at_same_time_produce_different_ulids() {
+        let time = 1620000000i64;
+        let ulid1 = ulid_for_commit(time, "aabbccddeeff00112233445566778899aabbccdd");
+        let ulid2 = ulid_for_commit(time, "1122334455667788990011223344556677889900");
+        assert_ne!(ulid1, ulid2);
+    }
+
+    #[test]
+    fn negative_time_is_clamped_to_zero() {
+        let ulid = ulid_for_commit(-1000, "aabbccddeeff00112233445566778899aabbccdd");
+        // Should not panic; the max(0) ensures ms = 0
+        assert_eq!(ulid.timestamp_ms(), 0);
+    }
+}
+
 #[cfg(test)]
 mod symbol_tests {
     use super::*;
