@@ -264,12 +264,21 @@ impl Indexer {
             coordinator = coordinator.with_ignore_filter(std::sync::Arc::new(filter));
         }
 
+        // Plan 28: `run_timed_with_extractor` expects Arc trait objects so
+        // the actor pipeline can move them into spawned tasks. Wrap the
+        // borrowed references in thin fat-pointer-erasing Arcs that are
+        // valid for the duration of this async call (SAFETY: caller holds
+        // the references alive across `.await`).
+        use crate::indexer::coordinator::{make_commit_source_arc, make_symbol_source_arc};
+        let commit_source_arc = make_commit_source_arc(commit_source);
+        let symbol_source_arc = make_symbol_source_arc(symbol_source);
+
         let result = coordinator
             .run_timed_with_extractor(
                 repo_id,
-                commit_source,
-                symbol_source,
-                self.symbol_extractor.as_ref(),
+                commit_source_arc,
+                symbol_source_arc,
+                self.symbol_extractor.clone(),
             )
             .await?;
 

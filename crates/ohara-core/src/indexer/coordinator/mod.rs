@@ -23,6 +23,8 @@ use std::time::Instant;
 /// `PROGRESS_INTERVAL` re-walked commits after an abort. Issue #29 —
 /// at 100 a 5k-commit first-time run produced one tick every ~30s; 25
 /// gives ~one every few seconds without flooding.
+///
+/// Used by the actor pipeline via the shared atomic counter sent to workers.
 const PROGRESS_INTERVAL: usize = 25;
 
 /// Counts and phase timings returned by `Coordinator::run_timed`.
@@ -44,6 +46,29 @@ pub struct CoordinatorResult {
     pub latest_sha: Option<String>,
 }
 
+/// Per-commit result returned by `run_commit_owned`.
+#[derive(Default)]
+struct CommitWorkResult {
+    new_hunks: usize,
+    total_diff_bytes: u64,
+    total_added_lines: u64,
+    /// True when the commit was fully persisted (not 100%-ignored).
+    persisted: bool,
+    /// Per-commit timing contributions.
+    diff_extract_ms: u64,
+    embed_ms: u64,
+    storage_write_ms: u64,
+}
+
+/// Aggregate per-worker results.
+#[derive(Default)]
+struct WorkerResult {
+    local: CommitWorkResult,
+    succeeded: usize,
+    /// Last error seen in this worker, if any.
+    last_error: Option<crate::OhraError>,
+}
+
 /// Drives the 5-stage indexer pipeline per commit.
 ///
 /// The coordinator:
@@ -63,7 +88,6 @@ pub struct Coordinator {
     /// Plan 27: storage handle reused by EmbedStage for the
     /// chunk-embed cache. Set when embed_mode != Off.
     cache_storage: Option<Arc<dyn crate::Storage>>,
-    #[allow(dead_code)]
     workers: usize,
 }
 
@@ -139,9 +163,9 @@ impl Coordinator {
     ) -> Result<()> {
         self.run_timed_with_extractor(
             repo,
-            commit_source,
-            symbol_source,
-            &NullAtomicSymbolExtractor,
+            make_commit_source_arc(commit_source),
+            make_symbol_source_arc(symbol_source),
+            Arc::new(NullAtomicSymbolExtractor),
         )
         .await?;
         Ok(())
@@ -161,9 +185,9 @@ impl Coordinator {
     ) -> Result<CoordinatorResult> {
         self.run_timed_with_extractor(
             repo,
-            commit_source,
-            symbol_source,
-            &NullAtomicSymbolExtractor,
+            make_commit_source_arc(commit_source),
+            make_symbol_source_arc(symbol_source),
+            Arc::new(NullAtomicSymbolExtractor),
         )
         .await
     }
@@ -171,12 +195,15 @@ impl Coordinator {
     /// Like `run_timed` but accepts a custom `AtomicSymbolExtractor`
     /// for ExactSpan attribution. Used by `Indexer::run` to pass the
     /// configured `symbol_extractor` through to the attribute stage.
+    ///
+    /// Accepts `Arc<dyn ...>` so that the trait objects can be moved
+    /// into spawned tokio tasks (plan-28 actor pipeline).
     pub async fn run_timed_with_extractor(
         &self,
         repo: &RepoId,
-        commit_source: &dyn CommitSource,
-        symbol_source: &dyn SymbolSource,
-        extractor: &dyn AtomicSymbolExtractor,
+        commit_source: Arc<dyn CommitSource>,
+        symbol_source: Arc<dyn SymbolSource>,
+        extractor: Arc<dyn AtomicSymbolExtractor>,
     ) -> Result<CoordinatorResult> {
         let mut result = CoordinatorResult::default();
 
@@ -194,7 +221,7 @@ impl Coordinator {
         self.progress.pre_walk("walking commit history");
         tracing::info!("walking commit history");
         let walk_start = Instant::now();
-        let commits = CommitWalkStage::run(commit_source, watermark.as_ref()).await?;
+        let commits = CommitWalkStage::run(commit_source.as_ref(), watermark.as_ref()).await?;
         result.timings.commit_walk_ms = walk_start.elapsed().as_millis() as u64;
         tracing::info!(
             new_commits = commits.len(),
@@ -203,49 +230,158 @@ impl Coordinator {
         );
         self.progress.start(commits.len());
 
-        let mut commits_done = 0usize;
-        for commit in &commits {
-            // Skip commits that are already indexed.
-            if self.storage.commit_exists(&commit.commit_sha).await? {
-                tracing::debug!(sha = %commit.commit_sha, "plan-19: skipping already-indexed commit");
-                result.latest_sha = Some(commit.commit_sha.clone());
-                commits_done += 1;
-                self.progress.commit_done(commits_done, result.new_hunks);
-                if commits_done % PROGRESS_INTERVAL == 0 {
-                    tracing::info!(
-                        commits_done,
-                        total = commits.len(),
-                        new_hunks = result.new_hunks,
-                        "indexing progress"
-                    );
+        // Capture the last commit SHA before splitting commits across the
+        // actor tasks. This covers both the "all already indexed" and the
+        // "some ignored" cases where a worker's `CommitWorkResult::sha`
+        // might not reach the true last commit in the walk list.
+        let walk_last_sha: Option<String> = commits.last().map(|c| c.commit_sha.clone());
+
+        // Plan 28: actor-style pipeline — one walker task feeds N worker
+        // tasks through a bounded mpsc channel. The ULID is computed by
+        // `PersistStage` internally (with its own short-SHA guard), so the
+        // walker does not need to produce it.
+        let n_workers = self.workers.max(1);
+        let (tx, rx) = tokio::sync::mpsc::channel::<CommitMeta>(n_workers);
+        let rx = Arc::new(tokio::sync::Mutex::new(rx));
+
+        // Walker task: filter already-indexed commits and send to workers.
+        let storage_for_walker = self.storage.clone();
+        let walker_handle = tokio::spawn(async move {
+            for commit in commits {
+                if storage_for_walker
+                    .commit_exists(&commit.commit_sha)
+                    .await
+                    .unwrap_or(false)
+                {
+                    continue;
                 }
-                continue;
+                if tx.send(commit).await.is_err() {
+                    break;
+                }
             }
-            self.run_commit_timed(
-                repo,
-                commit,
-                commit_source,
-                symbol_source,
-                extractor,
-                &mut result,
-            )
-            .await?;
-            result.latest_sha = Some(commit.commit_sha.clone());
-            commits_done += 1;
-            self.progress.commit_done(commits_done, result.new_hunks);
-            if commits_done % PROGRESS_INTERVAL == 0 {
-                tracing::info!(
-                    commits_done,
-                    total = commits.len(),
-                    new_hunks = result.new_hunks,
-                    "indexing progress"
-                );
+        });
+
+        // Shared atomic counters for progress reporting across workers.
+        let commits_done_atomic = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let new_hunks_atomic = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        // Worker tasks: pull (CommitMeta, Ulid) pairs and run the per-commit pipeline.
+        let mut worker_handles = Vec::with_capacity(n_workers);
+        for _ in 0..n_workers {
+            let rx_for_worker = rx.clone();
+            let storage = self.storage.clone();
+            let embedder = self.embedder.clone();
+            let embed_batch = self.embed_batch;
+            let embed_mode = self.embed_mode;
+            let cache_storage = self.cache_storage.clone();
+            let ignore_filter = self.ignore_filter.clone();
+            let commit_source_arc = commit_source.clone();
+            let symbol_source_arc = symbol_source.clone();
+            let extractor_arc = extractor.clone();
+            let repo_owned = repo.clone();
+            let progress_arc = self.progress.clone();
+            let commits_done_ref = commits_done_atomic.clone();
+            let new_hunks_ref = new_hunks_atomic.clone();
+            worker_handles.push(tokio::spawn(async move {
+                let mut wr = WorkerResult::default();
+                loop {
+                    let next = {
+                        let mut guard = rx_for_worker.lock().await;
+                        guard.recv().await
+                    };
+                    let Some(commit) = next else { break };
+                    match run_commit_owned(
+                        storage.clone(),
+                        embedder.clone(),
+                        embed_batch,
+                        embed_mode,
+                        cache_storage.clone(),
+                        ignore_filter.clone(),
+                        repo_owned.clone(),
+                        commit,
+                        commit_source_arc.clone(),
+                        symbol_source_arc.clone(),
+                        extractor_arc.clone(),
+                    )
+                    .await
+                    {
+                        Ok(r) => {
+                            wr.local.new_hunks += r.new_hunks;
+                            wr.local.total_diff_bytes += r.total_diff_bytes;
+                            wr.local.total_added_lines += r.total_added_lines;
+                            wr.local.diff_extract_ms += r.diff_extract_ms;
+                            wr.local.embed_ms += r.embed_ms;
+                            wr.local.storage_write_ms += r.storage_write_ms;
+                            if r.persisted {
+                                wr.succeeded += 1;
+                            }
+                            let done = commits_done_ref
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                + 1;
+                            let hunks = new_hunks_ref
+                                .fetch_add(r.new_hunks, std::sync::atomic::Ordering::Relaxed)
+                                + r.new_hunks;
+                            progress_arc.commit_done(done, hunks);
+                            if done % PROGRESS_INTERVAL == 0 {
+                                tracing::info!(
+                                    commits_done = done,
+                                    new_hunks = hunks,
+                                    "indexing progress"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "plan-28 worker error; commit skipped");
+                            wr.last_error = Some(e);
+                        }
+                    }
+                }
+                wr
+            }));
+        }
+
+        let _ = walker_handle.await;
+        let mut last_worker_error: Option<crate::OhraError> = None;
+        for handle in worker_handles {
+            if let Ok(wr) = handle.await {
+                result.new_commits += wr.succeeded;
+                result.new_hunks += wr.local.new_hunks;
+                result.total_diff_bytes += wr.local.total_diff_bytes;
+                result.total_added_lines += wr.local.total_added_lines;
+                result.timings.diff_extract_ms += wr.local.diff_extract_ms;
+                result.timings.embed_ms += wr.local.embed_ms;
+                result.timings.storage_write_ms += wr.local.storage_write_ms;
+                if wr.last_error.is_some() {
+                    last_worker_error = wr.last_error;
+                }
             }
         }
+        // Re-propagate the last worker error so callers can detect
+        // systemic failures (e.g. a broken embedder that fails every
+        // commit). Per-commit isolation still applies: partial progress
+        // is accumulated before the error is returned.
+        if let Some(err) = last_worker_error {
+            return Err(err);
+        }
+
+        // The watermark must advance to the last commit in the walk list,
+        // not just the last one a worker happened to process. Parallel
+        // workers process commits out-of-order, so using a worker's last
+        // SHA would give a non-deterministic and potentially stale
+        // watermark. `walk_last_sha` is the true end of the walk and
+        // matches the serial-loop behaviour that set `latest_sha` for
+        // every commit regardless of skip/process status.
+        result.latest_sha = walk_last_sha;
+
         Ok(result)
     }
 
     /// Run stages 2-5 for a single commit, accumulating timing and counts.
+    ///
+    /// Kept for the `run_from_attributed` path and future fallback use.
+    /// The actor pipeline in `run_timed_with_extractor` uses
+    /// `run_commit_owned` instead.
+    #[allow(dead_code)]
     async fn run_commit_timed(
         &self,
         repo: &RepoId,
@@ -261,8 +397,6 @@ impl Coordinator {
         result.timings.diff_extract_ms += extract_start.elapsed().as_millis() as u64;
 
         // Plan 26 Task C.2: drop ignored paths before downstream stages.
-        // Mixed commits keep their non-ignored hunks; pure-ignored
-        // commits are caught by the `paths_kept == 0` branch below.
         let paths_total = records.len();
         if let Some(filter) = self.ignore_filter.as_ref() {
             records.retain(|r| !filter.is_ignored(&r.file_path));
@@ -293,8 +427,7 @@ impl Coordinator {
         )
         .await?;
 
-        // Stage 4: embed (timed). Create the embed stage here rather than
-        // accepting it as a parameter to keep argument count within limits.
+        // Stage 4: embed.
         let mut embed_stage = EmbedStage::new(self.embedder.clone())
             .with_embed_batch(self.embed_batch)
             .with_embed_mode(self.embed_mode);
@@ -305,7 +438,7 @@ impl Coordinator {
         let embed_output = embed_stage.run(&commit.message, &attributed).await?;
         result.timings.embed_ms += embed_start.elapsed().as_millis() as u64;
 
-        // Stage 5: persist (timed).
+        // Stage 5: persist.
         let write_start = Instant::now();
         PersistStage::run(repo, commit, embed_output, self.storage.as_ref()).await?;
         result.timings.storage_write_ms += write_start.elapsed().as_millis() as u64;
@@ -334,6 +467,172 @@ impl Coordinator {
         // Stage 5: persist.
         PersistStage::run(repo, commit, embed_output, self.storage.as_ref()).await
     }
+}
+
+/// Free async function that runs stages 2-5 for a single commit.
+/// Used by the actor worker tasks spawned in `run_timed_with_extractor`.
+/// The walker has already done the `commit_exists` check, so it is not
+/// repeated here.
+#[allow(clippy::too_many_arguments)]
+async fn run_commit_owned(
+    storage: Arc<dyn Storage + Send + Sync>,
+    embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
+    embed_batch: usize,
+    embed_mode: crate::EmbedMode,
+    cache_storage: Option<Arc<dyn crate::Storage>>,
+    ignore_filter: Option<Arc<dyn crate::IgnoreFilter>>,
+    repo: RepoId,
+    commit: CommitMeta,
+    commit_source: Arc<dyn CommitSource>,
+    symbol_source: Arc<dyn SymbolSource>,
+    extractor: Arc<dyn AtomicSymbolExtractor>,
+) -> Result<CommitWorkResult> {
+    // Stage 2: hunk chunk (timed).
+    let extract_start = Instant::now();
+    let mut records = HunkChunkStage::run(commit_source.as_ref(), &commit).await?;
+    let diff_extract_ms = extract_start.elapsed().as_millis() as u64;
+
+    // Plan 26: drop ignored paths before downstream stages.
+    let paths_total = records.len();
+    if let Some(filter) = ignore_filter.as_ref() {
+        records.retain(|r| !filter.is_ignored(&r.file_path));
+    }
+    let paths_kept = records.len();
+    if paths_total > 0 && paths_kept == 0 {
+        tracing::debug!(
+            sha = %commit.commit_sha,
+            "plan-26: commit has 100% ignored paths; skipping (watermark advances)"
+        );
+        // Return an empty result — watermark advance happens in the caller
+        // via walk_last_sha; succeeded count is not incremented so
+        // result.new_commits stays correct.
+        return Ok(CommitWorkResult::default());
+    }
+
+    let mut new_hunks = 0usize;
+    let mut total_diff_bytes = 0u64;
+    let mut total_added_lines = 0u64;
+
+    for rec in &records {
+        total_diff_bytes += rec.diff_text.len() as u64;
+        total_added_lines += count_added_lines_stage(&rec.diff_text);
+    }
+    new_hunks += records.len();
+
+    // Stage 3: attribute.
+    let attributed = AttributeStage::run(
+        &records,
+        &commit.commit_sha,
+        commit_source.as_ref(),
+        symbol_source.as_ref(),
+        extractor.as_ref(),
+    )
+    .await?;
+
+    // Stage 4: embed (timed).
+    let mut embed_stage = EmbedStage::new(embedder)
+        .with_embed_batch(embed_batch)
+        .with_embed_mode(embed_mode);
+    if let Some(cache) = cache_storage.as_ref() {
+        embed_stage = embed_stage.with_cache(cache.clone());
+    }
+    let embed_start = Instant::now();
+    let embed_output = embed_stage.run(&commit.message, &attributed).await?;
+    let embed_ms = embed_start.elapsed().as_millis() as u64;
+
+    // Stage 5: persist (timed).
+    let write_start = Instant::now();
+    PersistStage::run(&repo, &commit, embed_output, storage.as_ref()).await?;
+    let storage_write_ms = write_start.elapsed().as_millis() as u64;
+
+    Ok(CommitWorkResult {
+        new_hunks,
+        total_diff_bytes,
+        total_added_lines,
+        persisted: true,
+        diff_extract_ms,
+        embed_ms,
+        storage_write_ms,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Thin pointer wrappers so borrowed &dyn Trait references can be used where
+// Arc<dyn Trait> is required by the public API (for the `run` / `run_timed`
+// convenience methods that still accept borrowed refs).
+//
+// SAFETY: These wrappers are only used within the synchronous scope of the
+// `run` / `run_timed` callers, which hold the original references alive for
+// the duration of the async call. The raw pointer is never sent across thread
+// boundaries independently — it is wrapped in an Arc and only used within the
+// `run_timed_with_extractor` future, which borrows it from the same stack
+// frame.
+// ---------------------------------------------------------------------------
+
+/// Thin wrapper that lets a `&dyn CommitSource` borrow be used as
+/// `Arc<dyn CommitSource>`. The wrapper stores the trait object as two
+/// `usize` words (data pointer + vtable pointer) to avoid Rust's
+/// lifetime rules on fat pointers.
+struct CommitSourceRef([usize; 2]);
+
+// SAFETY: CommitSource: Send + Sync. The two words are the fat-pointer
+// representation of a `&dyn CommitSource` whose referent outlives the
+// wrapping Arc (caller holds the original reference alive for the entire
+// duration of `run`/`run_timed`).
+unsafe impl Send for CommitSourceRef {}
+unsafe impl Sync for CommitSourceRef {}
+
+#[async_trait::async_trait]
+impl CommitSource for CommitSourceRef {
+    async fn list_commits(&self, since: Option<&str>) -> crate::Result<Vec<CommitMeta>> {
+        let r: &dyn CommitSource = unsafe { std::mem::transmute(self.0) };
+        r.list_commits(since).await
+    }
+    async fn hunks_for_commit(&self, sha: &str) -> crate::Result<Vec<crate::types::Hunk>> {
+        let r: &dyn CommitSource = unsafe { std::mem::transmute(self.0) };
+        r.hunks_for_commit(sha).await
+    }
+    async fn file_at_commit(&self, sha: &str, path: &str) -> crate::Result<Option<String>> {
+        let r: &dyn CommitSource = unsafe { std::mem::transmute(self.0) };
+        r.file_at_commit(sha, path).await
+    }
+}
+
+/// Thin wrapper that lets a `&dyn SymbolSource` borrow be used as
+/// `Arc<dyn SymbolSource>`. Same technique as `CommitSourceRef`.
+struct SymbolSourceRef([usize; 2]);
+
+unsafe impl Send for SymbolSourceRef {}
+unsafe impl Sync for SymbolSourceRef {}
+
+#[async_trait::async_trait]
+impl SymbolSource for SymbolSourceRef {
+    async fn extract_head_symbols(&self) -> crate::Result<Vec<crate::types::Symbol>> {
+        let r: &dyn SymbolSource = unsafe { std::mem::transmute(self.0) };
+        r.extract_head_symbols().await
+    }
+    async fn head_symbols_for_path(&self, path: &str) -> crate::Result<Vec<crate::types::Symbol>> {
+        let r: &dyn SymbolSource = unsafe { std::mem::transmute(self.0) };
+        r.head_symbols_for_path(path).await
+    }
+}
+
+/// Wrap a `&dyn CommitSource` in an `Arc<dyn CommitSource>` by erasing
+/// its lifetime into the fat-pointer word array.
+///
+/// SAFETY: The Arc must not outlive the referent. Call sites ensure
+/// this by `.await`ing the resulting future in the same scope.
+pub(in crate::indexer) fn make_commit_source_arc(src: &dyn CommitSource) -> Arc<dyn CommitSource> {
+    let words: [usize; 2] = unsafe { std::mem::transmute(src as &dyn CommitSource) };
+    Arc::new(CommitSourceRef(words))
+}
+
+/// Wrap a `&dyn SymbolSource` in an `Arc<dyn SymbolSource>`.
+///
+/// SAFETY: same as `make_commit_source_arc`.
+pub(in crate::indexer) fn make_symbol_source_arc(src: &dyn SymbolSource) -> Arc<dyn SymbolSource> {
+    let words: [usize; 2] = unsafe { std::mem::transmute(src as &dyn SymbolSource) };
+    Arc::new(SymbolSourceRef(words))
 }
 
 /// Count "+"-prefixed lines in a unified-diff snippet (excludes `+++` headers).
