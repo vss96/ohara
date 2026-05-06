@@ -108,6 +108,11 @@ pub struct Args {
     /// input to drop the commit message.
     #[arg(long, value_enum, default_value_t = EmbedCacheArg::Off)]
     pub embed_cache: EmbedCacheArg,
+    /// Number of worker tasks for the parallel commit pipeline
+    /// (plan-28). Defaults to the number of available CPUs.
+    /// `--workers 1` reproduces the serial path.
+    #[arg(long)]
+    pub workers: Option<usize>,
 }
 
 /// Compose explicit-flag values with a [`ResourcePlan`] under the
@@ -420,6 +425,10 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         // Plan 27: wire the chosen embed-cache mode into the indexer so
         // the coordinator picks the right cache key strategy.
         .with_embed_mode(args.embed_cache.into());
+    let indexer = match args.workers {
+        Some(n) => indexer.with_workers(n),
+        None => indexer,
+    };
     let report = indexer.run(&repo_id, commit_source, symbol_source).await?;
     // Two-sink summary: human-readable on stdout, structured event on
     // stderr so log aggregators / CI watchdogs / a future `--json` flag
