@@ -41,8 +41,11 @@ pub async fn run(
     now_unix: i64,
 ) -> crate::Result<Vec<HunkHit>> {
     // 1. Fire all lanes in parallel. Disabled lanes return Ok(vec![])
-    //    without touching storage.
-    let lane_futures = lanes.iter().map(|l| l.search(query, repo_id, final_k));
+    //    without touching storage. Lanes gather up to `lane_top_k`
+    //    candidates each (the documented per-lane fan-in for RRF);
+    //    the caller's `final_k` truncation is applied at step 6 only.
+    let lane_k = weights.lane_top_k as usize;
+    let lane_futures = lanes.iter().map(|l| l.search(query, repo_id, lane_k));
     let lane_results: Vec<crate::Result<Vec<HunkHit>>> = join_all(lane_futures).await;
 
     // 2. Build per-lane ranked id lists + a HunkId -> HunkHit lookup.
