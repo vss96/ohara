@@ -13,6 +13,22 @@ use rusqlite::{params, Connection};
 
 use crate::codec::row_codec::{str_to_change_kind, upsert_file_path};
 
+/// Oversample factor for the BM25-by-symbol-name lane's `LIMIT` (issue #57).
+///
+/// The lane joins `fts_symbol_name` to every hunk that ever touched the
+/// matched symbol's file, so one matched symbol can fan out to hundreds
+/// of rows on hot files. Without a `LIMIT`, SQLite's
+/// `TEMP B-TREE FOR ORDER BY` materialises the full fan-out before Rust
+/// sees a row; the dedup-by-first-seen loop in `bm25_by_name` then
+/// throws most of them away. Bounding the temp B-tree fill at
+/// `k * SYMBOL_LANE_OVERSAMPLE` rows keeps SQLite's work proportional
+/// to the caller's `k` while still leaving Rust's dedup enough rows to
+/// pick distinct hunks from. 10x is a deliberately generous slack:
+/// catastrophic recall loss would only happen if a single hunk produced
+/// more than 10 matched symbols ahead of the rank-`k+1` distinct hunk,
+/// which the indexer's per-file dedup already rules out.
+pub(crate) const SYMBOL_LANE_OVERSAMPLE: i64 = 10;
+
 /// Persist a single `Symbol` to the `symbol` table and mirror it into
 /// the `fts_symbol_name` virtual table. Caller owns the transaction.
 fn put_one(tx: &rusqlite::Transaction<'_>, fp_id: i64, s: &Symbol) -> Result<()> {
@@ -107,6 +123,12 @@ pub fn bm25_by_name(
     since_unix: Option<i64>,
 ) -> Result<Vec<HunkHit>> {
     let sql = build_bm25_sql(language, since_unix);
+    // Issue #57: bound SQLite's TEMP B-TREE FOR ORDER BY at
+    // k * SYMBOL_LANE_OVERSAMPLE rows so the dedup-in-Rust loop below
+    // still gets enough candidates to pick from without materialising
+    // the full hunk fan-out for hot-file queries. Cast through i64 so
+    // u8::MAX * 10 (= 2550) cannot wrap.
+    let k_oversample: i64 = i64::from(k) * SYMBOL_LANE_OVERSAMPLE;
 
     let mut binds: Vec<(&str, Box<dyn rusqlite::ToSql>)> = Vec::new();
     binds.push((
@@ -119,6 +141,7 @@ pub fn bm25_by_name(
     if let Some(ts) = since_unix {
         binds.push((":ts", Box::new(ts)));
     }
+    binds.push((":k_oversample", Box::new(k_oversample)));
 
     let mut stmt = c.prepare(&sql)?;
     let bind_refs: Vec<(&str, &dyn rusqlite::ToSql)> = binds
@@ -167,7 +190,8 @@ pub(crate) fn build_bm25_sql(language: Option<&str>, since_unix: Option<i64>) ->
          JOIN commit_record cr ON cr.sha = h.commit_sha
          WHERE fts_symbol_name MATCH :query
            {ts_filter} {lang_filter}
-         ORDER BY rank_score ASC"
+         ORDER BY rank_score ASC
+         LIMIT :k_oversample"
     )
 }
 
