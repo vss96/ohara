@@ -188,10 +188,10 @@ const HIGH_SHARE_THRESHOLD: f64 = 0.05;
 /// level directories with commit share above the threshold and not in
 /// the docs allowlist are returned in deterministic order.
 pub fn suggest_patterns(agg: &HotmapAggregator) -> Vec<String> {
-    if agg.total_commits() == 0 {
+    let total = agg.total_commits() as f64;
+    if total <= 0.0 {
         return Vec::new();
     }
-    let threshold = (agg.total_commits() as f64 * HIGH_SHARE_THRESHOLD) as u64;
     let mut out: Vec<String> = Vec::new();
 
     for (key, count) in agg.counts() {
@@ -204,7 +204,10 @@ pub fn suggest_patterns(agg: &HotmapAggregator) -> Vec<String> {
         if DOCS_ALLOWLIST.iter().any(|d| *d == key) {
             continue;
         }
-        if *count >= threshold {
+        // Compare share in f64 — the previous integer cast floored
+        // `total * 0.05` to 0 on repos with fewer than 20 commits,
+        // which made every directory match `count >= 0`. See #41.
+        if (*count as f64) / total >= HIGH_SHARE_THRESHOLD {
             out.push(key.clone());
         }
     }
@@ -267,15 +270,9 @@ mod suggestion_tests {
     #[test]
     fn sub_threshold_share_with_small_total_is_not_suggested() {
         // Issue #41 (bug 1): the integer-floored threshold
-        // `(total * 0.05) as u64` rounds down on small/young repos,
-        // so directories whose true share is well below 5% still
-        // satisfy `count >= threshold`.
-        //
-        // 30 commits, 29 touch `src/`, 1 touches `niche/`:
-        //   - niche/ share is 1/30 ≈ 3.3% — below the 5% threshold.
-        //   - Buggy threshold = (30.0 * 0.05) as u64 = 1, and
-        //     niche count = 1, so 1 >= 1 falsely flags niche/.
-        //   - Fixed (f64) comparison drops niche/ because 3.3% < 5%.
+        // `(total * 0.05) as u64` rounded down on small repos.
+        // 30 commits / 1 niche/ commit = 3.3% share, below 5%, but
+        // the buggy `(30.0 * 0.05) as u64 = 1` made `1 >= 1` match.
         let mut agg = HotmapAggregator::default();
         agg.record(&["niche/foo.rs".into()]);
         for _ in 0..29 {
@@ -284,8 +281,7 @@ mod suggestion_tests {
         let suggestions = suggest_patterns(&agg);
         assert!(
             !suggestions.iter().any(|p| p == "niche/"),
-            "niche/ at 3.3% share must not be suggested at a 5% threshold; \
-             got {suggestions:?}"
+            "niche/ at 3.3% share must not be suggested; got {suggestions:?}"
         );
     }
 }
@@ -333,11 +329,15 @@ pub fn merge_oharaignore(existing: &str, new_section: &str) -> Result<String> {
              pass --replace to overwrite or delete the file and re-run"
         )
     })?;
-    let end = existing.find(MARKER_END).ok_or_else(|| {
+    // Scope the end-marker search to the region after the begin marker
+    // so user prose above the markers can quote the end-marker text
+    // without corrupting the splice. See #41.
+    let end_relative = existing[begin..].find(MARKER_END).ok_or_else(|| {
         anyhow::anyhow!(
             "existing .oharaignore has begin marker but no end marker; refusing to merge"
         )
-    })? + MARKER_END.len();
+    })?;
+    let end = begin + end_relative + MARKER_END.len();
 
     // Walk past trailing whitespace/newline of the end marker line.
     let after_end = existing[end..]
@@ -407,18 +407,9 @@ my_team/
 
     #[test]
     fn merge_ignores_stray_end_marker_above_begin() {
-        // Issue #41 (bug 2): the unscoped `existing.find(MARKER_END)`
-        // finds the FIRST occurrence of the end-marker text, even if
-        // that occurrence is in user-authored prose ABOVE the real
-        // begin marker. The end-of-block then resolves to a position
-        // before the begin, the splice scrambles, and either the user
-        // prose or the auto-section is lost.
-        //
-        // Construct a file where the user has documented the file
-        // format above the markers, including a literal copy of the
-        // closing marker text. After merge, the original user prose
-        // (including the stray line), the new auto-section, and any
-        // trailing user lines must all survive verbatim.
+        // Issue #41 (bug 2): the unscoped `find(MARKER_END)` returned
+        // the first occurrence even when it sat in user prose ABOVE
+        // the real begin marker, scrambling the splice.
         let existing = "\
 # notes for teammates:
 #   the auto-generated block ends with a line that looks like
@@ -435,27 +426,23 @@ my_team/
         let new_section = render_oharaignore_body(&["drivers/".into()], "0.7.7");
         let merged = merge_oharaignore(existing, &new_section).expect("merge");
 
-        assert!(merged.contains("drivers/"), "new auto pattern present");
+        assert!(merged.contains("drivers/"), "new pattern present");
         assert!(!merged.contains("old_pattern/"), "old auto pattern dropped");
         assert!(
             merged.contains("notes for teammates:"),
-            "user prose above the markers must survive: {merged}"
+            "user prose above markers preserved: {merged}"
         );
         assert!(
             merged.contains("do not edit that block by hand"),
-            "user prose above the markers must survive verbatim: {merged}"
+            "user prose above markers preserved verbatim: {merged}"
         );
-        assert!(
-            merged.contains("my_team/"),
-            "user lines below the markers must survive: {merged}"
-        );
+        assert!(merged.contains("my_team/"), "user lines below preserved");
         assert!(
             merged.contains("!Cargo.lock"),
-            "user negation below the markers must survive: {merged}"
+            "user negation below preserved"
         );
-        // The begin marker must appear exactly once after merge —
-        // the buggy splice can leave the original begin marker in
-        // place AND prepend a fresh one from `new_section`.
+        // Exactly one begin marker after merge — the buggy splice can
+        // leave the original begin marker AND prepend a fresh one.
         assert_eq!(
             merged.matches(MARKER_BEGIN).count(),
             1,
