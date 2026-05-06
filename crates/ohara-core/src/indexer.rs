@@ -461,7 +461,6 @@ mod phase_timing_tests {
     use crate::query::IndexStatus;
     use crate::storage::{CommitRecord, HunkRecord};
     use crate::types::{ChangeKind, CommitMeta, Hunk, RepoId, Symbol};
-    use crate::OhraError;
     use async_trait::async_trait;
     use std::collections::HashSet;
     use std::sync::Mutex;
@@ -785,9 +784,10 @@ mod phase_timing_tests {
 
     #[tokio::test]
     async fn run_returns_typed_error_when_embedder_drops_inputs() {
-        // Replaces the previous `.expect("non-empty")` panic with a
-        // typed OhraError::Embedding so a buggy embedder surfaces as a
-        // clean error to the caller instead of crashing the indexer.
+        // Plan 28 Task C.3: per-commit failure isolation means a buggy
+        // embedder no longer causes `Indexer::run` to return an error.
+        // Instead the commit is skipped (warn-logged) and the run
+        // completes with new_commits == 0.
         let storage = std::sync::Arc::new(FakeStorage::new(std::time::Duration::from_millis(0)));
         let embedder = std::sync::Arc::new(EmptyEmbedder);
 
@@ -803,24 +803,14 @@ mod phase_timing_tests {
 
         let indexer = Indexer::new(storage, embedder);
         let repo_id = RepoId::from_parts("first", "/tmp/empty-emb");
-        let err = indexer
+        let report = indexer
             .run(&repo_id, Arc::new(commit_source), Arc::new(symbol_source))
             .await
-            .expect_err("buggy embedder must surface an OhraError, not panic");
-        match err {
-            OhraError::Embedding(msg) => {
-                // embed_in_chunks catches the mismatch (0 vectors for N
-                // inputs) before split_first sees an empty Vec, so the
-                // error now says "embed_batch returned 0 vectors for …"
-                // rather than the previous "embed_batch returned empty".
-                // Both are sub-strings of "embed_batch returned".
-                assert!(
-                    msg.contains("embed_batch returned") && msg.contains("vectors for"),
-                    "expected embed_batch length-mismatch diagnostic, got: {msg}"
-                );
-            }
-            other => panic!("expected OhraError::Embedding, got {other:?}"),
-        }
+            .expect("run must succeed even when one commit has a broken embedder");
+        assert_eq!(
+            report.new_commits, 0,
+            "broken embedder causes the commit to be skipped, not an error"
+        );
     }
 
     /// Counts `embed_batch` calls so the skip-already-indexed regression
@@ -1006,12 +996,12 @@ mod phase_timing_tests {
 
     #[tokio::test]
     async fn run_does_not_write_metadata_when_indexer_fails_partway() {
-        // Plan 13 Task 2.2 Step 4: if a pass fails before reaching the
-        // metadata-write step (here: the embedder returns empty for
-        // non-empty input — same path the existing typed-error test
-        // exercises), storage MUST NOT see a put_index_metadata call.
-        // That keeps a half-finished run from claiming the new
-        // version is complete.
+        // Plan 28 Task C.3: per-commit failure isolation means a broken
+        // embedder no longer aborts the run. The run completes (with
+        // new_commits == 0 for the skipped commit) and metadata IS
+        // written because the run itself succeeded. This test now
+        // validates that the metadata path is reached even when all
+        // commits were individually skipped.
         let storage = std::sync::Arc::new(FakeStorage::new(std::time::Duration::from_millis(0)));
         let embedder = std::sync::Arc::new(EmptyEmbedder);
         let commit_source = FakeCommitSource {
@@ -1027,14 +1017,19 @@ mod phase_timing_tests {
         let indexer =
             Indexer::new(storage.clone(), embedder).with_runtime_metadata(fake_runtime_metadata());
         let repo_id = RepoId::from_parts("first", "/tmp/meta-failure");
-        let _err = indexer
+        let report = indexer
             .run(&repo_id, Arc::new(commit_source), Arc::new(symbol_source))
             .await
-            .expect_err("indexer must surface the embedder error");
+            .expect("run must succeed with per-commit error isolation");
 
+        assert_eq!(
+            report.new_commits, 0,
+            "broken embedder causes commit skip, not run failure"
+        );
+        // Metadata IS written because the run completed successfully.
         assert!(
-            storage.last_metadata.lock().unwrap().is_none(),
-            "metadata write must NOT happen when the pass fails partway"
+            storage.last_metadata.lock().unwrap().is_some(),
+            "metadata write MUST happen when the run succeeds (even with skipped commits)"
         );
     }
 

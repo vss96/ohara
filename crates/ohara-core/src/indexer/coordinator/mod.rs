@@ -44,6 +44,9 @@ pub struct CoordinatorResult {
     pub timings: PhaseTimings,
     /// SHA of the last commit processed (for watermark advance).
     pub latest_sha: Option<String>,
+    /// Number of commits that encountered a per-commit error and were skipped.
+    /// Plan 28 Task C.3: errors are isolated per-commit; the run still succeeds.
+    pub commits_failed: usize,
 }
 
 /// Per-commit result returned by `run_commit_owned`.
@@ -65,8 +68,8 @@ struct CommitWorkResult {
 struct WorkerResult {
     local: CommitWorkResult,
     succeeded: usize,
-    /// Last error seen in this worker, if any.
-    last_error: Option<crate::OhraError>,
+    /// Number of per-commit errors encountered by this worker.
+    failed: usize,
 }
 
 /// Drives the 5-stage indexer pipeline per commit.
@@ -332,7 +335,7 @@ impl Coordinator {
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "plan-28 worker error; commit skipped");
-                            wr.last_error = Some(e);
+                            wr.failed += 1;
                         }
                     }
                 }
@@ -341,28 +344,26 @@ impl Coordinator {
         }
 
         let _ = walker_handle.await;
-        let mut last_worker_error: Option<crate::OhraError> = None;
         for handle in worker_handles {
             if let Ok(wr) = handle.await {
                 result.new_commits += wr.succeeded;
+                result.commits_failed += wr.failed;
                 result.new_hunks += wr.local.new_hunks;
                 result.total_diff_bytes += wr.local.total_diff_bytes;
                 result.total_added_lines += wr.local.total_added_lines;
                 result.timings.diff_extract_ms += wr.local.diff_extract_ms;
                 result.timings.embed_ms += wr.local.embed_ms;
                 result.timings.storage_write_ms += wr.local.storage_write_ms;
-                if wr.last_error.is_some() {
-                    last_worker_error = wr.last_error;
-                }
             }
         }
-        // Re-propagate the last worker error so callers can detect
-        // systemic failures (e.g. a broken embedder that fails every
-        // commit). Per-commit isolation still applies: partial progress
-        // is accumulated before the error is returned.
-        if let Some(err) = last_worker_error {
-            return Err(err);
-        }
+
+        tracing::info!(
+            new_commits = result.new_commits,
+            commits_failed = result.commits_failed,
+            "indexer: {} commits indexed, {} commits skipped due to errors",
+            result.new_commits,
+            result.commits_failed,
+        );
 
         // The watermark must advance to the last commit in the walk list,
         // not just the last one a worker happened to process. Parallel

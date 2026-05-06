@@ -208,6 +208,29 @@ impl Storage for SpyStorage {
     }
 }
 
+/// A CommitSource that returns an error from `hunks_for_commit` for a
+/// specific SHA ("poison"). All other SHAs return one trivial hunk.
+/// Used by the failure-isolation regression test (plan-28 task C.3).
+struct PoisonedCommitSource {
+    commits: Vec<CommitMeta>,
+    poison_sha: String,
+}
+
+#[async_trait]
+impl crate::indexer::CommitSource for PoisonedCommitSource {
+    async fn list_commits(&self, _: Option<&str>) -> Result<Vec<CommitMeta>> {
+        Ok(self.commits.clone())
+    }
+    async fn hunks_for_commit(&self, sha: &str) -> Result<Vec<Hunk>> {
+        if sha == self.poison_sha {
+            return Err(crate::OhraError::Git(format!(
+                "poisoned hunks_for_commit: {sha}"
+            )));
+        }
+        Ok(vec![hunk(sha)])
+    }
+}
+
 fn hunk(sha: &str) -> Hunk {
     use crate::types::ChangeKind;
     Hunk {
@@ -465,4 +488,73 @@ async fn fully_ignored_commit_advances_watermark_with_zero_persisted_rows() {
         persisted.is_empty(),
         "expected zero persisted hunks; got {persisted:?}"
     );
+}
+
+#[tokio::test]
+async fn worker_error_on_one_commit_does_not_block_others() {
+    // Plan 28 Task C.3: a CommitSource that fails for one specific SHA.
+    // Expect 9 of 10 commits to persist; the failed one is skipped and
+    // the run completes successfully with result.new_commits == 9.
+    let poison_sha = "poison-sha".to_string();
+
+    // Build 10 commits: 9 normal + 1 poison.
+    let mut commits = Vec::with_capacity(10);
+    for i in 0..9u32 {
+        commits.push(CommitMeta {
+            commit_sha: format!("commit-{i:02}"),
+            parent_sha: None,
+            is_merge: false,
+            author: None,
+            ts: 1_000_000 + i as i64,
+            message: format!("commit {i}"),
+        });
+    }
+    commits.push(CommitMeta {
+        commit_sha: poison_sha.clone(),
+        parent_sha: None,
+        is_merge: false,
+        author: None,
+        ts: 1_000_009,
+        message: "poisoned commit".into(),
+    });
+
+    let storage = Arc::new(SpyStorage::default());
+    let embedder = Arc::new(ZeroEmbedder { dim: 4 });
+    let source = Arc::new(PoisonedCommitSource {
+        commits,
+        poison_sha: poison_sha.clone(),
+    });
+
+    let coord = Coordinator::new(storage.clone(), embedder).with_workers(4);
+    let repo = RepoId::from_parts("sha", "/repo");
+
+    let result = coord
+        .run_timed(&repo, source, Arc::new(NoopSymbolSource))
+        .await
+        .expect("run must succeed even when one commit errors");
+
+    assert_eq!(
+        result.new_commits, 9,
+        "9 of 10 commits must be persisted; got {}",
+        result.new_commits
+    );
+    assert_eq!(
+        result.commits_failed, 1,
+        "exactly 1 commit must be recorded as failed"
+    );
+
+    // Verify the poisoned SHA was NOT persisted.
+    let persisted = storage.put_commit_calls.lock().unwrap().clone();
+    assert!(
+        !persisted.iter().any(|sha| sha == &poison_sha),
+        "poison-sha must not have been persisted; got {persisted:?}"
+    );
+    // All 9 normal commits must appear.
+    for i in 0..9u32 {
+        let expected = format!("commit-{i:02}");
+        assert!(
+            persisted.iter().any(|sha| sha == &expected),
+            "{expected} must have been persisted"
+        );
+    }
 }
