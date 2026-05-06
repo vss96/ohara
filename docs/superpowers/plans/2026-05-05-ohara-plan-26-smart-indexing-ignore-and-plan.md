@@ -10,6 +10,14 @@
 **Goal:** Add `ohara plan [path]`, a pre-flight subcommand that walks
 a repo's history (paths only, no diff text), prints a directory commit-
 share hotmap, suggests a `.oharaignore`, and writes it at the repo root.
+[^superseded-37]
+
+[^superseded-37]: The auto-write default described throughout this plan
+is superseded by [issue #37](https://github.com/vss96/ohara/issues/37):
+`ohara plan` is now print-only by default and writes only with the
+explicit `--write` flag (no `--yes` / `--no-write`, no confirmation
+prompt). The marker-fenced merge logic is unchanged — only the default
+path differs.
 Wire a layered `IgnoreFilter` (built-in defaults + `.gitattributes`
 linguist-* + `.oharaignore`) into the indexer's pipeline so ignored
 paths skip parse + embed; commits whose changed paths are 100% ignored

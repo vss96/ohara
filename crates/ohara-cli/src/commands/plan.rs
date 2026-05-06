@@ -1,15 +1,17 @@
-//! `ohara plan` — pre-flight planner that surveys the repo, prints a
-//! directory commit-share hotmap, and writes a `.oharaignore` at the
-//! repo root.
+//! `ohara plan` — pre-flight planner that surveys the repo and prints a
+//! directory commit-share hotmap plus suggested `.oharaignore` patterns.
 //!
-//! Plan-26 / Spec A. The file lives at the repo root (not `.ohara/`)
-//! so it's checked into the repo and shared across the team like
-//! `.gitignore`.
+//! Plan-26 / Spec A introduced this as an auto-writer; issue #37
+//! demoted it to **print-only by default**. The `--write` flag opts
+//! back into writing `.oharaignore` at the repo root (marker-fenced,
+//! merged with user-added lines below the markers).
+//!
+//! The file lives at the repo root (not `.ohara/`) so it's checked
+//! into the repo and shared across the team like `.gitignore`.
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 use ohara_git::GitWalker;
-use std::io::Write;
 use std::path::PathBuf;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -19,15 +21,15 @@ pub struct Args {
     /// Path to the repo (defaults to current directory).
     #[arg(default_value = ".")]
     pub path: PathBuf,
-    /// Write `.oharaignore` without prompting.
+    /// Apply the suggestions to `.oharaignore` (default: print only).
+    /// Merges into any existing marker block; preserves user-added
+    /// lines below the closing marker.
     #[arg(long)]
-    pub yes: bool,
-    /// Print suggestions only; never write a file.
-    #[arg(long, conflicts_with = "yes")]
-    pub no_write: bool,
-    /// Replace the entire `.oharaignore` (default: replace only the
-    /// auto-generated section between markers, preserving user lines).
-    #[arg(long)]
+    pub write: bool,
+    /// Replace the entire `.oharaignore` (default merge replaces only
+    /// the auto-generated section between markers, preserving user
+    /// lines). Only meaningful with `--write`.
+    #[arg(long, requires = "write")]
     pub replace: bool,
 }
 
@@ -56,7 +58,11 @@ pub async fn run(args: Args) -> Result<()> {
     print_suggestions(&suggestions, agg.total_commits());
     print_gpu_hint();
 
-    if args.no_write {
+    if !args.write {
+        // Issue #37: print-only by default. The previous auto-write
+        // silently excluded engine directories on repos where the
+        // most-touched top-level dir was the engine itself.
+        println!("\nre-run with --write to apply these suggestions to .oharaignore");
         return Ok(());
     }
 
@@ -70,19 +76,6 @@ pub async fn run(args: Args) -> Result<()> {
             .with_context(|| format!("read {}", target.display()))?;
         merge_oharaignore(&existing, &new_section)?
     };
-
-    if !args.yes {
-        print!("write {}? [y/N] ", target.display());
-        std::io::stdout().flush().ok();
-        let mut input = String::new();
-        std::io::stdin()
-            .read_line(&mut input)
-            .context("stdin read")?;
-        if !input.trim().eq_ignore_ascii_case("y") {
-            println!("aborted; no file written");
-            return Ok(());
-        }
-    }
 
     std::fs::write(&target, final_text).with_context(|| format!("write {}", target.display()))?;
     println!("wrote {}", target.display());
