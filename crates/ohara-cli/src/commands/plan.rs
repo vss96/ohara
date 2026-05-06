@@ -188,10 +188,10 @@ const HIGH_SHARE_THRESHOLD: f64 = 0.05;
 /// level directories with commit share above the threshold and not in
 /// the docs allowlist are returned in deterministic order.
 pub fn suggest_patterns(agg: &HotmapAggregator) -> Vec<String> {
-    if agg.total_commits() == 0 {
+    let total = agg.total_commits() as f64;
+    if total <= 0.0 {
         return Vec::new();
     }
-    let threshold = (agg.total_commits() as f64 * HIGH_SHARE_THRESHOLD) as u64;
     let mut out: Vec<String> = Vec::new();
 
     for (key, count) in agg.counts() {
@@ -204,7 +204,10 @@ pub fn suggest_patterns(agg: &HotmapAggregator) -> Vec<String> {
         if DOCS_ALLOWLIST.iter().any(|d| *d == key) {
             continue;
         }
-        if *count >= threshold {
+        // Compare share in f64 — the previous integer cast floored
+        // `total * 0.05` to 0 on repos with fewer than 20 commits,
+        // which made every directory match `count >= 0`. See #41.
+        if (*count as f64) / total >= HIGH_SHARE_THRESHOLD {
             out.push(key.clone());
         }
     }
@@ -263,6 +266,24 @@ mod suggestion_tests {
         let suggestions = suggest_patterns(&agg);
         assert!(!suggestions.iter().any(|p| p == "niche/"));
     }
+
+    #[test]
+    fn sub_threshold_share_with_small_total_is_not_suggested() {
+        // Issue #41 (bug 1): the integer-floored threshold
+        // `(total * 0.05) as u64` rounded down on small repos.
+        // 30 commits / 1 niche/ commit = 3.3% share, below 5%, but
+        // the buggy `(30.0 * 0.05) as u64 = 1` made `1 >= 1` match.
+        let mut agg = HotmapAggregator::default();
+        agg.record(&["niche/foo.rs".into()]);
+        for _ in 0..29 {
+            agg.record(&["src/main.rs".into()]);
+        }
+        let suggestions = suggest_patterns(&agg);
+        assert!(
+            !suggestions.iter().any(|p| p == "niche/"),
+            "niche/ at 3.3% share must not be suggested; got {suggestions:?}"
+        );
+    }
 }
 
 const MARKER_BEGIN_PREFIX: &str = "# === ohara plan v";
@@ -308,11 +329,15 @@ pub fn merge_oharaignore(existing: &str, new_section: &str) -> Result<String> {
              pass --replace to overwrite or delete the file and re-run"
         )
     })?;
-    let end = existing.find(MARKER_END).ok_or_else(|| {
+    // Scope the end-marker search to the region after the begin marker
+    // so user prose above the markers can quote the end-marker text
+    // without corrupting the splice. See #41.
+    let end_relative = existing[begin..].find(MARKER_END).ok_or_else(|| {
         anyhow::anyhow!(
             "existing .oharaignore has begin marker but no end marker; refusing to merge"
         )
-    })? + MARKER_END.len();
+    })?;
+    let end = begin + end_relative + MARKER_END.len();
 
     // Walk past trailing whitespace/newline of the end marker line.
     let after_end = existing[end..]
@@ -378,6 +403,51 @@ my_team/
         let new_section = render_oharaignore_body(&["drivers/".into()], "0.7.7");
         let res = merge_oharaignore(existing, &new_section);
         assert!(res.is_err(), "merge must refuse when markers absent");
+    }
+
+    #[test]
+    fn merge_ignores_stray_end_marker_above_begin() {
+        // Issue #41 (bug 2): the unscoped `find(MARKER_END)` returned
+        // the first occurrence even when it sat in user prose ABOVE
+        // the real begin marker, scrambling the splice.
+        let existing = "\
+# notes for teammates:
+#   the auto-generated block ends with a line that looks like
+#   `# === end auto-generated ===`
+# do not edit that block by hand
+# === ohara plan v0.7.6 — auto-generated 2026-05-04T12:00:00 ===
+old_pattern/
+# === end auto-generated ===
+
+# user added below
+my_team/
+!Cargo.lock
+";
+        let new_section = render_oharaignore_body(&["drivers/".into()], "0.7.7");
+        let merged = merge_oharaignore(existing, &new_section).expect("merge");
+
+        assert!(merged.contains("drivers/"), "new pattern present");
+        assert!(!merged.contains("old_pattern/"), "old auto pattern dropped");
+        assert!(
+            merged.contains("notes for teammates:"),
+            "user prose above markers preserved: {merged}"
+        );
+        assert!(
+            merged.contains("do not edit that block by hand"),
+            "user prose above markers preserved verbatim: {merged}"
+        );
+        assert!(merged.contains("my_team/"), "user lines below preserved");
+        assert!(
+            merged.contains("!Cargo.lock"),
+            "user negation below preserved"
+        );
+        // Exactly one begin marker after merge — the buggy splice can
+        // leave the original begin marker AND prepend a fresh one.
+        assert_eq!(
+            merged.matches(MARKER_BEGIN).count(),
+            1,
+            "exactly one begin marker after merge, got: {merged}"
+        );
     }
 }
 
