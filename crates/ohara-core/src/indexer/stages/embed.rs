@@ -18,6 +18,10 @@ use std::sync::Arc;
 pub struct EmbedStage {
     embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
     embed_batch: usize,
+    #[allow(dead_code)]
+    embed_mode: crate::EmbedMode,
+    #[allow(dead_code)]
+    cache: Option<Arc<dyn crate::Storage>>,
 }
 
 /// Output of the embed stage for a single commit.
@@ -37,6 +41,8 @@ impl EmbedStage {
         Self {
             embedder,
             embed_batch: 32,
+            embed_mode: crate::EmbedMode::default(),
+            cache: None,
         }
     }
 
@@ -45,6 +51,22 @@ impl EmbedStage {
     /// more `embed_batch` calls per commit.
     pub fn with_embed_batch(mut self, n: usize) -> Self {
         self.embed_batch = n.max(1);
+        self
+    }
+
+    /// Set the embed mode. Off (default) means no cache lookups;
+    /// Semantic / Diff turn on the chunk-embed cache and (for Diff)
+    /// change the embedder input. Plan 27.
+    pub fn with_embed_mode(mut self, mode: crate::EmbedMode) -> Self {
+        self.embed_mode = mode;
+        self
+    }
+
+    /// Wire a `Storage` impl that backs the chunk embed cache. Only
+    /// consulted when `with_embed_mode` is set to Semantic or Diff.
+    /// Plan 27.
+    pub fn with_cache(mut self, storage: Arc<dyn crate::Storage>) -> Self {
+        self.cache = Some(storage);
         self
     }
 
