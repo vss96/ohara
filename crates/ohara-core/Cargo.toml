@@ -23,6 +23,8 @@ git2.workspace = true
 tokio = { version = "1", features = ["macros"] }
 futures.workspace = true
 ignore = { workspace = true }
+ulid.workspace = true
+num_cpus.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -60,6 +60,8 @@ blake3 = "1"
 tempfile = "3"
 async-trait = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
+ulid = "1"
+num_cpus = "1"
 fs2 = "0.4"
 
 [profile.release]
