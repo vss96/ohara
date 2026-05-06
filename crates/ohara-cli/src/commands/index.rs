@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use clap::Args as ClapArgs;
+use ohara_core::index_metadata::CompatibilityStatus;
 use ohara_core::query::CommitsBehind;
 use ohara_core::{EmbeddingProvider, Indexer, IndexerReport, PhaseTimings, Storage};
 use std::path::{Path, PathBuf};
@@ -282,6 +283,36 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
     storage
         .open_repo(&repo_id, &canonical.to_string_lossy(), &first_commit)
         .await?;
+
+    // Plan 27: guard against embed_input_mode mismatch on incremental runs.
+    // When a prior index pass recorded "semantic" and the caller now requests
+    // "diff" (or vice-versa), the stored KNN vectors are incompatible with
+    // the new input mode — continuing would silently corrupt retrieval.
+    // We skip this check for `--rebuild` because the caller has already
+    // confirmed they want to delete and rebuild from scratch. A `--force`
+    // refresh only replaces HEAD symbols, not the vector store, so it does
+    // NOT bypass the check.
+    if !args.rebuild {
+        let stored_meta = storage.get_index_metadata(&repo_id).await?;
+        let requested_mode = ohara_core::EmbedMode::from(args.embed_cache);
+        let requested_mode_str = requested_mode.index_metadata_value();
+        let runtime_for_check = ohara_core::index_metadata::runtime_metadata_from(
+            ohara_embed::DEFAULT_MODEL_ID,
+            ohara_embed::DEFAULT_DIM as u32,
+            ohara_embed::DEFAULT_RERANKER_ID,
+            ohara_parse::CHUNKER_VERSION,
+            ohara_parse::parser_versions(),
+            requested_mode_str,
+        );
+        if let CompatibilityStatus::NeedsRebuild { reason } =
+            CompatibilityStatus::assess(&runtime_for_check, &stored_meta)
+        {
+            bail!(
+                "embed_input_mode mismatch: {reason}.\n\
+                 Rebuild the index with: ohara index --rebuild --yes"
+            );
+        }
+    }
 
     // --force: clear existing HEAD symbol rows so the v0.3 AST sibling-merge
     // chunker (Track C) can repopulate without duplicates. The watermark and

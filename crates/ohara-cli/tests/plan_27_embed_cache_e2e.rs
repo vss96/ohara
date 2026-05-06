@@ -83,6 +83,55 @@ fn git_commit(p: &Path, msg: &str) {
         .unwrap();
 }
 
+#[test]
+#[ignore = "downloads the embedding model on first run; opt in with --include-ignored"]
+fn mode_mismatch_on_incremental_errors_with_rebuild_hint() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo = dir.path();
+    let ohara_home = tempfile::tempdir().expect("OHARA_HOME tempdir");
+
+    Command::new("git").arg("init").arg(repo).output().unwrap();
+    write_file(repo.join("src"), "main.rs", "fn main() {}\n");
+    git_add_all(repo);
+    git_commit(repo, "feat: initial");
+
+    // First run: index with --embed-cache=semantic.
+    let idx1 = Command::new(ohara_bin())
+        .env("OHARA_HOME", ohara_home.path())
+        .args([
+            "index",
+            "--embed-provider",
+            "cpu",
+            "--embed-cache",
+            "semantic",
+        ])
+        .arg(repo)
+        .output()
+        .unwrap();
+    assert!(idx1.status.success());
+
+    // Second run: --embed-cache=diff is a different mode → must error.
+    let idx2 = Command::new(ohara_bin())
+        .env("OHARA_HOME", ohara_home.path())
+        .args(["index", "--embed-provider", "cpu", "--embed-cache", "diff"])
+        .arg(repo)
+        .output()
+        .unwrap();
+    assert!(
+        !idx2.status.success(),
+        "expected mode-mismatch failure, got success"
+    );
+    let stderr = String::from_utf8_lossy(&idx2.stderr);
+    let stdout = String::from_utf8_lossy(&idx2.stdout);
+    let combined = format!("{stderr}\n{stdout}");
+    assert!(
+        combined.contains("embed_input_mode")
+            || combined.contains("rebuild")
+            || combined.contains("Rebuild"),
+        "expected rebuild guidance in output; got:\n{combined}"
+    );
+}
+
 fn write_file(dir: std::path::PathBuf, name: &str, body: &str) {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(name), body).unwrap();
