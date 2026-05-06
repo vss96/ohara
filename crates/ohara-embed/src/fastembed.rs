@@ -435,6 +435,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lazy_reranker_empty_candidates_does_not_load_model() {
+        // Regression: the empty-candidates short-circuit in
+        // `LazyFastEmbedReranker::rerank` is the entire performance claim
+        // of issue #58 — without it, `OnceCell::get_or_init` would fire on
+        // the first query (even with zero survivors after RRF) and pay the
+        // ~110 MB cold-init cost. If someone reorders the empty-check to
+        // run after `get_or_init`, the inner `OnceCell` will transition to
+        // initialized and this assertion will fail.
+        //
+        // Strict-distinguisher check: mentally swap the two lines in
+        // `rerank` so `get_or_init().await?` runs before the
+        // `candidates.is_empty()` guard — the cell would be populated and
+        // `cell.get()` would return `Some`, failing the assertion below.
+        let lazy = LazyFastEmbedReranker::new();
+        assert!(
+            lazy.cell.get().is_none(),
+            "freshly-constructed lazy reranker must not have loaded the model"
+        );
+
+        let scores = lazy
+            .rerank("any query", &[])
+            .await
+            .expect("empty rerank must succeed without loading the model");
+        assert!(scores.is_empty(), "empty input must yield empty output");
+
+        assert!(
+            lazy.cell.get().is_none(),
+            "rerank(_, &[]) must short-circuit BEFORE get_or_init — \
+             OnceCell should still be uninitialized"
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "downloads ~110MB on first run; opt-in via `cargo test -- --include-ignored`"]
     async fn reranker_orders_relevant_doc_first() {
         let r = FastEmbedReranker::new().unwrap();
