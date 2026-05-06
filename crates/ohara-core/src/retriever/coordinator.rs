@@ -1,33 +1,44 @@
-//! Plan 20 — retrieval coordinator.
+//! Retrieval coordinator.
 //!
-//! Wires the 5-step pipeline:
+//! I/O orchestration around the pure ranking pipeline:
 //! 1. Fire all lanes in parallel via `join_all`.
-//! 2. RRF-merge into one ranked list (free function — not a trait).
-//! 3. Truncate to `rerank_pool_k` before the expensive refiners.
-//! 4. Apply each `ScoreRefiner` in sequence.
-//! 5. Truncate to caller's `k`.
+//! 2. Hand per-lane rankings to [`ranking::fuse_to_pool`] (RRF + truncate).
+//! 3. Optionally cross-encode the pool via [`rerank::cross_encode`].
+//! 4. Apply the recency multiplier via [`ranking::apply_recency`].
+//! 5. Truncate to caller's `final_k`.
+//!
+//! Steps 2 and 4 are pure data; step 3 is the only impure step inside
+//! the pipeline. Step 1 talks to storage via the lane trait.
 
+use crate::embed::RerankProvider;
 use crate::perf_trace::timed_phase;
-use crate::query::{reciprocal_rank_fusion, PatternQuery};
-use crate::retriever::{RetrievalLane, ScoreRefiner};
+use crate::query::PatternQuery;
+use crate::retriever::{ranking, rerank, RankingWeights, RetrievalLane};
 use crate::storage::{HunkHit, HunkId};
 use crate::types::RepoId;
 use futures::future::join_all;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Run the full coordinator pipeline.
 ///
 /// - `lanes`: all lane instances (disabled lanes self-skip by returning empty).
-/// - `refiners`: applied in order to the post-RRF candidate list.
-/// - `rerank_pool_k`: how many post-RRF candidates to feed into refiners.
-/// - `final_k`: hard truncation after refiners.
+/// - `weights`: ranking knobs — RRF k, rerank pool size, recency, etc.
+///   The caller is responsible for folding any profile overrides into
+///   `weights.recency_weight` before calling.
+/// - `reranker`: when `Some`, the cross-encoder runs on the post-RRF pool.
+///   When `None`, that step is skipped (degraded mode: post-RRF order
+///   with recency multiplier still applied).
+/// - `final_k`: hard truncation after recency.
+/// - `now_unix`: timestamp the recency multiplier ages against.
 pub async fn run(
     lanes: &[Box<dyn RetrievalLane>],
-    refiners: &[Box<dyn ScoreRefiner>],
+    weights: &RankingWeights,
+    reranker: Option<&Arc<dyn RerankProvider>>,
     query: &PatternQuery,
     repo_id: &RepoId,
-    rerank_pool_k: usize,
     final_k: usize,
+    now_unix: i64,
 ) -> crate::Result<Vec<HunkHit>> {
     // 1. Fire all lanes in parallel. Disabled lanes return Ok(vec![])
     //    without touching storage.
@@ -35,6 +46,8 @@ pub async fn run(
     let lane_results: Vec<crate::Result<Vec<HunkHit>>> = join_all(lane_futures).await;
 
     // 2. Build per-lane ranked id lists + a HunkId -> HunkHit lookup.
+    //    The first lane to report an id wins for similarity; downstream
+    //    rerank/recency steps overwrite this anyway.
     let mut by_id: HashMap<HunkId, HunkHit> = HashMap::new();
     let mut rankings: Vec<Vec<HunkId>> = Vec::with_capacity(lanes.len());
     for result in lane_results {
@@ -49,26 +62,31 @@ pub async fn run(
         rankings.push(ranking);
     }
 
-    // 3. RRF merge (k=60, Cormack 2009) → truncate to rerank pool.
-    let fused: Vec<HunkId> =
-        timed_phase("rrf", async { reciprocal_rank_fusion(&rankings, 60) }).await;
-    let pool: Vec<HunkHit> = fused
-        .into_iter()
-        .take(rerank_pool_k)
-        .filter_map(|id| by_id.get(&id).cloned())
-        .collect();
+    // 3. RRF fuse + truncate to rerank pool.
+    let pool: Vec<HunkHit> = timed_phase("rrf", async {
+        ranking::fuse_to_pool(&rankings, &by_id, weights.rrf_k, weights.rerank_top_k)
+    })
+    .await;
 
     if pool.is_empty() {
         return Ok(vec![]);
     }
 
-    // 4. Apply refiners in sequence.
+    // 4. Optional cross-encoder rerank.
     let mut hits = pool;
-    for refiner in refiners {
-        hits = refiner.refine(&query.query, hits).await?;
+    if let Some(r) = reranker {
+        hits = rerank::cross_encode(r.as_ref(), &query.query, hits).await?;
     }
 
-    // 5. Truncate to final k.
+    // 5. Recency multiplier (writes combined score back into similarity).
+    hits = ranking::apply_recency(
+        hits,
+        weights.recency_weight,
+        weights.recency_half_life_days,
+        now_unix,
+    );
+
+    // 6. Truncate to caller's final_k.
     hits.truncate(final_k);
     Ok(hits)
 }
@@ -77,7 +95,7 @@ pub async fn run(
 mod tests {
     use super::*;
     use crate::query::PatternQuery;
-    use crate::retriever::{LaneId, RetrievalLane, ScoreRefiner};
+    use crate::retriever::{LaneId, RetrievalLane};
     use crate::storage::{HunkHit, HunkId};
     use crate::types::RepoId;
     use async_trait::async_trait;
@@ -122,12 +140,20 @@ mod tests {
         }
     }
 
-    struct IdentityRefiner;
+    fn default_query() -> PatternQuery {
+        PatternQuery {
+            query: "test".into(),
+            k: 5,
+            language: None,
+            since_unix: None,
+            no_rerank: false,
+        }
+    }
 
-    #[async_trait]
-    impl ScoreRefiner for IdentityRefiner {
-        async fn refine(&self, _: &str, hits: Vec<HunkHit>) -> crate::Result<Vec<HunkHit>> {
-            Ok(hits)
+    fn weights_with_zero_recency() -> RankingWeights {
+        RankingWeights {
+            recency_weight: 0.0,
+            ..RankingWeights::default()
         }
     }
 
@@ -144,16 +170,12 @@ mod tests {
             )),
             Box::new(StaticLane(LaneId::Bm25HistSym, vec![make_hit(3, 0.4)])),
         ];
-        let refiners: Vec<Box<dyn ScoreRefiner>> = vec![Box::new(IdentityRefiner)];
-        let q = PatternQuery {
-            query: "test".into(),
-            k: 5,
-            language: None,
-            since_unix: None,
-            no_rerank: false,
-        };
+        let weights = weights_with_zero_recency();
+        let q = default_query();
         let repo_id = RepoId::from_parts("sha", "/repo");
-        let out = run(&lanes, &refiners, &q, &repo_id, 10, 20).await.unwrap();
+        let out = run(&lanes, &weights, None, &q, &repo_id, 20, 1_700_000_000)
+            .await
+            .unwrap();
         assert_eq!(out.len(), 3, "all three unique ids survive rrf");
         assert!(
             out.iter().position(|h| h.hunk_id == 3).unwrap() > 0,
@@ -162,30 +184,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coordinator_applies_refiners_in_sequence() {
-        struct ReverseRefiner;
-        #[async_trait]
-        impl ScoreRefiner for ReverseRefiner {
-            async fn refine(&self, _: &str, mut hits: Vec<HunkHit>) -> crate::Result<Vec<HunkHit>> {
-                hits.reverse();
-                Ok(hits)
-            }
-        }
+    async fn coordinator_threads_rrf_k_into_fusion() {
+        // The math is unit-tested in `query::reciprocal_rank_fusion`;
+        // this covers the wiring — a non-default k flows through without
+        // panic and produces the expected count.
+        let lanes: Vec<Box<dyn RetrievalLane>> = vec![
+            Box::new(StaticLane(LaneId::Vec, vec![make_hit(1, 0.9)])),
+            Box::new(StaticLane(LaneId::Bm25Text, vec![make_hit(2, 0.8)])),
+        ];
+        let weights = RankingWeights {
+            rrf_k: 1,
+            ..weights_with_zero_recency()
+        };
+        let q = default_query();
+        let repo_id = RepoId::from_parts("sha", "/repo");
+        let out = run(&lanes, &weights, None, &q, &repo_id, 20, 1_700_000_000)
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 2, "both unique ids survive rrf with k=1");
+    }
+
+    #[tokio::test]
+    async fn coordinator_skips_rerank_when_reranker_is_none() {
+        // Without a reranker, similarity comes from the recency multiplier
+        // alone (when recency_weight=0, similarity stays at the lane's
+        // first-reported score).
         let lanes: Vec<Box<dyn RetrievalLane>> = vec![Box::new(StaticLane(
             LaneId::Vec,
             vec![make_hit(10, 0.9), make_hit(11, 0.5)],
         ))];
-        let refiners: Vec<Box<dyn ScoreRefiner>> = vec![Box::new(ReverseRefiner)];
-        let q = PatternQuery {
-            query: "anything".into(),
-            k: 5,
-            language: None,
-            since_unix: None,
-            no_rerank: false,
-        };
+        let weights = weights_with_zero_recency();
+        let q = default_query();
         let repo_id = RepoId::from_parts("sha", "/repo");
-        let out = run(&lanes, &refiners, &q, &repo_id, 10, 20).await.unwrap();
-        assert_eq!(out[0].hunk_id, 11);
-        assert_eq!(out[1].hunk_id, 10);
+        let out = run(&lanes, &weights, None, &q, &repo_id, 20, 1_700_000_000)
+            .await
+            .unwrap();
+        assert_eq!(out[0].hunk_id, 10);
+        assert!((out[0].similarity - 0.9).abs() < 1e-5);
     }
 }

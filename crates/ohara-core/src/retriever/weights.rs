@@ -9,10 +9,11 @@ pub struct RankingWeights {
     /// `sigmoid(rerank)` bounds the cross-encoder's signed logit into
     /// `(0, 1)` so the multiplicative recency factor always boosts in
     /// the expected direction (more recent ⇒ higher combined score).
-    /// See plan-22 for the bug this fixed. The sigmoid is applied
-    /// inside `refiners::cross_encoder::CrossEncoderRefiner` before
-    /// the score lands in `HunkHit::similarity`, so the
-    /// `RecencyRefiner` sees an already-bounded base.
+    /// See plan-22 for the bug this fixed. The sigmoid is applied in
+    /// [`crate::retriever::rerank::cross_encode`] before the score
+    /// lands in `HunkHit::similarity`, so
+    /// [`crate::retriever::ranking::apply_recency`] sees an
+    /// already-bounded base.
     ///
     /// Default 0.05 — small enough to act as a tie-breaker without
     /// overpowering rerank quality.
@@ -29,6 +30,11 @@ pub struct RankingWeights {
     /// Per-lane gather size before RRF. Default 100. Must fit in `u8` because
     /// the storage trait uses `u8` for `k` arguments.
     pub lane_top_k: u8,
+    /// Reciprocal Rank Fusion smoothing constant. Default 60 — the
+    /// Cormack 2009 baseline that's been the hard-coded value since
+    /// plan-20. Larger values flatten lane disagreement (closer to a
+    /// pure union); smaller values let the top-of-each-lane dominate.
+    pub rrf_k: u32,
 }
 
 impl Default for RankingWeights {
@@ -38,6 +44,7 @@ impl Default for RankingWeights {
             recency_half_life_days: 90.0,
             rerank_top_k: 20,
             lane_top_k: 100,
+            rrf_k: 60,
         }
     }
 }
@@ -56,5 +63,13 @@ mod tests {
         //   tests/perf/baselines/rerank_pool_sweep.jsonl
         //   docs/superpowers/plans/2026-05-05-ohara-plan-23-rerank-pool-sizing.md
         assert_eq!(RankingWeights::default().rerank_top_k, 20);
+    }
+
+    #[test]
+    fn ranking_weights_default_rrf_k_matches_cormack_2009() {
+        // RRF k=60 is the Cormack 2009 baseline; the value was hard-coded
+        // in coordinator.rs from plan-20 through this commit. Pin the
+        // default so a future change is deliberate.
+        assert_eq!(RankingWeights::default().rrf_k, 60);
     }
 }
