@@ -158,13 +158,13 @@ impl Coordinator {
     pub async fn run(
         &self,
         repo: &RepoId,
-        commit_source: &dyn CommitSource,
-        symbol_source: &dyn SymbolSource,
+        commit_source: Arc<dyn CommitSource>,
+        symbol_source: Arc<dyn SymbolSource>,
     ) -> Result<()> {
         self.run_timed_with_extractor(
             repo,
-            make_commit_source_arc(commit_source),
-            make_symbol_source_arc(symbol_source),
+            commit_source,
+            symbol_source,
             Arc::new(NullAtomicSymbolExtractor),
         )
         .await?;
@@ -180,13 +180,13 @@ impl Coordinator {
     pub async fn run_timed(
         &self,
         repo: &RepoId,
-        commit_source: &dyn CommitSource,
-        symbol_source: &dyn SymbolSource,
+        commit_source: Arc<dyn CommitSource>,
+        symbol_source: Arc<dyn SymbolSource>,
     ) -> Result<CoordinatorResult> {
         self.run_timed_with_extractor(
             repo,
-            make_commit_source_arc(commit_source),
-            make_symbol_source_arc(symbol_source),
+            commit_source,
+            symbol_source,
             Arc::new(NullAtomicSymbolExtractor),
         )
         .await
@@ -554,85 +554,6 @@ async fn run_commit_owned(
         embed_ms,
         storage_write_ms,
     })
-}
-
-// ---------------------------------------------------------------------------
-// Thin pointer wrappers so borrowed &dyn Trait references can be used where
-// Arc<dyn Trait> is required by the public API (for the `run` / `run_timed`
-// convenience methods that still accept borrowed refs).
-//
-// SAFETY: These wrappers are only used within the synchronous scope of the
-// `run` / `run_timed` callers, which hold the original references alive for
-// the duration of the async call. The raw pointer is never sent across thread
-// boundaries independently — it is wrapped in an Arc and only used within the
-// `run_timed_with_extractor` future, which borrows it from the same stack
-// frame.
-// ---------------------------------------------------------------------------
-
-/// Thin wrapper that lets a `&dyn CommitSource` borrow be used as
-/// `Arc<dyn CommitSource>`. The wrapper stores the trait object as two
-/// `usize` words (data pointer + vtable pointer) to avoid Rust's
-/// lifetime rules on fat pointers.
-struct CommitSourceRef([usize; 2]);
-
-// SAFETY: CommitSource: Send + Sync. The two words are the fat-pointer
-// representation of a `&dyn CommitSource` whose referent outlives the
-// wrapping Arc (caller holds the original reference alive for the entire
-// duration of `run`/`run_timed`).
-unsafe impl Send for CommitSourceRef {}
-unsafe impl Sync for CommitSourceRef {}
-
-#[async_trait::async_trait]
-impl CommitSource for CommitSourceRef {
-    async fn list_commits(&self, since: Option<&str>) -> crate::Result<Vec<CommitMeta>> {
-        let r: &dyn CommitSource = unsafe { std::mem::transmute(self.0) };
-        r.list_commits(since).await
-    }
-    async fn hunks_for_commit(&self, sha: &str) -> crate::Result<Vec<crate::types::Hunk>> {
-        let r: &dyn CommitSource = unsafe { std::mem::transmute(self.0) };
-        r.hunks_for_commit(sha).await
-    }
-    async fn file_at_commit(&self, sha: &str, path: &str) -> crate::Result<Option<String>> {
-        let r: &dyn CommitSource = unsafe { std::mem::transmute(self.0) };
-        r.file_at_commit(sha, path).await
-    }
-}
-
-/// Thin wrapper that lets a `&dyn SymbolSource` borrow be used as
-/// `Arc<dyn SymbolSource>`. Same technique as `CommitSourceRef`.
-struct SymbolSourceRef([usize; 2]);
-
-unsafe impl Send for SymbolSourceRef {}
-unsafe impl Sync for SymbolSourceRef {}
-
-#[async_trait::async_trait]
-impl SymbolSource for SymbolSourceRef {
-    async fn extract_head_symbols(&self) -> crate::Result<Vec<crate::types::Symbol>> {
-        let r: &dyn SymbolSource = unsafe { std::mem::transmute(self.0) };
-        r.extract_head_symbols().await
-    }
-    async fn head_symbols_for_path(&self, path: &str) -> crate::Result<Vec<crate::types::Symbol>> {
-        let r: &dyn SymbolSource = unsafe { std::mem::transmute(self.0) };
-        r.head_symbols_for_path(path).await
-    }
-}
-
-/// Wrap a `&dyn CommitSource` in an `Arc<dyn CommitSource>` by erasing
-/// its lifetime into the fat-pointer word array.
-///
-/// SAFETY: The Arc must not outlive the referent. Call sites ensure
-/// this by `.await`ing the resulting future in the same scope.
-pub(in crate::indexer) fn make_commit_source_arc(src: &dyn CommitSource) -> Arc<dyn CommitSource> {
-    let words: [usize; 2] = unsafe { std::mem::transmute(src as &dyn CommitSource) };
-    Arc::new(CommitSourceRef(words))
-}
-
-/// Wrap a `&dyn SymbolSource` in an `Arc<dyn SymbolSource>`.
-///
-/// SAFETY: same as `make_commit_source_arc`.
-pub(in crate::indexer) fn make_symbol_source_arc(src: &dyn SymbolSource) -> Arc<dyn SymbolSource> {
-    let words: [usize; 2] = unsafe { std::mem::transmute(src as &dyn SymbolSource) };
-    Arc::new(SymbolSourceRef(words))
 }
 
 /// Count "+"-prefixed lines in a unified-diff snippet (excludes `+++` headers).

@@ -239,8 +239,8 @@ impl Indexer {
     pub async fn run(
         &self,
         repo_id: &RepoId,
-        commit_source: &dyn CommitSource,
-        symbol_source: &dyn SymbolSource,
+        commit_source: Arc<dyn CommitSource>,
+        symbol_source: Arc<dyn SymbolSource>,
     ) -> Result<IndexerReport> {
         use crate::indexer::coordinator::Coordinator;
 
@@ -264,20 +264,11 @@ impl Indexer {
             coordinator = coordinator.with_ignore_filter(std::sync::Arc::new(filter));
         }
 
-        // Plan 28: `run_timed_with_extractor` expects Arc trait objects so
-        // the actor pipeline can move them into spawned tasks. Wrap the
-        // borrowed references in thin fat-pointer-erasing Arcs that are
-        // valid for the duration of this async call (SAFETY: caller holds
-        // the references alive across `.await`).
-        use crate::indexer::coordinator::{make_commit_source_arc, make_symbol_source_arc};
-        let commit_source_arc = make_commit_source_arc(commit_source);
-        let symbol_source_arc = make_symbol_source_arc(symbol_source);
-
         let result = coordinator
             .run_timed_with_extractor(
                 repo_id,
-                commit_source_arc,
-                symbol_source_arc,
+                commit_source.clone(),
+                symbol_source.clone(),
                 self.symbol_extractor.clone(),
             )
             .await?;
@@ -750,7 +741,7 @@ mod phase_timing_tests {
         let indexer = Indexer::new(storage, embedder);
         let repo_id = RepoId::from_parts("first", "/tmp/fake-repo");
         let report = indexer
-            .run(&repo_id, &commit_source, &symbol_source)
+            .run(&repo_id, Arc::new(commit_source), Arc::new(symbol_source))
             .await
             .expect("indexer run");
 
@@ -813,7 +804,7 @@ mod phase_timing_tests {
         let indexer = Indexer::new(storage, embedder);
         let repo_id = RepoId::from_parts("first", "/tmp/empty-emb");
         let err = indexer
-            .run(&repo_id, &commit_source, &symbol_source)
+            .run(&repo_id, Arc::new(commit_source), Arc::new(symbol_source))
             .await
             .expect_err("buggy embedder must surface an OhraError, not panic");
         match err {
@@ -896,7 +887,7 @@ mod phase_timing_tests {
         let indexer = Indexer::new(storage.clone(), embedder.clone());
         let repo_id = RepoId::from_parts("first", "/tmp/skip-test");
         indexer
-            .run(&repo_id, &commit_source, &symbol_source)
+            .run(&repo_id, Arc::new(commit_source), Arc::new(symbol_source))
             .await
             .expect("indexer run");
 
@@ -937,7 +928,7 @@ mod phase_timing_tests {
         let indexer = Indexer::new(storage.clone(), embedder.clone());
         let repo_id = RepoId::from_parts("first", "/tmp/skip-watermark");
         indexer
-            .run(&repo_id, &commit_source, &symbol_source)
+            .run(&repo_id, Arc::new(commit_source), Arc::new(symbol_source))
             .await
             .expect("indexer run");
 
@@ -992,7 +983,7 @@ mod phase_timing_tests {
             Indexer::new(storage.clone(), embedder).with_runtime_metadata(fake_runtime_metadata());
         let repo_id = RepoId::from_parts("first", "/tmp/meta-success");
         indexer
-            .run(&repo_id, &commit_source, &symbol_source)
+            .run(&repo_id, Arc::new(commit_source), Arc::new(symbol_source))
             .await
             .expect("indexer run");
 
@@ -1037,7 +1028,7 @@ mod phase_timing_tests {
             Indexer::new(storage.clone(), embedder).with_runtime_metadata(fake_runtime_metadata());
         let repo_id = RepoId::from_parts("first", "/tmp/meta-failure");
         let _err = indexer
-            .run(&repo_id, &commit_source, &symbol_source)
+            .run(&repo_id, Arc::new(commit_source), Arc::new(symbol_source))
             .await
             .expect_err("indexer must surface the embedder error");
 
@@ -1125,7 +1116,7 @@ mod phase_timing_tests {
         let storage = std::sync::Arc::new(FakeStorage::new(std::time::Duration::ZERO));
         let indexer = Indexer::new(storage, embedder).with_embed_batch(2);
         let id = RepoId::from_parts("deadbeef", "/x");
-        indexer.run(&id, &cs, &ss).await.unwrap();
+        indexer.run(&id, Arc::new(cs), Arc::new(ss)).await.unwrap();
 
         let observed = calls.lock().unwrap().clone();
         assert_eq!(
@@ -1258,7 +1249,7 @@ mod phase_timing_tests {
         )
         .with_atomic_symbol_extractor(extractor);
         let id = RepoId::from_parts("deadbeef", "/x");
-        indexer.run(&id, &cs, &ss).await.unwrap();
+        indexer.run(&id, Arc::new(cs), Arc::new(ss)).await.unwrap();
         assert_eq!(
             calls.load(Ordering::SeqCst),
             0,
@@ -1377,7 +1368,7 @@ mod phase_timing_tests {
         )
         .with_atomic_symbol_extractor(extractor);
         let id = RepoId::from_parts("deadbeef", "/x");
-        indexer.run(&id, &cs, &ss).await.unwrap();
+        indexer.run(&id, Arc::new(cs), Arc::new(ss)).await.unwrap();
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,

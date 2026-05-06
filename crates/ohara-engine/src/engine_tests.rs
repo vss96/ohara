@@ -78,13 +78,10 @@ async fn explain_change_returns_one_blame_range_for_single_commit_repo() {
         let db_path = ohara_core::paths::index_db_path(&repo_id).unwrap();
         let storage: Arc<dyn ohara_core::Storage> =
             Arc::new(ohara_storage::SqliteStorage::open(&db_path).await.unwrap());
-        let commit_src = ohara_git::GitCommitSource::open(&canonical).unwrap();
-        let symbol_src = ohara_parse::GitSymbolSource::open(&canonical).unwrap();
+        let commit_src = Arc::new(ohara_git::GitCommitSource::open(&canonical).unwrap());
+        let symbol_src = Arc::new(ohara_parse::GitSymbolSource::open(&canonical).unwrap());
         let indexer = ohara_core::Indexer::new(storage, Arc::new(DummyEmbedder));
-        indexer
-            .run(&repo_id, &commit_src, &symbol_src)
-            .await
-            .unwrap();
+        indexer.run(&repo_id, commit_src, symbol_src).await.unwrap();
     }
 
     let engine = make_test_engine();
@@ -260,13 +257,10 @@ async fn explain_change_blame_cache_hit_on_second_call() {
         let db_path = ohara_core::paths::index_db_path(&repo_id).unwrap();
         let storage: Arc<dyn ohara_core::Storage> =
             Arc::new(ohara_storage::SqliteStorage::open(&db_path).await.unwrap());
-        let commit_src = ohara_git::GitCommitSource::open(&canonical).unwrap();
-        let symbol_src = ohara_parse::GitSymbolSource::open(&canonical).unwrap();
+        let commit_src = Arc::new(ohara_git::GitCommitSource::open(&canonical).unwrap());
+        let symbol_src = Arc::new(ohara_parse::GitSymbolSource::open(&canonical).unwrap());
         let indexer = ohara_core::Indexer::new(storage, Arc::new(DummyEmbedder));
-        indexer
-            .run(&repo_id, &commit_src, &symbol_src)
-            .await
-            .unwrap();
+        indexer.run(&repo_id, commit_src, symbol_src).await.unwrap();
     }
 
     let engine = make_test_engine();

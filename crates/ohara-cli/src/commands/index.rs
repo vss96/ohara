@@ -385,8 +385,8 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         "embedder loaded"
     );
 
-    let commit_source = ohara_git::GitCommitSource::open(&canonical)?;
-    let symbol_source = ohara_parse::GitSymbolSource::open(&canonical)?;
+    let commit_source = std::sync::Arc::new(ohara_git::GitCommitSource::open(&canonical)?);
+    let symbol_source = std::sync::Arc::new(ohara_parse::GitSymbolSource::open(&canonical)?);
 
     // Plan 13: build the runtime metadata snapshot up front so a
     // successful pass records "this index was built with X embedder /
@@ -420,9 +420,7 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         // Plan 27: wire the chosen embed-cache mode into the indexer so
         // the coordinator picks the right cache key strategy.
         .with_embed_mode(args.embed_cache.into());
-    let report = indexer
-        .run(&repo_id, &commit_source, &symbol_source)
-        .await?;
+    let report = indexer.run(&repo_id, commit_source, symbol_source).await?;
     // Two-sink summary: human-readable on stdout, structured event on
     // stderr so log aggregators / CI watchdogs / a future `--json` flag
     // see the same numbers.

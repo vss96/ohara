@@ -229,7 +229,7 @@ async fn coordinator_indexes_single_commit_end_to_end() {
         hunks: vec![hunk("abc")],
     };
     coordinator
-        .run(&repo, &source, &NoopSymbolSource)
+        .run(&repo, Arc::new(source), Arc::new(NoopSymbolSource))
         .await
         .unwrap();
 
@@ -260,7 +260,7 @@ async fn coordinator_resumes_skipping_already_indexed_commit() {
         hunks: vec![hunk("abc")],
     };
     coordinator
-        .run(&repo, &source, &NoopSymbolSource)
+        .run(&repo, Arc::new(source), Arc::new(NoopSymbolSource))
         .await
         .unwrap();
 
@@ -372,7 +372,10 @@ async fn ignored_paths_drop_from_hunk_records_before_persist() {
     let coord = Coordinator::new(storage.clone(), embedder).with_ignore_filter(filter);
 
     let repo = RepoId::from_parts("sha", "/repo");
-    coord.run(&repo, &source, &NoopSymbolSource).await.unwrap();
+    coord
+        .run(&repo, Arc::new(source), Arc::new(NoopSymbolSource))
+        .await
+        .unwrap();
 
     // Commit must still be persisted (non-ignored hunk survived).
     assert_eq!(
@@ -434,7 +437,7 @@ async fn fully_ignored_commit_advances_watermark_with_zero_persisted_rows() {
 
     let repo = RepoId::from_parts("sha", "/repo");
     let result = coord
-        .run_timed(&repo, &source, &NoopSymbolSource)
+        .run_timed(&repo, Arc::new(source), Arc::new(NoopSymbolSource))
         .await
         .unwrap();
 
