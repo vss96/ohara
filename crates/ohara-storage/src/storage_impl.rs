@@ -276,6 +276,35 @@ impl Storage for SqliteStorage {
         .await
     }
 
+    async fn embed_cache_get_many(
+        &self,
+        hashes: &[ohara_core::types::ContentHash],
+        embed_model: &str,
+    ) -> CoreResult<std::collections::HashMap<ohara_core::types::ContentHash, Vec<f32>>> {
+        let hashes = hashes.to_vec();
+        let model = embed_model.to_owned();
+        with_conn(&self.pool, move |c| {
+            crate::tables::embed_cache::get_many(c, &hashes, &model)
+        })
+        .await
+    }
+
+    async fn embed_cache_put_many(
+        &self,
+        entries: &[(ohara_core::types::ContentHash, Vec<f32>)],
+        embed_model: &str,
+    ) -> CoreResult<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let entries = entries.to_vec();
+        let model = embed_model.to_owned();
+        with_conn(&self.pool, move |c| {
+            crate::tables::embed_cache::put_many(c, &entries, &model)
+        })
+        .await
+    }
+
     async fn get_commit(&self, _repo_id: &RepoId, sha: &str) -> CoreResult<Option<CommitMeta>> {
         // Plan 5 / Task 2: SELECT a single commit row by sha. Returns
         // Ok(None) for SHAs that aren't yet indexed so the explain_change
