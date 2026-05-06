@@ -18,9 +18,7 @@ use std::sync::Arc;
 pub struct EmbedStage {
     embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
     embed_batch: usize,
-    #[allow(dead_code)]
     embed_mode: crate::EmbedMode,
-    #[allow(dead_code)]
     cache: Option<Arc<dyn crate::Storage>>,
 }
 
@@ -97,26 +95,94 @@ impl EmbedStage {
             });
         }
 
-        // Build the full text list: commit message first, then hunks.
-        let mut texts: Vec<String> = Vec::with_capacity(attributed_hunks.len() + 1);
-        texts.push(commit_message.to_owned());
-        for ah in attributed_hunks {
-            texts.push(ah.effective_semantic_text().to_owned());
+        // Plan 27: compute embedder input per hunk based on mode.
+        //   Off / Semantic → effective_semantic_text
+        //   Diff           → record.diff_text  (drops commit message)
+        let mode = self.embed_mode;
+        let hunk_inputs: Vec<String> = attributed_hunks
+            .iter()
+            .map(|ah| match mode {
+                crate::EmbedMode::Diff => ah.record.diff_text.clone(),
+                _ => ah.effective_semantic_text().to_owned(),
+            })
+            .collect();
+
+        // Cache lookup (mode != Off and cache is wired).
+        let model_id = self.embedder.model_id().to_owned();
+        let cached: std::collections::HashMap<crate::types::ContentHash, Vec<f32>> =
+            match (mode, self.cache.as_ref()) {
+                (crate::EmbedMode::Off, _) | (_, None) => std::collections::HashMap::new(),
+                (_, Some(cache)) => {
+                    let hashes: Vec<crate::types::ContentHash> = hunk_inputs
+                        .iter()
+                        .map(|s| crate::types::ContentHash::from_text(s))
+                        .collect();
+                    cache.embed_cache_get_many(&hashes, &model_id).await?
+                }
+            };
+
+        // Build the text batch: commit message at index 0, then only
+        // the hunk inputs that missed the cache.
+        let mut batch_texts: Vec<String> = Vec::with_capacity(hunk_inputs.len() + 1);
+        batch_texts.push(commit_message.to_owned());
+        let mut miss_indices: Vec<usize> = Vec::new();
+        for (i, input) in hunk_inputs.iter().enumerate() {
+            let hash = crate::types::ContentHash::from_text(input);
+            if cached.contains_key(&hash) {
+                continue;
+            }
+            miss_indices.push(i);
+            batch_texts.push(input.clone());
         }
 
-        // Chunked embedding (plan-15 knob).
-        let all_embs = self.embed_in_chunks(&texts).await?;
-
-        let (commit_vec, hunk_vecs) = all_embs.split_first().ok_or_else(|| {
+        // Embed the batch (commit message + misses).
+        let all_embs = self.embed_in_chunks(&batch_texts).await?;
+        let (commit_vec, miss_vecs) = all_embs.split_first().ok_or_else(|| {
             OhraError::Embedding("embed_batch returned empty for non-empty input".into())
         })?;
+        if miss_vecs.len() != miss_indices.len() {
+            return Err(OhraError::Embedding(format!(
+                "miss vector count {} != miss index count {}",
+                miss_vecs.len(),
+                miss_indices.len()
+            )));
+        }
 
-        let hunks = attributed_hunks
+        // Write misses back to the cache.
+        if mode != crate::EmbedMode::Off {
+            if let Some(cache) = self.cache.as_ref() {
+                let entries: Vec<(crate::types::ContentHash, Vec<f32>)> = miss_indices
+                    .iter()
+                    .zip(miss_vecs.iter())
+                    .map(|(i, v)| {
+                        (
+                            crate::types::ContentHash::from_text(&hunk_inputs[*i]),
+                            v.clone(),
+                        )
+                    })
+                    .collect();
+                cache.embed_cache_put_many(&entries, &model_id).await?;
+            }
+        }
+
+        // Assemble final EmbeddedHunk list in original input order.
+        let mut miss_iter = miss_vecs.iter();
+        let hunks: Vec<EmbeddedHunk> = attributed_hunks
             .iter()
-            .zip(hunk_vecs.iter())
-            .map(|(ah, emb)| EmbeddedHunk {
-                attributed: ah.clone(),
-                embedding: emb.clone(),
+            .zip(hunk_inputs.iter())
+            .map(|(ah, input)| {
+                let hash = crate::types::ContentHash::from_text(input);
+                let embedding = match cached.get(&hash) {
+                    Some(v) => v.clone(),
+                    None => miss_iter
+                        .next()
+                        .expect("invariant: miss_vecs aligned with hunk_inputs misses")
+                        .clone(),
+                };
+                EmbeddedHunk {
+                    attributed: ah.clone(),
+                    embedding,
+                }
             })
             .collect();
 
@@ -167,6 +233,9 @@ mod tests {
     use crate::Result;
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
+
+    // InMemoryCacheStorage lives in test_helpers to keep this file ≤ 500 lines.
+    use super::super::test_helpers::InMemoryCacheStorage;
 
     fn attributed(text: &str) -> AttributedHunk {
         AttributedHunk {
@@ -258,5 +327,41 @@ mod tests {
                 "embedding must have dimension {dim}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn semantic_mode_second_run_reuses_cached_vectors_and_skips_embed() {
+        // Plan 27 Task C.2: with EmbedMode::Semantic + a cache, the
+        // first call embeds normally and writes to the cache; the
+        // second call with the same hunks must hit the cache and call
+        // embed_batch only for the commit message.
+        let calls = Arc::new(Mutex::new(Vec::<usize>::new()));
+        let embedder = Arc::new(CountingEmbedder {
+            calls: calls.clone(),
+            dim: 4,
+        });
+        let cache: Arc<dyn crate::Storage> = Arc::new(InMemoryCacheStorage::default());
+        let stage = EmbedStage::new(embedder.clone())
+            .with_embed_mode(crate::EmbedMode::Semantic)
+            .with_cache(cache.clone());
+
+        let hunks = vec![attributed("hunk one"), attributed("hunk two")];
+        let _ = stage.run("commit msg", &hunks).await.unwrap();
+
+        // First run: 1 commit message + 2 hunks = 3 inputs.
+        let observed = calls.lock().unwrap().clone();
+        let total_first: usize = observed.iter().sum();
+        assert_eq!(total_first, 3, "first run must embed 3 texts: {observed:?}");
+
+        // Second run with identical hunks: only the commit message
+        // should be embedded (commit messages are not cached). The
+        // two hunks must be served from cache.
+        let _ = stage.run("commit msg", &hunks).await.unwrap();
+        let after = calls.lock().unwrap().clone();
+        let total_second: usize = after.iter().sum::<usize>() - total_first;
+        assert_eq!(
+            total_second, 1,
+            "second run must embed only 1 text (commit msg): added {total_second} after first run"
+        );
     }
 }

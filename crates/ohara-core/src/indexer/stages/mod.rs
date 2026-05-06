@@ -9,6 +9,8 @@ pub mod commit_walk;
 pub mod embed;
 pub mod hunk_chunk;
 pub mod persist;
+#[cfg(test)]
+pub(crate) mod test_helpers;
 
 pub use attribute::AttributedHunk;
 pub use commit_walk::CommitWatermark;
