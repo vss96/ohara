@@ -223,6 +223,22 @@ impl ContentHash {
         Self(hex.to_string())
     }
 
+    /// Construct from arbitrary text (UTF-8). Returns a sha256-hex
+    /// string (64 ASCII characters). Used by plan-27's chunk embed
+    /// cache to key on the bytes the embedder will consume.
+    ///
+    /// `from_text` is *distinct* from `from_blob_oid`: that one is
+    /// keyed by git's blob hash (40-char SHA-1) for file content;
+    /// this one keys cache lookups by the embedder input. Their
+    /// outputs share the same `ContentHash` Rust type but live in
+    /// different storage tables (`BlameCache` vs `chunk_embed_cache`)
+    /// so they cannot collide in practice.
+    pub fn from_text(text: &str) -> Self {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(text.as_bytes());
+        Self(hex::encode(digest))
+    }
+
     /// Borrow the underlying hex string.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -264,6 +280,40 @@ mod content_hash_tests {
         let oid = git2::Oid::from_str("a".repeat(40).as_str()).expect("valid oid");
         let h = ContentHash::from_blob_oid(oid);
         assert_eq!(h.as_str().len(), 40);
+    }
+
+    #[test]
+    fn from_text_is_deterministic() {
+        // Plan 27 Task B.1: same text → same hash.
+        let a = ContentHash::from_text("hello world");
+        let b = ContentHash::from_text("hello world");
+        assert_eq!(a, b);
+        assert_eq!(a.as_str().len(), 64, "sha256-hex must be 64 chars");
+    }
+
+    #[test]
+    fn from_text_differs_for_different_inputs() {
+        let a = ContentHash::from_text("hello");
+        let b = ContentHash::from_text("hellp");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn from_text_empty_input_is_well_defined_and_distinct_from_blob_oid_zero() {
+        // Plan 27 Task B.1: from_text("") is the sha256 of the empty
+        // string ("e3b0c4..."). It must differ from a from_blob_oid
+        // representing all-zeros OID (40 chars, all '0'), which
+        // sha256-hex never produces.
+        let empty = ContentHash::from_text("");
+        assert_eq!(
+            empty.as_str(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_ne!(
+            empty.as_str().len(),
+            40,
+            "must not collide with a 40-char OID"
+        );
     }
 }
 
