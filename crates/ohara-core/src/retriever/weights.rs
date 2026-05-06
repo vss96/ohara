@@ -9,10 +9,11 @@ pub struct RankingWeights {
     /// `sigmoid(rerank)` bounds the cross-encoder's signed logit into
     /// `(0, 1)` so the multiplicative recency factor always boosts in
     /// the expected direction (more recent ⇒ higher combined score).
-    /// See plan-22 for the bug this fixed. The sigmoid is applied
-    /// inside `refiners::cross_encoder::CrossEncoderRefiner` before
-    /// the score lands in `HunkHit::similarity`, so the
-    /// `RecencyRefiner` sees an already-bounded base.
+    /// See plan-22 for the bug this fixed. The sigmoid is applied in
+    /// [`crate::retriever::rerank::cross_encode`] before the score
+    /// lands in `HunkHit::similarity`, so
+    /// [`crate::retriever::ranking::apply_recency`] sees an
+    /// already-bounded base.
     ///
     /// Default 0.05 — small enough to act as a tie-breaker without
     /// overpowering rerank quality.
