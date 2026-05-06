@@ -8,6 +8,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-05-07
+
+### Fixed
+
+- **`RankingWeights::lane_top_k` is now plumbed to per-lane gather**.
+  The coordinator was passing `final_k` (the caller's truncation) to
+  every lane's `.search(...)` call, so the documented `lane_top_k`
+  default of 100 was never reaching the lanes. Each lane now gathers
+  `lane_top_k` candidates as designed; RRF and the cross-encoder rerank
+  now operate over a 3×100-candidate pool instead of 3×final_k. Latent
+  bug pre-dating PR #49
+  ([8ef24fd](https://github.com/vss96/ohara/commit/8ef24fd)) ([#52](https://github.com/vss96/ohara/pull/52)).
+- **`bm25_by_name` (symbol-name lane) returns `k` *distinct* hunks
+  even when one hunk has many matching symbols.** The original lane SQL
+  `JOIN`ed `fts_symbol_name → symbol → file_path → hunk` without any
+  per-hunk de-duplication, so a query matching N same-prefixed symbols
+  in a single hunk could fill the entire `LIMIT k*10` oversample with
+  rows from that one hunk and starve the lane of distinct hits. The
+  SQL now selects per-hunk-best BM25 via
+  `ROW_NUMBER() OVER (PARTITION BY h.id ORDER BY rank_score) WHERE rn = 1`,
+  so `LIMIT` bounds distinct hunks rather than join fan-out
+  ([e6a4214](https://github.com/vss96/ohara/commit/e6a4214)) ([#63](https://github.com/vss96/ohara/pull/63)).
+
+### Performance
+
+- **MCP server / `ohara serve` startup no longer eagerly loads the
+  cross-encoder reranker.** `LazyFastEmbedReranker` wraps the existing
+  `FastEmbedReranker` in a `tokio::sync::OnceCell`; the ~110 MB ONNX
+  session is now constructed on first non-empty `rerank()` call. Index
+  path was already lazy
+  ([b051954](https://github.com/vss96/ohara/commit/b051954)) ([#62](https://github.com/vss96/ohara/pull/62)).
+- **Symbol-name BM25 lane bounded fan-out**. Adds `LIMIT k * 10` (with
+  the per-hunk-best-via-`ROW_NUMBER` selection above), stopping the
+  `TEMP B-TREE FOR ORDER BY` from materializing the full join fan-out
+  before sorting. ~2.1× p50 / 2.15× p95 speedup on the 5000-row stress
+  microbench (`tests/perf/symbol_bm25_fan_out.rs`)
+  ([e6a4214](https://github.com/vss96/ohara/commit/e6a4214)) ([#63](https://github.com/vss96/ohara/pull/63)).
+
+### Internal
+
+- **`retriever` module split**: the `ScoreRefiner` trait + `refiners/`
+  module is replaced by a flat `ranking::` (RRF + recency multiplier)
+  / `rerank::` (cross-encoder + sigmoid) pair. `rrf_k` is now a
+  configurable `RankingWeights` field (kept at the long-standing 60
+  default). No behavioral change
+  ([83ab155](https://github.com/vss96/ohara/commit/83ab155)) ([#49](https://github.com/vss96/ohara/pull/49)).
+- `SYMBOL_LANE_OVERSAMPLE` doc comments updated to describe the
+  `ROW_NUMBER` window-function SQL instead of the pre-fix `GROUP BY`
+  shape
+  ([d683822](https://github.com/vss96/ohara/commit/d683822)) ([#64](https://github.com/vss96/ohara/pull/64)).
+
 ## [0.8.2] - 2026-05-06
 
 ### Fixed
@@ -363,7 +414,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pin rmcp to `=0.1.5` for stable API surface ([9935c7b](https://github.com/vss96/ohara/commit/9935c7bf369d6a7ecce5366d38ef43186b762599))
 - Drop dead `OharaServer::embedder` field ([0acf38a](https://github.com/vss96/ohara/commit/0acf38a97c5c2d9f35bec7f37009088647898512))
 
-[Unreleased]: https://github.com/vss96/ohara/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/vss96/ohara/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/vss96/ohara/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/vss96/ohara/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/vss96/ohara/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/vss96/ohara/compare/v0.7.7...v0.8.0
