@@ -23,8 +23,8 @@ pub fn put(c: &mut Connection, record: &CommitRecord) -> Result<()> {
         params![&record.meta.commit_sha],
     )?;
     tx.execute(
-        "INSERT OR REPLACE INTO commit_record (sha, parent_sha, is_merge, ts, author, message)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT OR REPLACE INTO commit_record (sha, parent_sha, is_merge, ts, author, message, ulid)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             &record.meta.commit_sha,
             &record.meta.parent_sha,
@@ -32,6 +32,7 @@ pub fn put(c: &mut Connection, record: &CommitRecord) -> Result<()> {
             record.meta.ts,
             &record.meta.author,
             &record.meta.message,
+            record.ulid.as_str(),
         ],
     )?;
     let bytes = vec_codec::vec_to_bytes(&record.message_emb);
@@ -94,4 +95,60 @@ pub fn get(c: &Connection, sha: &str) -> Result<Option<CommitMeta>> {
         )
         .optional()?;
     Ok(row)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::SqliteStorage;
+    use ohara_core::storage::{CommitRecord, Storage};
+    use ohara_core::types::{CommitMeta, RepoId};
+    use ohara_core::ulid_for_commit;
+
+    async fn temp_storage() -> (tempfile::TempDir, SqliteStorage) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("commit_test.db");
+        let s = SqliteStorage::open(&path).await.unwrap();
+        (dir, s)
+    }
+
+    #[tokio::test]
+    async fn put_commit_writes_ulid_column() {
+        let (_dir, storage) = temp_storage().await;
+        let repo_id = RepoId::from_parts("0".repeat(40).as_str(), "/tmp/x");
+        storage
+            .open_repo(&repo_id, "/tmp/x", &"0".repeat(40))
+            .await
+            .unwrap();
+
+        let meta = CommitMeta {
+            commit_sha: "deadbeef".repeat(5),
+            parent_sha: None,
+            is_merge: false,
+            author: None,
+            ts: 1_700_000_000,
+            message: "hello".into(),
+        };
+        let ulid = ulid_for_commit(meta.ts, &meta.commit_sha).to_string();
+        let record = CommitRecord {
+            ulid: ulid.clone(),
+            meta,
+            message_emb: vec![0.0_f32; 384],
+        };
+        storage.put_commit(&repo_id, &record).await.unwrap();
+
+        let conn = storage.pool().get().await.unwrap();
+        let sha = "deadbeef".repeat(5);
+        let stored: String = conn
+            .interact(move |c| {
+                c.query_row(
+                    "SELECT ulid FROM commit_record WHERE sha = ?1",
+                    [&sha],
+                    |r| r.get::<_, String>(0),
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored, ulid);
+    }
 }

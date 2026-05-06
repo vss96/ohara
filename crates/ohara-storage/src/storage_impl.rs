@@ -489,6 +489,7 @@ mod tests {
             &CommitRecord {
                 meta: cm.clone(),
                 message_emb: emb,
+                ulid: String::new(),
             },
         )
         .await
@@ -542,6 +543,7 @@ mod tests {
             &CommitRecord {
                 meta: cm.clone(),
                 message_emb: vec![0.1; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -558,6 +560,7 @@ mod tests {
             &CommitRecord {
                 meta: cm2,
                 message_emb: vec![0.9; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -634,6 +637,7 @@ mod tests {
             &CommitRecord {
                 meta: cm,
                 message_emb: original.clone(),
+                ulid: String::new(),
             },
         )
         .await
@@ -694,6 +698,7 @@ mod tests {
             &CommitRecord {
                 meta: cm,
                 message_emb: vec![0.0; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -748,6 +753,7 @@ mod tests {
             &CommitRecord {
                 meta: cm,
                 message_emb: vec![0.0; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -803,6 +809,7 @@ mod tests {
             &CommitRecord {
                 meta: cm,
                 message_emb: vec![0.0; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -877,6 +884,7 @@ mod tests {
             &CommitRecord {
                 meta: cm,
                 message_emb: vec![0.0; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -1062,6 +1070,7 @@ mod tests {
             &CommitRecord {
                 meta: cm,
                 message_emb: vec![0.0; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -1132,6 +1141,7 @@ mod tests {
             &CommitRecord {
                 meta: cm.clone(),
                 message_emb: vec![0.0; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -1310,6 +1320,7 @@ mod tests {
                 &CommitRecord {
                     meta: cm,
                     message_emb: vec![0.0; 384],
+                    ulid: String::new(),
                 },
             )
             .await
@@ -1343,6 +1354,7 @@ mod tests {
             &CommitRecord {
                 meta: cm,
                 message_emb: vec![0.0; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -1433,6 +1445,7 @@ mod tests {
             &CommitRecord {
                 meta: cm,
                 message_emb: vec![0.0; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -1507,6 +1520,7 @@ mod tests {
             &CommitRecord {
                 meta: cm,
                 message_emb: vec![0.0; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -1579,6 +1593,7 @@ mod tests {
                 &CommitRecord {
                     meta: cm,
                     message_emb: vec![0.0; 384],
+                    ulid: String::new(),
                 },
             )
             .await
@@ -1679,6 +1694,7 @@ mod tests {
                         message: format!("msg {sha}"),
                     },
                     message_emb: vec![0.0; 384],
+                    ulid: String::new(),
                 },
             )
             .await

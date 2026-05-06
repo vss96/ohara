@@ -103,6 +103,9 @@ mod hunk_record_tests {
 pub struct CommitRecord {
     pub meta: CommitMeta,
     pub message_emb: Vector,
+    /// Plan 28: ULID derived via `ulid_for_commit(meta.ts, &meta.commit_sha)`.
+    /// Stored alongside the commit row for time-sorted reads.
+    pub ulid: String,
 }
 
 #[derive(Debug, Clone)]
