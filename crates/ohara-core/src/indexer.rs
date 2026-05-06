@@ -138,6 +138,9 @@ pub struct Indexer {
     /// `None`, the coordinator runs without an ignore filter (today's
     /// behaviour). Plan 26.
     repo_root: Option<std::path::PathBuf>,
+    /// Plan 27: chunk-embed cache mode. Threaded to Coordinator and
+    /// from there to EmbedStage. Defaults to Off.
+    embed_mode: crate::EmbedMode,
 }
 
 impl Indexer {
@@ -151,6 +154,7 @@ impl Indexer {
             runtime_metadata: None,
             symbol_extractor: Arc::new(NullAtomicSymbolExtractor),
             repo_root: None,
+            embed_mode: crate::EmbedMode::default(),
         }
     }
 
@@ -209,6 +213,12 @@ impl Indexer {
         self
     }
 
+    /// Set the chunk-embed cache mode. Plan 27.
+    pub fn with_embed_mode(mut self, mode: crate::EmbedMode) -> Self {
+        self.embed_mode = mode;
+        self
+    }
+
     /// Run a (full or incremental) indexing pass for `repo_id`.
     /// `commit_source` and `symbol_source` are wired by the caller.
     ///
@@ -231,7 +241,8 @@ impl Indexer {
         // the end of the run, so the user saw no per-commit motion.
         let mut coordinator = Coordinator::new(self.storage.clone(), self.embedder.clone())
             .with_embed_batch(self.embed_batch)
-            .with_progress(self.progress.clone());
+            .with_progress(self.progress.clone())
+            .with_embed_mode(self.embed_mode);
         // Plan 26: when repo_root is set, build a LayeredIgnore filter
         // and thread it to the Coordinator. Best-effort load — a missing
         // `.oharaignore` is fine (LayeredIgnore::load treats ENOENT as

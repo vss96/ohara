@@ -57,6 +57,10 @@ pub struct Coordinator {
     embed_batch: usize,
     progress: Arc<dyn ProgressSink>,
     ignore_filter: Option<Arc<dyn crate::IgnoreFilter>>,
+    embed_mode: crate::EmbedMode,
+    /// Plan 27: storage handle reused by EmbedStage for the
+    /// chunk-embed cache. Set when embed_mode != Off.
+    cache_storage: Option<Arc<dyn crate::Storage>>,
 }
 
 impl Coordinator {
@@ -72,6 +76,8 @@ impl Coordinator {
             embed_batch: 32,
             progress: Arc::new(NullProgress),
             ignore_filter: None,
+            embed_mode: crate::EmbedMode::default(),
+            cache_storage: None,
         }
     }
 
@@ -96,6 +102,17 @@ impl Coordinator {
     /// either case). Plumbing-only in C.1; behaviour added in C.2.
     pub fn with_ignore_filter(mut self, f: Arc<dyn crate::IgnoreFilter>) -> Self {
         self.ignore_filter = Some(f);
+        self
+    }
+
+    /// Plan 27: set the chunk-embed cache mode. When mode != Off, the
+    /// existing `storage` handle is reused as the cache backend.
+    pub fn with_embed_mode(mut self, mode: crate::EmbedMode) -> Self {
+        self.embed_mode = mode;
+        if mode != crate::EmbedMode::Off {
+            // Reuse the storage handle that was passed to `new`.
+            self.cache_storage = Some(self.storage.clone());
+        }
         self
     }
 
@@ -267,7 +284,12 @@ impl Coordinator {
 
         // Stage 4: embed (timed). Create the embed stage here rather than
         // accepting it as a parameter to keep argument count within limits.
-        let embed_stage = EmbedStage::new(self.embedder.clone()).with_embed_batch(self.embed_batch);
+        let mut embed_stage = EmbedStage::new(self.embedder.clone())
+            .with_embed_batch(self.embed_batch)
+            .with_embed_mode(self.embed_mode);
+        if let Some(cache) = self.cache_storage.as_ref() {
+            embed_stage = embed_stage.with_cache(cache.clone());
+        }
         let embed_start = Instant::now();
         let embed_output = embed_stage.run(&commit.message, &attributed).await?;
         result.timings.embed_ms += embed_start.elapsed().as_millis() as u64;
