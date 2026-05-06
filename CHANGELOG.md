@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-05-06
+
+### Changed
+
+- **`ohara plan` is now print-only by default.** The previous behavior
+  auto-wrote `.oharaignore` from the commit-share hotmap, which on
+  repos where the most-touched top-level directory is the engine
+  itself (e.g. QuestDB's `core/`) silently excluded the product from
+  the index. The default path now prints the hotmap and suggested
+  patterns and exits; pass `--write` to apply the suggestions to
+  `.oharaignore`. `--replace` now requires `--write`. The `--yes` and
+  `--no-write` flags and the interactive confirmation prompt are
+  removed
+  ([be70f9b](https://github.com/vss96/ohara/commit/be70f9b)) ([#38](https://github.com/vss96/ohara/pull/38)).
+
 ## [0.8.0] - 2026-05-06
 
 ### Added
