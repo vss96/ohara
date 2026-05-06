@@ -1,18 +1,22 @@
 //! Retrieval pipeline.
 //!
-//! Three lanes — vector KNN, BM25 over hunk text, BM25 over symbol names —
-//! gather candidates in parallel; Reciprocal Rank Fusion (`k = 60`) merges
-//! the lanes; an optional cross-encoder rerank scores the surviving
-//! candidates against the query; a small recency multiplier acts as a
-//! tie-breaker on the rerank score.
+//! Five lanes — vector KNN, BM25 over hunk diff text, BM25 over normalized
+//! semantic text, BM25 over historical symbol attribution, and BM25 over
+//! head-snapshot symbol names — gather candidates in parallel. Reciprocal
+//! Rank Fusion (configurable via [`RankingWeights::rrf_k`], defaulted to
+//! 60 per Cormack 2009) merges the lanes; an optional cross-encoder
+//! rerank scores the surviving candidates; a recency multiplier acts as
+//! a tie-breaker.
+//!
+//! See [`coordinator`] for the I/O orchestration, [`ranking`] for the
+//! pure RRF + recency math, and [`rerank`] for the cross-encoder step.
 
 pub mod lanes;
 pub use lanes::{LaneId, RetrievalLane};
 
-pub mod refiners;
-pub use refiners::ScoreRefiner;
-
 pub mod coordinator;
+pub mod ranking;
+pub mod rerank;
 
 pub mod weights;
 pub use weights::RankingWeights;
@@ -87,9 +91,9 @@ impl Retriever {
     /// profile in their response metadata (`_meta.query_profile`)
     /// without re-running the parser.
     ///
-    /// Plan 20: body replaced with coordinator-based pipeline. Lanes and
-    /// refiners are constructed per call (Arc clone is O(1)); the public
-    /// API is unchanged.
+    /// The pipeline shape lives in [`coordinator::run`]; this method's job
+    /// is to fold profile overrides into [`RankingWeights`] and decide
+    /// whether to attach the cross-encoder reranker for this query.
     pub async fn find_pattern_with_profile(
         &self,
         repo_id: &crate::types::RepoId,
@@ -104,19 +108,18 @@ impl Retriever {
             bm25_head_sym::Bm25HeadSymLane, bm25_hist_sym::Bm25HistSymLane,
             bm25_sem_text::Bm25SemTextLane, bm25_text::Bm25TextLane, vec::VecLane, RetrievalLane,
         };
-        use crate::retriever::refiners::{
-            cross_encoder::CrossEncoderRefiner, recency::RecencyRefiner, ScoreRefiner,
-        };
 
         let parsed = crate::query_understanding::parse_query(&query.query);
         let profile = crate::query_understanding::RetrievalProfile::for_intent(parsed.intent);
 
-        // Apply per-profile RankingWeights overrides (preserves
-        // recency_half_life_days and lane_top_k overrides from the profile).
+        // Apply per-profile RankingWeights overrides, then fold the
+        // profile's recency multiplier into recency_weight so the
+        // coordinator can stay agnostic about profiles.
+        let base_recency_weight = profile
+            .recency_weight
+            .unwrap_or(self.weights.recency_weight);
         let effective_weights = RankingWeights {
-            recency_weight: profile
-                .recency_weight
-                .unwrap_or(self.weights.recency_weight),
+            recency_weight: base_recency_weight * profile.recency_multiplier,
             recency_half_life_days: profile
                 .recency_half_life_days
                 .unwrap_or(self.weights.recency_half_life_days),
@@ -125,12 +128,8 @@ impl Retriever {
             rrf_k: self.weights.rrf_k,
         };
 
-        let rerank_top_k = effective_weights.rerank_top_k;
-        let rrf_k = effective_weights.rrf_k;
-
         // Build lanes (profile-gating is inside each lane via is_lane_enabled).
-        // Plan 25: 5 lanes now — vec / bm25_text (raw diff_text) /
-        // bm25_sem_text (contextual hunk.semantic_text) / bm25_hist_sym
+        // Plan 25: 5 lanes — vec / bm25_text / bm25_sem_text / bm25_hist_sym
         // / bm25_head_sym. All five fuse into the same RRF call.
         let lanes: Vec<Box<dyn RetrievalLane>> = vec![
             Box::new(VecLane::new(self.storage.clone(), self.embedder.clone())),
@@ -140,31 +139,19 @@ impl Retriever {
             Box::new(Bm25HeadSymLane::new(self.storage.clone())),
         ];
 
-        // Build refiners. Fold the profile's recency multiplier into the weight
-        // so RecencyRefiner is self-contained.
-        let effective_recency_weight =
-            effective_weights.recency_weight * profile.recency_multiplier;
-        let mut recency_weights = effective_weights.clone();
-        recency_weights.recency_weight = effective_recency_weight;
+        // The reranker is wired iff the caller attached one AND this
+        // query didn't opt out via `no_rerank`.
+        let reranker = self.reranker.as_ref().filter(|_| !query.no_rerank);
 
-        let mut refiners: Vec<Box<dyn ScoreRefiner>> = Vec::new();
-        if let Some(reranker) = &self.reranker {
-            if !query.no_rerank {
-                refiners.push(Box::new(CrossEncoderRefiner::new(reranker.clone())));
-            }
-        }
-        refiners.push(Box::new(RecencyRefiner::new(recency_weights, now_unix)));
-
-        // Run coordinator.
         let final_k = query.k.clamp(1, 20) as usize;
         let raw_hits = coordinator::run(
             &lanes,
-            &refiners,
+            &effective_weights,
+            reranker,
             query,
             repo_id,
-            rrf_k,
-            rerank_top_k,
             final_k,
+            now_unix,
         )
         .await?;
 
