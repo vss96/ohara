@@ -101,6 +101,16 @@ path = "index_bench.rs"
 name = "parallel_indexer_sweep"
 path = "parallel_indexer_sweep.rs"
 
+[[test]]
+# Issue #57 — symbol-name BM25 lane high-fan-out microbench. Builds a
+# synthetic 100-file × 50-hunk fixture in a temp SQLite DB and times
+# bm25_hunks_by_symbol_name to validate the LIMIT bound. `#[ignore]`'d;
+# opt in via:
+#   cargo test -p ohara-perf-tests --release -- \
+#       --ignored symbol_bm25_fan_out --nocapture
+name = "symbol_bm25_fan_out"
+path = "symbol_bm25_fan_out.rs"
+
 [dependencies]
 libc.workspace = true
 

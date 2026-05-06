@@ -13,6 +13,17 @@ use rusqlite::{params, Connection};
 
 use crate::codec::row_codec::{str_to_change_kind, upsert_file_path};
 
+/// Oversample factor for the BM25-by-symbol-name lane's `LIMIT` (issue #57).
+///
+/// The lane joins `fts_symbol_name` to every hunk that ever touched the
+/// matched symbol's file, so one matched symbol can fan out to hundreds
+/// of rows on hot files. The SQL aggregates per `hunk.id` (`GROUP BY`)
+/// so distinct-hunk selection happens at the SQL level and LIMIT bounds
+/// distinct hunks rather than fan-out rows; we still oversample by 10×
+/// as defence-in-depth so the optional Rust-side dedup has slack if a
+/// future schema change reintroduces duplicates upstream of LIMIT.
+pub(crate) const SYMBOL_LANE_OVERSAMPLE: i64 = 10;
+
 /// Persist a single `Symbol` to the `symbol` table and mirror it into
 /// the `fts_symbol_name` virtual table. Caller owns the transaction.
 fn put_one(tx: &rusqlite::Transaction<'_>, fp_id: i64, s: &Symbol) -> Result<()> {
@@ -97,8 +108,11 @@ pub fn put_many(c: &mut Connection, symbols: &[Symbol]) -> Result<()> {
 /// vector lane. SQLite's `bm25(<table>)` function only resolves inside
 /// a query that *directly* targets the FTS5 virtual table (otherwise
 /// SQLite errors with "unable to use function bm25 in the requested
-/// context"), so we compute the per-symbol score in an inline subquery
-/// and aggregate per hunk in the outer query.
+/// context"), so we compute the per-symbol score in a CTE that targets
+/// `fts_symbol_name` directly, then aggregate `MIN(rank_score)` per
+/// `hunk.id` in a second CTE. `LIMIT :k_oversample` then bounds
+/// **distinct hunks**, not the raw join fan-out — the regression that
+/// the LIMIT-only fix in #57 didn't cover.
 pub fn bm25_by_name(
     c: &Connection,
     query: &str,
@@ -106,27 +120,12 @@ pub fn bm25_by_name(
     language: Option<&str>,
     since_unix: Option<i64>,
 ) -> Result<Vec<HunkHit>> {
-    let lang_filter = language.map(|_| "AND fp.language = :lang").unwrap_or("");
-    let ts_filter = since_unix.map(|_| "AND cr.ts >= :ts").unwrap_or("");
-
-    // SQLite's bm25() must be used in a SELECT that directly references the
-    // FTS5 virtual table; calling it inside an aggregate (e.g. MIN(bm25(t)))
-    // raises "unable to use function bm25 in the requested context". So we
-    // pull (hunk_id, bm25_score) one row per matched symbol, ordered by
-    // BM25 ASC, and dedup-by-first-seen in Rust before truncating to k.
-    let sql = format!(
-        "SELECT h.id, h.commit_sha, fp.path, fp.language, h.change_kind, h.diff_text,
-                cr.parent_sha, cr.is_merge, cr.author, cr.ts, cr.message,
-                bm25(fts_symbol_name) AS rank_score
-         FROM fts_symbol_name
-         JOIN symbol sym ON sym.id = fts_symbol_name.symbol_id
-         JOIN file_path fp ON fp.id = sym.file_path_id
-         JOIN hunk h ON h.file_path_id = fp.id
-         JOIN commit_record cr ON cr.sha = h.commit_sha
-         WHERE fts_symbol_name MATCH :query
-           {ts_filter} {lang_filter}
-         ORDER BY rank_score ASC"
-    );
+    let sql = build_bm25_sql(language, since_unix);
+    // The SQL groups by hunk_id, so LIMIT now bounds distinct hunks.
+    // We still oversample by `SYMBOL_LANE_OVERSAMPLE` as defence-in-depth
+    // for the Rust-side dedup below. Cast through i64 so
+    // u8::MAX * 10 (= 2550) cannot wrap.
+    let k_oversample: i64 = i64::from(k) * SYMBOL_LANE_OVERSAMPLE;
 
     let mut binds: Vec<(&str, Box<dyn rusqlite::ToSql>)> = Vec::new();
     binds.push((
@@ -139,6 +138,7 @@ pub fn bm25_by_name(
     if let Some(ts) = since_unix {
         binds.push((":ts", Box::new(ts)));
     }
+    binds.push((":k_oversample", Box::new(k_oversample)));
 
     let mut stmt = c.prepare(&sql)?;
     let bind_refs: Vec<(&str, &dyn rusqlite::ToSql)> = binds
@@ -147,9 +147,12 @@ pub fn bm25_by_name(
         .collect();
 
     let rows = stmt.query_map(bind_refs.as_slice(), row_to_hit)?;
-    // De-duplicate by hunk id keeping the first (best-BM25) occurrence,
-    // then truncate to k. Multiple symbols in the same hunk's file can
-    // match a single query; we want one row per hunk.
+    // The CTE's `GROUP BY h.id` already guarantees one row per hunk, so
+    // this dedup pass is now defence-in-depth: it survives a future
+    // refactor that reintroduces duplicates above LIMIT (e.g. dropping
+    // the GROUP BY) without silently violating the one-hunk-per-row
+    // contract this lane's callers depend on. Cheap (HashSet over up
+    // to k_oversample i64s) so we keep it.
     let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut out = Vec::new();
     for r in rows {
@@ -162,6 +165,73 @@ pub fn bm25_by_name(
         }
     }
     Ok(out)
+}
+
+/// Build the BM25-by-symbol-name SQL string. Extracted so unit tests can
+/// pin invariants of the query (LIMIT clause, clause ordering, the
+/// `PARTITION BY h.id` that guarantees distinct-hunk semantics) without
+/// having to construct an FTS5 fixture for every assertion.
+///
+/// SQLite's `bm25()` carries a hard restriction: it errors with "unable
+/// to use function bm25 in the requested context" if its return value
+/// is consumed by **any** aggregate function (`MIN`, `SUM`, …) — even
+/// across a subquery or CTE boundary. We can't just write
+/// `MIN(bm25(...)) GROUP BY hunk_id`. We can, however, expose the
+/// per-symbol score through a CTE and reduce-by-hunk with a window
+/// function, since the value flows through `ROW_NUMBER()` rather than
+/// being aggregated. The pipeline is:
+///
+///   1. `per_symbol` — `SELECT bm25(fts_symbol_name) ...` directly
+///      against the virtual table. One row per matched symbol.
+///   2. `per_hunk` — `JOIN hunk h ON h.file_path_id = ...`, expose
+///      `ROW_NUMBER() OVER (PARTITION BY h.id ORDER BY rank_score ASC)`.
+///      Row 1 of every partition is the best-scoring symbol for that
+///      hunk.
+///   3. Outer `SELECT ... WHERE rn = 1 ORDER BY rank_score ASC LIMIT
+///      :k_oversample` — distinct-by-hunk, sorted, truncated. LIMIT
+///      now bounds distinct hunks, not raw fan-out rows, so neither
+///      one-symbol-many-hunks nor many-symbols-one-hunk starves the
+///      lane of distinct hits up to `k * SYMBOL_LANE_OVERSAMPLE`.
+pub(crate) fn build_bm25_sql(language: Option<&str>, since_unix: Option<i64>) -> String {
+    let lang_filter = language.map(|_| "AND fp.language = :lang").unwrap_or("");
+    let ts_filter = since_unix.map(|_| "AND cr.ts >= :ts").unwrap_or("");
+    format!(
+        "WITH per_symbol AS (
+             SELECT sym.file_path_id AS file_path_id,
+                    bm25(fts_symbol_name) AS rank_score
+             FROM fts_symbol_name
+             JOIN symbol sym ON sym.id = fts_symbol_name.symbol_id
+             WHERE fts_symbol_name MATCH :query
+         ),
+         per_hunk AS (
+             SELECT h.id AS hunk_id,
+                    h.commit_sha AS commit_sha,
+                    fp.path AS path,
+                    fp.language AS language,
+                    h.change_kind AS change_kind,
+                    h.diff_text AS diff_text,
+                    cr.parent_sha AS parent_sha,
+                    cr.is_merge AS is_merge,
+                    cr.author AS author,
+                    cr.ts AS ts,
+                    cr.message AS message,
+                    per_symbol.rank_score AS rank_score,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY h.id ORDER BY per_symbol.rank_score ASC
+                    ) AS rn
+             FROM per_symbol
+             JOIN hunk h ON h.file_path_id = per_symbol.file_path_id
+             JOIN file_path fp ON fp.id = h.file_path_id
+             JOIN commit_record cr ON cr.sha = h.commit_sha
+             WHERE 1=1 {ts_filter} {lang_filter}
+         )
+         SELECT hunk_id, commit_sha, path, language, change_kind, diff_text,
+                parent_sha, is_merge, author, ts, message, rank_score
+         FROM per_hunk
+         WHERE rn = 1
+         ORDER BY rank_score ASC
+         LIMIT :k_oversample"
+    )
 }
 
 fn row_to_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<HunkHit> {
@@ -214,5 +284,68 @@ fn symbol_kind_to_str(k: &SymbolKind) -> &'static str {
         SymbolKind::Method => "method",
         SymbolKind::Class => "class",
         SymbolKind::Const => "const",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #57: the BM25-by-symbol-name SQL **MUST** carry a `LIMIT`
+    /// clause. Without it, SQLite's `TEMP B-TREE FOR ORDER BY`
+    /// materialises the full hunk-fan-out before Rust's
+    /// dedup-by-first-seen ever sees a row (thousands of rows for
+    /// hot-file queries). Pinning the literal in this regression
+    /// test catches future edits that drop the bound.
+    #[test]
+    fn bm25_sql_contains_limit_clause() {
+        let sql = build_bm25_sql(None, None);
+        assert!(
+            sql.contains("LIMIT"),
+            "BM25-by-symbol-name SQL must include a LIMIT clause to bound \
+             the temp B-tree fan-out (issue #57); got:\n{sql}"
+        );
+    }
+
+    /// Issue #57: the LIMIT must be applied **after** `ORDER BY` so the
+    /// rows we keep are the best-scoring ones, not an arbitrary
+    /// fan-out prefix. Pin the textual order so a future refactor
+    /// can't accidentally swap them.
+    #[test]
+    fn bm25_sql_orders_before_limit() {
+        let sql = build_bm25_sql(None, None);
+        let order_idx = sql.find("ORDER BY").expect("SQL contains ORDER BY clause");
+        let limit_idx = sql.find("LIMIT").expect("SQL contains LIMIT clause");
+        assert!(
+            order_idx < limit_idx,
+            "ORDER BY must precede LIMIT so SQLite returns the top-scoring \
+             rows; got order_idx={order_idx} limit_idx={limit_idx}\nSQL:\n{sql}"
+        );
+    }
+
+    /// Issue #57 follow-up: distinct-hunk selection MUST happen at the
+    /// SQL level. `MIN(bm25(...))` is rejected by SQLite ("unable to
+    /// use function bm25 in the requested context") so we use a
+    /// `ROW_NUMBER() OVER (PARTITION BY h.id ORDER BY rank_score)`
+    /// window with a `WHERE rn = 1` filter — equivalent to MIN-by-hunk
+    /// without invoking an aggregate over `bm25()`. Without this
+    /// distinct-by-SQL step, the LIMIT clause bounds raw join fan-out:
+    /// many symbols matching the same hunk consume oversample rows
+    /// ahead of genuinely distinct hunks, and the lane silently
+    /// returns fewer distinct hits than `k`.
+    #[test]
+    fn bm25_sql_partitions_distinct_by_hunk_id() {
+        let sql = build_bm25_sql(None, None);
+        assert!(
+            sql.contains("PARTITION BY h.id"),
+            "BM25-by-symbol-name SQL must select one row per hunk via \
+             ROW_NUMBER() OVER (PARTITION BY h.id ...) so LIMIT bounds \
+             distinct hunks (issue #57 follow-up); got:\n{sql}"
+        );
+        assert!(
+            sql.contains("rn = 1"),
+            "BM25-by-symbol-name SQL must filter the per-hunk window \
+             to rn=1 (the best-scoring symbol for each hunk); got:\n{sql}"
+        );
     }
 }

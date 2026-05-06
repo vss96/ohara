@@ -1014,6 +1014,242 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bm25_hunks_by_symbol_name_returns_k_distinct_hunks_under_high_fan_out() {
+        // Issue #57: the symbol-name BM25 lane joins fts_symbol_name to
+        // *every* hunk that touched the matched symbol's file. With
+        // many commits over a hot file, that fan-out can be huge (a
+        // single matched symbol against 60 historical hunks = 60 raw
+        // rows). The new SQL-side LIMIT (k * SYMBOL_LANE_OVERSAMPLE)
+        // bounds SQLite's temp B-tree fill, but recall MUST be
+        // unchanged because Rust's dedup-by-first-seen runs before
+        // truncation -- the oversample factor leaves enough rows.
+        //
+        // Setup: 60 commits each adding one hunk to src/hot.rs, plus
+        // one head-symbol named `hot_symbol` in src/hot.rs. That gives
+        // a 60-row fan-out for any query matching `hot_symbol`. With
+        // k=5 we expect 5 distinct hunks back; without the LIMIT we
+        // would get the same 5, with the LIMIT we still get 5 (since
+        // the oversample factor is 10 and 5 * 10 = 50 > k).
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        for i in 0..60_i64 {
+            let sha = format!("c{i:04}");
+            let cm = CommitMeta {
+                commit_sha: sha.clone(),
+                parent_sha: None,
+                is_merge: false,
+                author: None,
+                ts: 1_700_000_000 + i,
+                message: format!("touch hot.rs #{i}"),
+            };
+            s.put_commit(
+                &id,
+                &CommitRecord {
+                    meta: cm,
+                    message_emb: vec![0.0; 384],
+                    ulid: String::new(),
+                },
+            )
+            .await
+            .unwrap();
+            let h = HunkRecord::legacy(
+                Hunk {
+                    commit_sha: sha,
+                    file_path: "src/hot.rs".into(),
+                    language: Some("rust".into()),
+                    change_kind: ChangeKind::Modified,
+                    diff_text: format!("+    line_{i}();\n"),
+                },
+                vec![0.0_f32; 384],
+            );
+            s.put_hunks(&id, &[h]).await.unwrap();
+        }
+        s.put_head_symbols(
+            &id,
+            &[Symbol {
+                file_path: "src/hot.rs".into(),
+                language: "rust".into(),
+                kind: SymbolKind::Function,
+                name: "hot_symbol".into(),
+                qualified_name: None,
+                sibling_names: Vec::new(),
+                span_start: 0,
+                span_end: 20,
+                blob_sha: "sha-hot".into(),
+                source_text: "fn hot_symbol() {}".into(),
+            }],
+        )
+        .await
+        .unwrap();
+
+        let k: u8 = 5;
+        let hits = s
+            .bm25_hunks_by_symbol_name(&id, "hot_symbol", k, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            hits.len(),
+            k as usize,
+            "high-fan-out lane must still return exactly k hits; \
+             dedup runs before LIMIT truncation"
+        );
+        let unique: std::collections::HashSet<i64> = hits.iter().map(|h| h.hunk_id).collect();
+        assert_eq!(
+            unique.len(),
+            hits.len(),
+            "all returned hunks must be distinct (dedup contract)"
+        );
+    }
+
+    #[tokio::test]
+    async fn bm25_hunks_by_symbol_name_returns_k_distinct_hunks_under_many_symbols_per_hunk() {
+        // Issue #57 follow-up: the dual of the high-fan-out test above.
+        // That test pinned one-symbol-many-hunks; this one pins
+        // many-symbols-one-hunk. Both shapes can starve the lane after
+        // the SQL-side `LIMIT :k_oversample` was added.
+        //
+        // Failure mode: the lane joins fts_symbol_name to *every* hunk
+        // in the matched symbol's file. If a single hot file holds many
+        // head-symbols that all match the query (e.g. broad-prefix
+        // searches against a Java class with 30 getters), the
+        // joined row count is `n_matched_symbols * n_hunks_in_file` — and
+        // SQLite's `LIMIT :k_oversample` (= k * 10) bounds *that*, not
+        // distinct hunks. With k=2 and 30 symbols matching a single hunk
+        // in file A plus 1 symbol matching a single hunk in file B, the
+        // first 20 oversample rows are all from A's single hunk; the
+        // dedup-by-first-seen in Rust collapses them to one entry, and
+        // file B's hunk never makes it through the LIMIT.
+        //
+        // The fix groups by hunk_id at the SQL level so distinct-hunk
+        // selection happens before LIMIT truncation.
+        let (_dir, s, id) = fixture_storage_with_repo().await;
+        // Two files, one hunk each, two distinct commits.
+        let cm_a = CommitMeta {
+            commit_sha: "ca".into(),
+            parent_sha: None,
+            is_merge: false,
+            author: None,
+            ts: 1_700_000_000,
+            message: "touch a.rs".into(),
+        };
+        s.put_commit(
+            &id,
+            &CommitRecord {
+                meta: cm_a,
+                message_emb: vec![0.0; 384],
+                ulid: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let cm_b = CommitMeta {
+            commit_sha: "cb".into(),
+            parent_sha: None,
+            is_merge: false,
+            author: None,
+            ts: 1_700_000_001,
+            message: "touch b.rs".into(),
+        };
+        s.put_commit(
+            &id,
+            &CommitRecord {
+                meta: cm_b,
+                message_emb: vec![0.0; 384],
+                ulid: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        s.put_hunks(
+            &id,
+            &[
+                HunkRecord::legacy(
+                    Hunk {
+                        commit_sha: "ca".into(),
+                        file_path: "src/a.rs".into(),
+                        language: Some("rust".into()),
+                        change_kind: ChangeKind::Added,
+                        diff_text: "+fn get_field() {}\n".into(),
+                    },
+                    vec![0.0_f32; 384],
+                ),
+                HunkRecord::legacy(
+                    Hunk {
+                        commit_sha: "cb".into(),
+                        file_path: "src/b.rs".into(),
+                        language: Some("rust".into()),
+                        change_kind: ChangeKind::Added,
+                        diff_text: "+fn get_field() {}\n".into(),
+                    },
+                    vec![0.0_f32; 384],
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+
+        // 30 head-symbols all named `get_field` in file A (one matched
+        // symbol per row in fts_symbol_name) plus 1 in file B. Each row
+        // in file A pulls in file A's single hunk via the JOIN, so the
+        // raw fan-out is 30 rows for hunk-A + 1 row for hunk-B.
+        let mut symbols = Vec::with_capacity(31);
+        for i in 0..30_usize {
+            symbols.push(Symbol {
+                file_path: "src/a.rs".into(),
+                language: "rust".into(),
+                kind: SymbolKind::Function,
+                name: "get_field".into(),
+                qualified_name: Some(format!("a::get_field_{i}")),
+                sibling_names: Vec::new(),
+                span_start: i as u32 * 20,
+                span_end: i as u32 * 20 + 20,
+                blob_sha: format!("sha-a-{i}"),
+                source_text: "fn get_field() {}".into(),
+            });
+        }
+        symbols.push(Symbol {
+            file_path: "src/b.rs".into(),
+            language: "rust".into(),
+            kind: SymbolKind::Function,
+            name: "get_field".into(),
+            qualified_name: Some("b::get_field".into()),
+            sibling_names: Vec::new(),
+            span_start: 0,
+            span_end: 20,
+            blob_sha: "sha-b".into(),
+            source_text: "fn get_field() {}".into(),
+        });
+        s.put_head_symbols(&id, &symbols).await.unwrap();
+
+        // k=2 with the current LIMIT-only fix returns only 1 distinct
+        // hunk (file A's), because all 20 oversample rows come from
+        // file A's 30 symbol matches against its single hunk. A
+        // distinct-by-hunk SQL would surface both hunks.
+        let k: u8 = 2;
+        let hits = s
+            .bm25_hunks_by_symbol_name(&id, "get_field", k, None, None)
+            .await
+            .unwrap();
+        let unique: std::collections::HashSet<i64> = hits.iter().map(|h| h.hunk_id).collect();
+        assert_eq!(
+            unique.len(),
+            hits.len(),
+            "all returned hunks must be distinct (dedup contract)"
+        );
+        assert_eq!(
+            hits.len(),
+            k as usize,
+            "lane must return k=2 distinct hunks even when a single file \
+             holds many matching symbols (many-symbols-one-hunk fan-out); \
+             got {} hunks: {:?}",
+            hits.len(),
+            hits.iter()
+                .map(|h| h.hunk.file_path.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
     async fn bm25_hunks_by_text_respects_since_unix() {
         let (_dir, s, id) = fixture_storage_with_repo().await;
         // Two commits: one old, one recent. Both touch a hunk whose diff
