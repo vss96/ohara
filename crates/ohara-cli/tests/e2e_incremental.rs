@@ -74,6 +74,7 @@ async fn incremental_on_fresh_repo_indexes_everything() {
         embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
         resources: ohara_cli::resources::ResourcesArg::Auto,
         embed_batch: None,
+        embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
     };
     let report = ohara_cli::commands::index::run(args).await.unwrap();
     assert_eq!(
@@ -114,6 +115,7 @@ async fn incremental_after_partial_index_only_walks_new_commits() {
         embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
         resources: ohara_cli::resources::ResourcesArg::Auto,
         embed_batch: None,
+        embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
     })
     .await
     .unwrap();
@@ -148,6 +150,7 @@ async fn incremental_after_partial_index_only_walks_new_commits() {
         embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
         resources: ohara_cli::resources::ResourcesArg::Auto,
         embed_batch: None,
+        embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
     })
     .await
     .unwrap();
@@ -196,6 +199,7 @@ async fn index_force_rebuilds_chunked_symbols_and_reembeds() {
         embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
         resources: ohara_cli::resources::ResourcesArg::Auto,
         embed_batch: None,
+        embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
     })
     .await
     .unwrap();
@@ -217,6 +221,7 @@ async fn index_force_rebuilds_chunked_symbols_and_reembeds() {
         embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
         resources: ohara_cli::resources::ResourcesArg::Auto,
         embed_batch: None,
+        embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
     })
     .await
     .unwrap();
@@ -298,6 +303,7 @@ async fn incremental_at_head_is_noop_and_skips_embedder_init() {
         embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
         resources: ohara_cli::resources::ResourcesArg::Auto,
         embed_batch: None,
+        embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
     })
     .await
     .unwrap();
@@ -315,6 +321,7 @@ async fn incremental_at_head_is_noop_and_skips_embedder_init() {
         embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
         resources: ohara_cli::resources::ResourcesArg::Auto,
         embed_batch: None,
+        embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
     })
     .await
     .unwrap();

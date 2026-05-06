@@ -82,6 +82,7 @@ async fn run_retry_pattern(arg: ProviderArg) -> RetryResult {
         embed_provider: Some(arg),
         resources: ohara_cli::resources::ResourcesArg::Auto,
         embed_batch: None,
+        embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
     };
     ohara_cli::commands::index::run(args)
         .await

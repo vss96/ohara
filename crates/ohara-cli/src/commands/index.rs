@@ -10,6 +10,23 @@ use super::provider::{
 };
 use crate::resources::{apply_intensity, detect_host, pick_resources, ResourcePlan, ResourcesArg};
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, clap::ValueEnum)]
+pub enum EmbedCacheArg {
+    Off,
+    Semantic,
+    Diff,
+}
+
+impl From<EmbedCacheArg> for ohara_core::EmbedMode {
+    fn from(a: EmbedCacheArg) -> Self {
+        match a {
+            EmbedCacheArg::Off => ohara_core::EmbedMode::Off,
+            EmbedCacheArg::Semantic => ohara_core::EmbedMode::Semantic,
+            EmbedCacheArg::Diff => ohara_core::EmbedMode::Diff,
+        }
+    }
+}
+
 #[derive(ClapArgs, Debug)]
 pub struct Args {
     /// Path to the repo (defaults to current directory)
@@ -84,6 +101,12 @@ pub struct Args {
     /// always override the picked plan.
     #[arg(long, value_enum, default_value_t = ResourcesArg::Auto)]
     pub resources: ResourcesArg,
+    /// Chunk-embed cache mode (plan-27). `off` (default) matches
+    /// today's behavior. `semantic` caches by sha256(semantic_text);
+    /// `diff` caches by sha256(diff_text) and changes the embedder
+    /// input to drop the commit message.
+    #[arg(long, value_enum, default_value_t = EmbedCacheArg::Off)]
+    pub embed_cache: EmbedCacheArg,
 }
 
 /// Compose explicit-flag values with a [`ResourcePlan`] under the
@@ -339,13 +362,14 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
     // chunker / parser versions" alongside its hunks. The snapshot
     // sources truth from the live embedder handle (model + dim) plus
     // the constants owned by ohara-embed / ohara-parse / ohara-core.
+    let embed_mode_for_meta = ohara_core::EmbedMode::from(args.embed_cache);
     let runtime_metadata = ohara_core::index_metadata::runtime_metadata_from(
         embedder.model_id(),
         u32::try_from(embedder.dimension()).unwrap_or(u32::MAX),
         ohara_embed::DEFAULT_RERANKER_ID,
         ohara_parse::CHUNKER_VERSION,
         ohara_parse::parser_versions(),
-        "semantic",
+        embed_mode_for_meta.index_metadata_value(),
     );
 
     let indexer = Indexer::new(storage.clone(), embedder.clone())
@@ -361,7 +385,10 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         .with_atomic_symbol_extractor(Arc::new(ohara_parse::TreeSitterAtomicExtractor))
         // Plan 26: load `.oharaignore` / `.gitattributes` from the repo
         // root so the indexer respects the ignore filter automatically.
-        .with_repo_root(canonical.clone());
+        .with_repo_root(canonical.clone())
+        // Plan 27: wire the chosen embed-cache mode into the indexer so
+        // the coordinator picks the right cache key strategy.
+        .with_embed_mode(args.embed_cache.into());
     let report = indexer
         .run(&repo_id, &commit_source, &symbol_source)
         .await?;
