@@ -1,5 +1,9 @@
 //! Coordinator: drives the 5-stage pipeline per commit.
 
+mod actor;
+
+use num_cpus;
+
 use crate::indexer::stages::attribute::AttributedHunk;
 use crate::indexer::stages::commit_walk::CommitWatermark;
 use crate::indexer::stages::{
@@ -21,7 +25,9 @@ use std::time::Instant;
 /// `PROGRESS_INTERVAL` re-walked commits after an abort. Issue #29 —
 /// at 100 a 5k-commit first-time run produced one tick every ~30s; 25
 /// gives ~one every few seconds without flooding.
-const PROGRESS_INTERVAL: usize = 25;
+///
+/// Used by the actor pipeline via the shared atomic counter sent to workers.
+pub(super) const PROGRESS_INTERVAL: usize = 25;
 
 /// Counts and phase timings returned by `Coordinator::run_timed`.
 /// Used by `Indexer::run` to populate `IndexerReport` after delegating
@@ -40,6 +46,9 @@ pub struct CoordinatorResult {
     pub timings: PhaseTimings,
     /// SHA of the last commit processed (for watermark advance).
     pub latest_sha: Option<String>,
+    /// Number of commits that encountered a per-commit error and were skipped.
+    /// Plan 28 Task C.3: errors are isolated per-commit; the run still succeeds.
+    pub commits_failed: usize,
 }
 
 /// Drives the 5-stage indexer pipeline per commit.
@@ -61,6 +70,7 @@ pub struct Coordinator {
     /// Plan 27: storage handle reused by EmbedStage for the
     /// chunk-embed cache. Set when embed_mode != Off.
     cache_storage: Option<Arc<dyn crate::Storage>>,
+    workers: usize,
 }
 
 impl Coordinator {
@@ -78,6 +88,7 @@ impl Coordinator {
             ignore_filter: None,
             embed_mode: crate::EmbedMode::default(),
             cache_storage: None,
+            workers: num_cpus::get().max(1),
         }
     }
 
@@ -105,6 +116,12 @@ impl Coordinator {
         self
     }
 
+    /// Plan 28: set the number of worker tasks. `n.max(1)` is enforced.
+    pub fn with_workers(mut self, n: usize) -> Self {
+        self.workers = n.max(1);
+        self
+    }
+
     /// Plan 27: set the chunk-embed cache mode. When mode != Off, the
     /// existing `storage` handle is reused as the cache backend.
     pub fn with_embed_mode(mut self, mode: crate::EmbedMode) -> Self {
@@ -123,14 +140,14 @@ impl Coordinator {
     pub async fn run(
         &self,
         repo: &RepoId,
-        commit_source: &dyn CommitSource,
-        symbol_source: &dyn SymbolSource,
+        commit_source: Arc<dyn CommitSource>,
+        symbol_source: Arc<dyn SymbolSource>,
     ) -> Result<()> {
         self.run_timed_with_extractor(
             repo,
             commit_source,
             symbol_source,
-            &NullAtomicSymbolExtractor,
+            Arc::new(NullAtomicSymbolExtractor),
         )
         .await?;
         Ok(())
@@ -145,14 +162,14 @@ impl Coordinator {
     pub async fn run_timed(
         &self,
         repo: &RepoId,
-        commit_source: &dyn CommitSource,
-        symbol_source: &dyn SymbolSource,
+        commit_source: Arc<dyn CommitSource>,
+        symbol_source: Arc<dyn SymbolSource>,
     ) -> Result<CoordinatorResult> {
         self.run_timed_with_extractor(
             repo,
             commit_source,
             symbol_source,
-            &NullAtomicSymbolExtractor,
+            Arc::new(NullAtomicSymbolExtractor),
         )
         .await
     }
@@ -160,12 +177,15 @@ impl Coordinator {
     /// Like `run_timed` but accepts a custom `AtomicSymbolExtractor`
     /// for ExactSpan attribution. Used by `Indexer::run` to pass the
     /// configured `symbol_extractor` through to the attribute stage.
+    ///
+    /// Accepts `Arc<dyn ...>` so that the trait objects can be moved
+    /// into spawned tokio tasks (plan-28 actor pipeline).
     pub async fn run_timed_with_extractor(
         &self,
         repo: &RepoId,
-        commit_source: &dyn CommitSource,
-        symbol_source: &dyn SymbolSource,
-        extractor: &dyn AtomicSymbolExtractor,
+        commit_source: Arc<dyn CommitSource>,
+        symbol_source: Arc<dyn SymbolSource>,
+        extractor: Arc<dyn AtomicSymbolExtractor>,
     ) -> Result<CoordinatorResult> {
         let mut result = CoordinatorResult::default();
 
@@ -183,7 +203,7 @@ impl Coordinator {
         self.progress.pre_walk("walking commit history");
         tracing::info!("walking commit history");
         let walk_start = Instant::now();
-        let commits = CommitWalkStage::run(commit_source, watermark.as_ref()).await?;
+        let commits = CommitWalkStage::run(commit_source.as_ref(), watermark.as_ref()).await?;
         result.timings.commit_walk_ms = walk_start.elapsed().as_millis() as u64;
         tracing::info!(
             new_commits = commits.len(),
@@ -192,49 +212,68 @@ impl Coordinator {
         );
         self.progress.start(commits.len());
 
-        let mut commits_done = 0usize;
-        for commit in &commits {
-            // Skip commits that are already indexed.
-            if self.storage.commit_exists(&commit.commit_sha).await? {
-                tracing::debug!(sha = %commit.commit_sha, "plan-19: skipping already-indexed commit");
-                result.latest_sha = Some(commit.commit_sha.clone());
-                commits_done += 1;
-                self.progress.commit_done(commits_done, result.new_hunks);
-                if commits_done % PROGRESS_INTERVAL == 0 {
-                    tracing::info!(
-                        commits_done,
-                        total = commits.len(),
-                        new_hunks = result.new_hunks,
-                        "indexing progress"
-                    );
-                }
-                continue;
-            }
-            self.run_commit_timed(
-                repo,
-                commit,
-                commit_source,
-                symbol_source,
-                extractor,
-                &mut result,
-            )
-            .await?;
-            result.latest_sha = Some(commit.commit_sha.clone());
-            commits_done += 1;
-            self.progress.commit_done(commits_done, result.new_hunks);
-            if commits_done % PROGRESS_INTERVAL == 0 {
-                tracing::info!(
-                    commits_done,
-                    total = commits.len(),
-                    new_hunks = result.new_hunks,
-                    "indexing progress"
-                );
-            }
-        }
+        // Capture the last commit SHA before splitting commits across the
+        // actor tasks. This covers both the "all already indexed" and the
+        // "some ignored" cases where a worker's `CommitWorkResult::sha`
+        // might not reach the true last commit in the walk list.
+        let walk_last_sha: Option<String> = commits.last().map(|c| c.commit_sha.clone());
+
+        // Plan 28: delegate actor topology to actor::run_actor_pipeline.
+        let actor_args = actor::ActorArgs {
+            storage: self.storage.clone(),
+            embedder: self.embedder.clone(),
+            embed_batch: self.embed_batch,
+            embed_mode: self.embed_mode,
+            cache_storage: self.cache_storage.clone(),
+            ignore_filter: self.ignore_filter.clone(),
+            n_workers: self.workers.max(1),
+            progress: self.progress.clone(),
+        };
+        let ar = actor::run_actor_pipeline(
+            actor_args,
+            commits,
+            repo.clone(),
+            commit_source,
+            symbol_source,
+            extractor,
+        )
+        .await?;
+
+        result.new_commits = ar.new_commits;
+        result.commits_failed = ar.commits_failed;
+        result.new_hunks = ar.new_hunks;
+        result.total_diff_bytes = ar.total_diff_bytes;
+        result.total_added_lines = ar.total_added_lines;
+        result.timings.diff_extract_ms = ar.diff_extract_ms;
+        result.timings.embed_ms = ar.embed_ms;
+        result.timings.storage_write_ms = ar.storage_write_ms;
+
+        tracing::info!(
+            new_commits = result.new_commits,
+            commits_failed = result.commits_failed,
+            "indexer: {} commits indexed, {} commits skipped due to errors",
+            result.new_commits,
+            result.commits_failed,
+        );
+
+        // The watermark must advance to the last commit in the walk list,
+        // not just the last one a worker happened to process. Parallel
+        // workers process commits out-of-order, so using a worker's last
+        // SHA would give a non-deterministic and potentially stale
+        // watermark. `walk_last_sha` is the true end of the walk and
+        // matches the serial-loop behaviour that set `latest_sha` for
+        // every commit regardless of skip/process status.
+        result.latest_sha = walk_last_sha;
+
         Ok(result)
     }
 
     /// Run stages 2-5 for a single commit, accumulating timing and counts.
+    ///
+    /// Kept for the `run_from_attributed` path and future fallback use.
+    /// The actor pipeline in `run_timed_with_extractor` uses
+    /// `actor::run_commit_owned` instead.
+    #[allow(dead_code)]
     async fn run_commit_timed(
         &self,
         repo: &RepoId,
@@ -250,8 +289,6 @@ impl Coordinator {
         result.timings.diff_extract_ms += extract_start.elapsed().as_millis() as u64;
 
         // Plan 26 Task C.2: drop ignored paths before downstream stages.
-        // Mixed commits keep their non-ignored hunks; pure-ignored
-        // commits are caught by the `paths_kept == 0` branch below.
         let paths_total = records.len();
         if let Some(filter) = self.ignore_filter.as_ref() {
             records.retain(|r| !filter.is_ignored(&r.file_path));
@@ -268,7 +305,7 @@ impl Coordinator {
         // Accumulate diff metrics for inflation-ratio diagnostic.
         for rec in &records {
             result.total_diff_bytes += rec.diff_text.len() as u64;
-            result.total_added_lines += count_added_lines_stage(&rec.diff_text);
+            result.total_added_lines += actor::count_added_lines(&rec.diff_text);
         }
         result.new_hunks += records.len();
 
@@ -282,8 +319,7 @@ impl Coordinator {
         )
         .await?;
 
-        // Stage 4: embed (timed). Create the embed stage here rather than
-        // accepting it as a parameter to keep argument count within limits.
+        // Stage 4: embed.
         let mut embed_stage = EmbedStage::new(self.embedder.clone())
             .with_embed_batch(self.embed_batch)
             .with_embed_mode(self.embed_mode);
@@ -294,7 +330,7 @@ impl Coordinator {
         let embed_output = embed_stage.run(&commit.message, &attributed).await?;
         result.timings.embed_ms += embed_start.elapsed().as_millis() as u64;
 
-        // Stage 5: persist (timed).
+        // Stage 5: persist.
         let write_start = Instant::now();
         PersistStage::run(repo, commit, embed_output, self.storage.as_ref()).await?;
         result.timings.storage_write_ms += write_start.elapsed().as_millis() as u64;
@@ -323,14 +359,6 @@ impl Coordinator {
         // Stage 5: persist.
         PersistStage::run(repo, commit, embed_output, self.storage.as_ref()).await
     }
-}
-
-/// Count "+"-prefixed lines in a unified-diff snippet (excludes `+++` headers).
-fn count_added_lines_stage(diff_text: &str) -> u64 {
-    diff_text
-        .lines()
-        .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
-        .count() as u64
 }
 
 #[cfg(test)]

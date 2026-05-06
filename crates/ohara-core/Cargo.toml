@@ -16,13 +16,15 @@ sha2.workspace = true
 hex.workspace = true
 async-trait = "0.1"
 git2.workspace = true
-# tokio::join! is the cleanest way to gather the three retrieval lanes
-# concurrently. We only pull the `macros` feature so ohara-core stays
-# runtime-agnostic — the macro expands to plain futures, and the test
-# binary still owns the actual runtime.
-tokio = { version = "1", features = ["macros"] }
+# `macros` for tokio::join! in the retrieval lanes.
+# `rt` + `sync` added for plan-28 actor pipeline (tokio::spawn,
+# tokio::sync::mpsc, tokio::sync::Mutex). `rt` enables task spawning;
+# the test binary still owns the multi-thread runtime.
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
 futures.workspace = true
 ignore = { workspace = true }
+ulid.workspace = true
+num_cpus.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }

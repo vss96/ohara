@@ -443,6 +443,13 @@ impl Storage for SqliteStorage {
     fn metrics_snapshot(&self) -> StorageMetricsSnapshot {
         self.counters.snapshot()
     }
+
+    async fn latest_indexed_by_ulid(
+        &self,
+        _repo_id: &ohara_core::types::RepoId,
+    ) -> ohara_core::Result<Option<ohara_core::types::CommitMeta>> {
+        with_conn(&self.pool, |c| crate::tables::commit::latest_by_ulid(c)).await
+    }
 }
 
 #[cfg(test)]
@@ -489,6 +496,7 @@ mod tests {
             &CommitRecord {
                 meta: cm.clone(),
                 message_emb: emb,
+                ulid: String::new(),
             },
         )
         .await
@@ -542,6 +550,7 @@ mod tests {
             &CommitRecord {
                 meta: cm.clone(),
                 message_emb: vec![0.1; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -558,6 +567,7 @@ mod tests {
             &CommitRecord {
                 meta: cm2,
                 message_emb: vec![0.9; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -634,6 +644,7 @@ mod tests {
             &CommitRecord {
                 meta: cm,
                 message_emb: original.clone(),
+                ulid: String::new(),
             },
         )
         .await
@@ -694,6 +705,7 @@ mod tests {
             &CommitRecord {
                 meta: cm,
                 message_emb: vec![0.0; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -748,6 +760,7 @@ mod tests {
             &CommitRecord {
                 meta: cm,
                 message_emb: vec![0.0; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -803,6 +816,7 @@ mod tests {
             &CommitRecord {
                 meta: cm,
                 message_emb: vec![0.0; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -877,6 +891,7 @@ mod tests {
             &CommitRecord {
                 meta: cm,
                 message_emb: vec![0.0; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -1062,6 +1077,7 @@ mod tests {
             &CommitRecord {
                 meta: cm,
                 message_emb: vec![0.0; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -1132,6 +1148,7 @@ mod tests {
             &CommitRecord {
                 meta: cm.clone(),
                 message_emb: vec![0.0; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -1310,6 +1327,7 @@ mod tests {
                 &CommitRecord {
                     meta: cm,
                     message_emb: vec![0.0; 384],
+                    ulid: String::new(),
                 },
             )
             .await
@@ -1343,6 +1361,7 @@ mod tests {
             &CommitRecord {
                 meta: cm,
                 message_emb: vec![0.0; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -1433,6 +1452,7 @@ mod tests {
             &CommitRecord {
                 meta: cm,
                 message_emb: vec![0.0; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -1507,6 +1527,7 @@ mod tests {
             &CommitRecord {
                 meta: cm,
                 message_emb: vec![0.0; 384],
+                ulid: String::new(),
             },
         )
         .await
@@ -1579,6 +1600,7 @@ mod tests {
                 &CommitRecord {
                     meta: cm,
                     message_emb: vec![0.0; 384],
+                    ulid: String::new(),
                 },
             )
             .await
@@ -1679,6 +1701,7 @@ mod tests {
                         message: format!("msg {sha}"),
                     },
                     message_emb: vec![0.0; 384],
+                    ulid: String::new(),
                 },
             )
             .await

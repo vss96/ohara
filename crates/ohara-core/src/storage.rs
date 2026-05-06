@@ -103,6 +103,9 @@ mod hunk_record_tests {
 pub struct CommitRecord {
     pub meta: CommitMeta,
     pub message_emb: Vector,
+    /// Plan 28: ULID derived via `ulid_for_commit(meta.ts, &meta.commit_sha)`.
+    /// Stored alongside the commit row for time-sorted reads.
+    pub ulid: String,
 }
 
 #[derive(Debug, Clone)]
@@ -403,5 +406,17 @@ pub trait Storage: Send + Sync {
     /// silent in the harness.
     fn metrics_snapshot(&self) -> StorageMetricsSnapshot {
         StorageMetricsSnapshot::default()
+    }
+
+    /// Plan 28: return the commit with the highest ULID for this repo
+    /// (most-recently-committed of the indexed commits, by commit_time).
+    /// Returns None when no commits are indexed or all rows have empty
+    /// ULID (pre-V6).
+    ///
+    /// Default returns None — appropriate for in-memory test storages.
+    /// SqliteStorage overrides with a real query.
+    async fn latest_indexed_by_ulid(&self, repo_id: &RepoId) -> Result<Option<CommitMeta>> {
+        let _ = repo_id;
+        Ok(None)
     }
 }

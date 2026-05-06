@@ -42,6 +42,6 @@ pub use query::*;
 pub use retriever::{RankingWeights, Retriever};
 pub use storage::{CommitRecord, EmbedCacheStats, HunkHit, HunkId, HunkRecord, Storage, Vector};
 pub use types::{
-    AttributionKind, ChangeKind, CommitMeta, ContentHash, Hunk, HunkSymbol, Provenance, RepoId,
-    Symbol, SymbolKind,
+    ulid_for_commit, AttributionKind, ChangeKind, CommitMeta, ContentHash, Hunk, HunkSymbol,
+    Provenance, RepoId, Symbol, SymbolKind,
 };

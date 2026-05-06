@@ -111,11 +111,19 @@ pub async fn run(args: Args) -> Result<()> {
     }
     let compatibility = CompatibilityStatus::assess(&runtime, &stored);
 
+    // Plan 28: derive last_indexed_commit from MAX(ulid) for V6+ indexes;
+    // fall back to the watermark column for pre-V6 rows.
+    let derived = storage.latest_indexed_by_ulid(&repo_id).await?;
+    let last_indexed_display = derived
+        .map(|m| m.commit_sha)
+        .or(st.last_indexed_commit.clone())
+        .unwrap_or_else(|| "<none>".into());
+
     println!(
         "repo: {}\nid: {}\nlast_indexed_commit: {}\nindexed_at: {}\ncommits_behind_head: {}\n{}",
         canonical.display(),
         repo_id.as_str(),
-        st.last_indexed_commit.unwrap_or_else(|| "<none>".into()),
+        last_indexed_display,
         st.indexed_at.unwrap_or_else(|| "<none>".into()),
         st.commits_behind_head,
         render_compatibility(&compatibility),

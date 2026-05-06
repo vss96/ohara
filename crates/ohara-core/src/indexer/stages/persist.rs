@@ -6,6 +6,20 @@ use crate::storage::{CommitRecord, HunkRecord as StorageHunkRecord};
 use crate::types::{CommitMeta, RepoId};
 use crate::{Result, Storage};
 
+/// Derive a ULID string for a commit. Falls back to an all-zero random
+/// segment when `sha` is shorter than 40 chars or contains non-hex
+/// characters (only reachable with synthetic test SHAs; production SHAs
+/// are always full 40-hex).
+fn commit_ulid(ts: i64, sha: &str) -> String {
+    let valid_hex = sha.len() >= 40 && sha[..40].bytes().all(|b| b.is_ascii_hexdigit());
+    let effective: std::borrow::Cow<str> = if valid_hex {
+        std::borrow::Cow::Borrowed(sha)
+    } else {
+        std::borrow::Cow::Owned("0".repeat(40))
+    };
+    crate::ulid_for_commit(ts, &effective).to_string()
+}
+
 /// The persist stage: writes commit + embedded hunks to storage in a
 /// single logical operation. The storage layer's DELETE-then-INSERT
 /// contract (`commit::put`) guarantees idempotency — re-running on the
@@ -28,6 +42,7 @@ impl PersistStage {
         storage: &dyn Storage,
     ) -> Result<()> {
         let commit_record = CommitRecord {
+            ulid: commit_ulid(commit.ts, &commit.commit_sha),
             meta: commit.clone(),
             message_emb: embed_output.commit_embedding,
         };
