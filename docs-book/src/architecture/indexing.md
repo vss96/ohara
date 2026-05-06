@@ -206,6 +206,27 @@ on [`ohara index`](../cli/index.md):
   pinned to the bottom of the terminal while `tracing::info!` events
   stream above it. No more "log line scrolled the bar away."
 
+## Parallel commit pipeline (`--workers`)
+
+`ohara index` runs a multi-worker pipeline by default:
+
+- A walker task enumerates HEAD-reachable commits.
+- N worker tasks each pull a commit and run the full pipeline
+  (hunk_chunk → attribute → embed → persist) end-to-end.
+- A bounded mpsc channel (capacity = N) provides backpressure.
+
+Each commit gets a deterministic ULID derived from `(commit_time,
+commit_sha)`. Persistence is order-free; the read path recovers
+chronological order via `ORDER BY ulid`. Resume falls back to plan-9's
+`commit_exists` skip — already-indexed commits are dropped from the
+walker output.
+
+Default: `--workers $(num_cpus)`. Use `--workers 1` for the serial
+path (matches today's behavior; useful for debugging). The big speedup
+shows up when the chunk-embed cache (`--embed-cache=semantic|diff`,
+plan-27) is warm — most chunks then become cache lookups and parse
+becomes the dominant per-commit cost, fanning out across workers.
+
 ## Known limits
 
 `ohara index` is currently single-process. On large polyglot
