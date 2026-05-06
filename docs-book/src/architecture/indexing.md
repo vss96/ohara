@@ -36,6 +36,39 @@ A full pass, in order:
 7. **Final watermark advance.** Set `last_indexed_commit` to the
    newest commit walked.
 
+## Chunk-level embed cache (`--embed-cache`)
+
+`ohara index` can be told to cache embeddings keyed by the content
+the embedder consumes, so identical chunk content costs one embed
+call across the entire history rather than one per occurrence.
+
+Three modes:
+
+- `off` (default) — no cache; today's behavior.
+- `semantic` — cache keyed by `sha256(commit_msg + diff_text)`;
+  embedder input unchanged. Hit rate is driven by exact
+  `(message, diff)` repeats — cherry-picks, reverts. Conservative.
+- `diff` — cache keyed by `sha256(diff_text)`; **embedder input
+  changes to `diff_text` only** (commit message dropped from the
+  vector lane). Hit rate is much higher (vendor refreshes, mass
+  renames). The vector lane specialises in diff-similarity; commit
+  messages remain indexed via the existing `fts_hunk_semantic` BM25
+  lane.
+
+`off` and `semantic` are vector-equivalent (both embed the same
+input). `diff` produces a different vector lane; switching into or
+out of it requires `--rebuild`.
+
+The cache lives in the same SQLite DB as `vec_hunk` and is bounded
+by `unique(content_hash, embed_model)`. No eviction in v1.
+
+Usage:
+
+```
+ohara index --embed-cache semantic ~/code/big-repo
+ohara status ~/code/big-repo   # shows embed_cache: semantic (… KB)
+```
+
 ## Path-aware indexing — `.oharaignore`
 
 `ohara` consults a layered ignore filter at index time. Three sources
