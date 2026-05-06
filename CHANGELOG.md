@@ -329,7 +329,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pin rmcp to `=0.1.5` for stable API surface ([9935c7b](https://github.com/vss96/ohara/commit/9935c7bf369d6a7ecce5366d38ef43186b762599))
 - Drop dead `OharaServer::embedder` field ([0acf38a](https://github.com/vss96/ohara/commit/0acf38a97c5c2d9f35bec7f37009088647898512))
 
-[Unreleased]: https://github.com/vss96/ohara/compare/v0.7.5...HEAD
+[Unreleased]: https://github.com/vss96/ohara/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/vss96/ohara/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/vss96/ohara/compare/v0.7.7...v0.8.0
+[0.7.7]: https://github.com/vss96/ohara/compare/v0.7.6...v0.7.7
+[0.7.6]: https://github.com/vss96/ohara/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/vss96/ohara/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/vss96/ohara/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/vss96/ohara/compare/v0.7.2...v0.7.3
