@@ -8,6 +8,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-05-06
+
+### Fixed
+
+- **`ohara status` now reports the actual `embed_input_mode`** stored
+  on disk instead of the hardcoded `"semantic"` literal. Indexes built
+  with `--embed-cache diff` previously showed `compatibility: needs
+  rebuild` even when nothing had changed; status, the engine response
+  metadata path, and the MCP `find_pattern` tool all now route through
+  a single `ohara_engine::current_runtime_metadata` helper that adopts
+  the on-disk mode before assessing compatibility
+  ([c45f8ec](https://github.com/vss96/ohara/commit/c45f8ec)) ([#47](https://github.com/vss96/ohara/pull/47)).
+- **`ohara plan` no longer suggests excluding every directory on small
+  repos.** The share-threshold comparison was integer-floored
+  (`(total * 0.05) as u64`), so on repos with fewer than 20 commits the
+  threshold rounded to 0 and `>= threshold` matched everything. The
+  comparison is now done in `f64` against the raw share fraction
+  ([e2ef63c](https://github.com/vss96/ohara/commit/e2ef63c)) ([#46](https://github.com/vss96/ohara/pull/46)).
+- **`merge_oharaignore` no longer corrupts user content** when a stray
+  `# === end auto-generated ===` line appears anywhere above the begin
+  marker (e.g. in preserved prose). The end-marker scan is now scoped
+  to `existing[begin..]`
+  ([e2ef63c](https://github.com/vss96/ohara/commit/e2ef63c)) ([#46](https://github.com/vss96/ohara/pull/46)).
+
+### Internal
+
+- Plan-27 e2e regression `mode_mismatch_on_incremental_errors_with_rebuild_hint`
+  now actually exercises the `--incremental` path; sibling test
+  `mode_mismatch_on_full_reindex_errors_with_rebuild_hint` locks in
+  mode-agnostic guard behavior
+  ([e930f76](https://github.com/vss96/ohara/commit/e930f76)) ([#45](https://github.com/vss96/ohara/pull/45)).
+- CHANGELOG release-link footers backfilled for 0.7.6 / 0.7.7 / 0.8.0 / 0.8.1
+  ([847e931](https://github.com/vss96/ohara/commit/847e931)) ([#44](https://github.com/vss96/ohara/pull/44)).
+
 ## [0.8.1] - 2026-05-06
 
 ### Changed
@@ -329,7 +363,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pin rmcp to `=0.1.5` for stable API surface ([9935c7b](https://github.com/vss96/ohara/commit/9935c7bf369d6a7ecce5366d38ef43186b762599))
 - Drop dead `OharaServer::embedder` field ([0acf38a](https://github.com/vss96/ohara/commit/0acf38a97c5c2d9f35bec7f37009088647898512))
 
-[Unreleased]: https://github.com/vss96/ohara/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/vss96/ohara/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/vss96/ohara/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/vss96/ohara/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/vss96/ohara/compare/v0.7.7...v0.8.0
 [0.7.7]: https://github.com/vss96/ohara/compare/v0.7.6...v0.7.7
