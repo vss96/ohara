@@ -1,5 +1,15 @@
-//! BGE-small-en-v1.5 (384d) embedding provider over fastembed-rs,
-//! plus BGE-reranker-base cross-encoder over `fastembed::TextRerank`.
+//! BGE-small-en-v1.5 quantized (384d) embedding provider over
+//! fastembed-rs, plus BGE-reranker-base cross-encoder over
+//! `fastembed::TextRerank`.
+//!
+//! Issue #54: the default embedder is the INT8-quantized variant
+//! (`Qdrant/bge-small-en-v1.5-onnx-Q`, exposed as
+//! `EmbeddingModel::BGESmallENV15Q` in fastembed). Same 384d output as
+//! the full-precision model, ~1.5–3× CPU throughput, ~50% lower memory
+//! footprint, and the recall delta on the retrieval-quality fixture is
+//! within tolerance (`tests/perf/context_engine_eval.rs`). The model id
+//! `"bge-small-en-v1.5-q"` carries the `-q` suffix so an index built
+//! with the older binary is reported as `compatibility: needs rebuild`.
 //!
 //! Concurrency: both `embed_batch` and `rerank` offload the ONNX
 //! forward pass to `tokio::task::spawn_blocking` and serialize access
@@ -19,10 +29,20 @@ use tokio::sync::{Mutex, OnceCell};
 /// `FastEmbedProvider::model_id()` and recorded in `index_metadata`
 /// (plan 13) so an old index built with a different model triggers a
 /// rebuild prompt.
-pub const DEFAULT_MODEL_ID: &str = "bge-small-en-v1.5";
+///
+/// Issue #54: switched from `"bge-small-en-v1.5"` (full precision) to
+/// the quantized variant. The `-q` suffix is part of the index identity
+/// — old indexes built with the full-precision embedder produce vectors
+/// that are not directly comparable to Q-variant query embeddings, so
+/// the suffix forces `CompatibilityStatus::assess` to return
+/// `NeedsRebuild` after binary upgrade.
+pub const DEFAULT_MODEL_ID: &str = "bge-small-en-v1.5-q";
 /// Vector dimension produced by `DEFAULT_MODEL_ID`. Exposed so the
 /// `ohara status` command can build the runtime compatibility
 /// expectation without loading the embedder (plan 13 Task 3.1).
+///
+/// Both the full-precision and quantized BGE-small variants emit 384d
+/// vectors, so the dimension is stable across the #54 switch.
 pub const DEFAULT_DIM: usize = 384;
 /// Stable id of the default cross-encoder reranker model. Recorded in
 /// `index_metadata` so a reranker swap triggers a refresh prompt.
@@ -58,16 +78,20 @@ impl FastEmbedProvider {
         Self::with_provider(EmbedProvider::Cpu)
     }
 
-    /// Load BGE-small with the requested ONNX execution provider.
+    /// Load BGE-small (quantized) with the requested ONNX execution
+    /// provider.
     ///
     /// CoreML / CUDA are gated behind cargo features; without the
-    /// feature, the corresponding arm returns an actionable error.
+    /// feature, the corresponding arm returns an actionable error. The
+    /// quantized model file (`Qdrant/bge-small-en-v1.5-onnx-Q`) is
+    /// downloaded on first run; size is comparable to the full-precision
+    /// model since the optimized ONNX export is ~33MB.
     pub fn with_provider(provider: EmbedProvider) -> Result<Self> {
         let opts =
-            InitOptions::new(EmbeddingModel::BGESmallENV15).with_show_download_progress(false);
+            InitOptions::new(EmbeddingModel::BGESmallENV15Q).with_show_download_progress(false);
         let opts = apply_provider_to_init(opts, provider)?;
         let model = TextEmbedding::try_new(opts)
-            .context("loading BGE-small model (downloads ~80MB on first run)")?;
+            .context("loading BGE-small (quantized) model (downloads ~33MB on first run)")?;
         Ok(Self {
             model: Arc::new(Mutex::new(model)),
             model_id: DEFAULT_MODEL_ID.into(),
