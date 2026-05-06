@@ -1,5 +1,7 @@
 //! Coordinator: drives the 5-stage pipeline per commit.
 
+mod actor;
+
 use num_cpus;
 
 use crate::indexer::stages::attribute::AttributedHunk;
@@ -25,7 +27,7 @@ use std::time::Instant;
 /// gives ~one every few seconds without flooding.
 ///
 /// Used by the actor pipeline via the shared atomic counter sent to workers.
-const PROGRESS_INTERVAL: usize = 25;
+pub(super) const PROGRESS_INTERVAL: usize = 25;
 
 /// Counts and phase timings returned by `Coordinator::run_timed`.
 /// Used by `Indexer::run` to populate `IndexerReport` after delegating
@@ -47,29 +49,6 @@ pub struct CoordinatorResult {
     /// Number of commits that encountered a per-commit error and were skipped.
     /// Plan 28 Task C.3: errors are isolated per-commit; the run still succeeds.
     pub commits_failed: usize,
-}
-
-/// Per-commit result returned by `run_commit_owned`.
-#[derive(Default)]
-struct CommitWorkResult {
-    new_hunks: usize,
-    total_diff_bytes: u64,
-    total_added_lines: u64,
-    /// True when the commit was fully persisted (not 100%-ignored).
-    persisted: bool,
-    /// Per-commit timing contributions.
-    diff_extract_ms: u64,
-    embed_ms: u64,
-    storage_write_ms: u64,
-}
-
-/// Aggregate per-worker results.
-#[derive(Default)]
-struct WorkerResult {
-    local: CommitWorkResult,
-    succeeded: usize,
-    /// Number of per-commit errors encountered by this worker.
-    failed: usize,
 }
 
 /// Drives the 5-stage indexer pipeline per commit.
@@ -239,123 +218,35 @@ impl Coordinator {
         // might not reach the true last commit in the walk list.
         let walk_last_sha: Option<String> = commits.last().map(|c| c.commit_sha.clone());
 
-        // Plan 28: actor-style pipeline — one walker task feeds N worker
-        // tasks through a bounded mpsc channel. The ULID is computed by
-        // `PersistStage` internally (with its own short-SHA guard), so the
-        // walker does not need to produce it.
-        let n_workers = self.workers.max(1);
-        let (tx, rx) = tokio::sync::mpsc::channel::<CommitMeta>(n_workers);
-        let rx = Arc::new(tokio::sync::Mutex::new(rx));
+        // Plan 28: delegate actor topology to actor::run_actor_pipeline.
+        let actor_args = actor::ActorArgs {
+            storage: self.storage.clone(),
+            embedder: self.embedder.clone(),
+            embed_batch: self.embed_batch,
+            embed_mode: self.embed_mode,
+            cache_storage: self.cache_storage.clone(),
+            ignore_filter: self.ignore_filter.clone(),
+            n_workers: self.workers.max(1),
+            progress: self.progress.clone(),
+        };
+        let ar = actor::run_actor_pipeline(
+            actor_args,
+            commits,
+            repo.clone(),
+            commit_source,
+            symbol_source,
+            extractor,
+        )
+        .await?;
 
-        // Walker task: filter already-indexed commits and send to workers.
-        let storage_for_walker = self.storage.clone();
-        let walker_handle = tokio::spawn(async move {
-            for commit in commits {
-                if storage_for_walker
-                    .commit_exists(&commit.commit_sha)
-                    .await
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-                if tx.send(commit).await.is_err() {
-                    break;
-                }
-            }
-        });
-
-        // Shared atomic counters for progress reporting across workers.
-        let commits_done_atomic = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let new_hunks_atomic = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-
-        // Worker tasks: pull (CommitMeta, Ulid) pairs and run the per-commit pipeline.
-        let mut worker_handles = Vec::with_capacity(n_workers);
-        for _ in 0..n_workers {
-            let rx_for_worker = rx.clone();
-            let storage = self.storage.clone();
-            let embedder = self.embedder.clone();
-            let embed_batch = self.embed_batch;
-            let embed_mode = self.embed_mode;
-            let cache_storage = self.cache_storage.clone();
-            let ignore_filter = self.ignore_filter.clone();
-            let commit_source_arc = commit_source.clone();
-            let symbol_source_arc = symbol_source.clone();
-            let extractor_arc = extractor.clone();
-            let repo_owned = repo.clone();
-            let progress_arc = self.progress.clone();
-            let commits_done_ref = commits_done_atomic.clone();
-            let new_hunks_ref = new_hunks_atomic.clone();
-            worker_handles.push(tokio::spawn(async move {
-                let mut wr = WorkerResult::default();
-                loop {
-                    let next = {
-                        let mut guard = rx_for_worker.lock().await;
-                        guard.recv().await
-                    };
-                    let Some(commit) = next else { break };
-                    match run_commit_owned(
-                        storage.clone(),
-                        embedder.clone(),
-                        embed_batch,
-                        embed_mode,
-                        cache_storage.clone(),
-                        ignore_filter.clone(),
-                        repo_owned.clone(),
-                        commit,
-                        commit_source_arc.clone(),
-                        symbol_source_arc.clone(),
-                        extractor_arc.clone(),
-                    )
-                    .await
-                    {
-                        Ok(r) => {
-                            wr.local.new_hunks += r.new_hunks;
-                            wr.local.total_diff_bytes += r.total_diff_bytes;
-                            wr.local.total_added_lines += r.total_added_lines;
-                            wr.local.diff_extract_ms += r.diff_extract_ms;
-                            wr.local.embed_ms += r.embed_ms;
-                            wr.local.storage_write_ms += r.storage_write_ms;
-                            if r.persisted {
-                                wr.succeeded += 1;
-                            }
-                            let done = commits_done_ref
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                                + 1;
-                            let hunks = new_hunks_ref
-                                .fetch_add(r.new_hunks, std::sync::atomic::Ordering::Relaxed)
-                                + r.new_hunks;
-                            progress_arc.commit_done(done, hunks);
-                            if done % PROGRESS_INTERVAL == 0 {
-                                tracing::info!(
-                                    commits_done = done,
-                                    new_hunks = hunks,
-                                    "indexing progress"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "plan-28 worker error; commit skipped");
-                            wr.failed += 1;
-                        }
-                    }
-                }
-                wr
-            }));
-        }
-
-        let _ = walker_handle.await;
-        for handle in worker_handles {
-            if let Ok(wr) = handle.await {
-                result.new_commits += wr.succeeded;
-                result.commits_failed += wr.failed;
-                result.new_hunks += wr.local.new_hunks;
-                result.total_diff_bytes += wr.local.total_diff_bytes;
-                result.total_added_lines += wr.local.total_added_lines;
-                result.timings.diff_extract_ms += wr.local.diff_extract_ms;
-                result.timings.embed_ms += wr.local.embed_ms;
-                result.timings.storage_write_ms += wr.local.storage_write_ms;
-            }
-        }
+        result.new_commits = ar.new_commits;
+        result.commits_failed = ar.commits_failed;
+        result.new_hunks = ar.new_hunks;
+        result.total_diff_bytes = ar.total_diff_bytes;
+        result.total_added_lines = ar.total_added_lines;
+        result.timings.diff_extract_ms = ar.diff_extract_ms;
+        result.timings.embed_ms = ar.embed_ms;
+        result.timings.storage_write_ms = ar.storage_write_ms;
 
         tracing::info!(
             new_commits = result.new_commits,
@@ -381,7 +272,7 @@ impl Coordinator {
     ///
     /// Kept for the `run_from_attributed` path and future fallback use.
     /// The actor pipeline in `run_timed_with_extractor` uses
-    /// `run_commit_owned` instead.
+    /// `actor::run_commit_owned` instead.
     #[allow(dead_code)]
     async fn run_commit_timed(
         &self,
@@ -414,7 +305,7 @@ impl Coordinator {
         // Accumulate diff metrics for inflation-ratio diagnostic.
         for rec in &records {
             result.total_diff_bytes += rec.diff_text.len() as u64;
-            result.total_added_lines += count_added_lines_stage(&rec.diff_text);
+            result.total_added_lines += actor::count_added_lines(&rec.diff_text);
         }
         result.new_hunks += records.len();
 
@@ -468,101 +359,6 @@ impl Coordinator {
         // Stage 5: persist.
         PersistStage::run(repo, commit, embed_output, self.storage.as_ref()).await
     }
-}
-
-/// Free async function that runs stages 2-5 for a single commit.
-/// Used by the actor worker tasks spawned in `run_timed_with_extractor`.
-/// The walker has already done the `commit_exists` check, so it is not
-/// repeated here.
-#[allow(clippy::too_many_arguments)]
-async fn run_commit_owned(
-    storage: Arc<dyn Storage + Send + Sync>,
-    embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
-    embed_batch: usize,
-    embed_mode: crate::EmbedMode,
-    cache_storage: Option<Arc<dyn crate::Storage>>,
-    ignore_filter: Option<Arc<dyn crate::IgnoreFilter>>,
-    repo: RepoId,
-    commit: CommitMeta,
-    commit_source: Arc<dyn CommitSource>,
-    symbol_source: Arc<dyn SymbolSource>,
-    extractor: Arc<dyn AtomicSymbolExtractor>,
-) -> Result<CommitWorkResult> {
-    // Stage 2: hunk chunk (timed).
-    let extract_start = Instant::now();
-    let mut records = HunkChunkStage::run(commit_source.as_ref(), &commit).await?;
-    let diff_extract_ms = extract_start.elapsed().as_millis() as u64;
-
-    // Plan 26: drop ignored paths before downstream stages.
-    let paths_total = records.len();
-    if let Some(filter) = ignore_filter.as_ref() {
-        records.retain(|r| !filter.is_ignored(&r.file_path));
-    }
-    let paths_kept = records.len();
-    if paths_total > 0 && paths_kept == 0 {
-        tracing::debug!(
-            sha = %commit.commit_sha,
-            "plan-26: commit has 100% ignored paths; skipping (watermark advances)"
-        );
-        // Return an empty result — watermark advance happens in the caller
-        // via walk_last_sha; succeeded count is not incremented so
-        // result.new_commits stays correct.
-        return Ok(CommitWorkResult::default());
-    }
-
-    let mut new_hunks = 0usize;
-    let mut total_diff_bytes = 0u64;
-    let mut total_added_lines = 0u64;
-
-    for rec in &records {
-        total_diff_bytes += rec.diff_text.len() as u64;
-        total_added_lines += count_added_lines_stage(&rec.diff_text);
-    }
-    new_hunks += records.len();
-
-    // Stage 3: attribute.
-    let attributed = AttributeStage::run(
-        &records,
-        &commit.commit_sha,
-        commit_source.as_ref(),
-        symbol_source.as_ref(),
-        extractor.as_ref(),
-    )
-    .await?;
-
-    // Stage 4: embed (timed).
-    let mut embed_stage = EmbedStage::new(embedder)
-        .with_embed_batch(embed_batch)
-        .with_embed_mode(embed_mode);
-    if let Some(cache) = cache_storage.as_ref() {
-        embed_stage = embed_stage.with_cache(cache.clone());
-    }
-    let embed_start = Instant::now();
-    let embed_output = embed_stage.run(&commit.message, &attributed).await?;
-    let embed_ms = embed_start.elapsed().as_millis() as u64;
-
-    // Stage 5: persist (timed).
-    let write_start = Instant::now();
-    PersistStage::run(&repo, &commit, embed_output, storage.as_ref()).await?;
-    let storage_write_ms = write_start.elapsed().as_millis() as u64;
-
-    Ok(CommitWorkResult {
-        new_hunks,
-        total_diff_bytes,
-        total_added_lines,
-        persisted: true,
-        diff_extract_ms,
-        embed_ms,
-        storage_write_ms,
-    })
-}
-
-/// Count "+"-prefixed lines in a unified-diff snippet (excludes `+++` headers).
-fn count_added_lines_stage(diff_text: &str) -> u64 {
-    diff_text
-        .lines()
-        .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
-        .count() as u64
 }
 
 #[cfg(test)]
