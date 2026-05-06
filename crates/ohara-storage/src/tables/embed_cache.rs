@@ -9,8 +9,15 @@ use std::collections::HashMap;
 
 use crate::codec::vec_codec::{bytes_to_vec, vec_to_bytes};
 
+/// SQLite's default `SQLITE_MAX_VARIABLE_NUMBER` is 999. Chunk the
+/// `IN (…)` query to stay well below that limit.
+const BIND_BATCH_SIZE: usize = 500;
+
 /// Look up cached embeddings for a batch of `(content_hash, embed_model)`
 /// keys. Returns one map entry per hit; misses are absent.
+///
+/// Internally chunks `hashes` into batches of [`BIND_BATCH_SIZE`] to
+/// avoid exceeding SQLite's bind-variable limit on large commits.
 pub fn get_many(
     c: &Connection,
     hashes: &[ContentHash],
@@ -19,27 +26,29 @@ pub fn get_many(
     if hashes.is_empty() {
         return Ok(HashMap::new());
     }
-    let placeholders = vec!["?"; hashes.len()].join(",");
-    let sql = format!(
-        "SELECT content_hash, diff_emb FROM chunk_embed_cache \
-         WHERE embed_model = ? AND content_hash IN ({placeholders})"
-    );
-    let mut stmt = c.prepare(&sql)?;
-    let mut bindings: Vec<rusqlite::types::Value> = Vec::with_capacity(hashes.len() + 1);
-    bindings.push(rusqlite::types::Value::Text(embed_model.to_owned()));
-    for h in hashes {
-        bindings.push(rusqlite::types::Value::Text(h.as_str().to_owned()));
-    }
-    let rows = stmt.query_map(rusqlite::params_from_iter(&bindings), |row| {
-        let key: String = row.get(0)?;
-        let blob: Vec<u8> = row.get(1)?;
-        Ok((key, blob))
-    })?;
     let mut out = HashMap::with_capacity(hashes.len());
-    for r in rows {
-        let (key, blob) = r?;
-        let v = bytes_to_vec(&blob);
-        out.insert(ContentHash::from_hex(&key), v);
+    for chunk in hashes.chunks(BIND_BATCH_SIZE) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT content_hash, diff_emb FROM chunk_embed_cache \
+             WHERE embed_model = ? AND content_hash IN ({placeholders})"
+        );
+        let mut stmt = c.prepare(&sql)?;
+        let mut bindings: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() + 1);
+        bindings.push(rusqlite::types::Value::Text(embed_model.to_owned()));
+        for h in chunk {
+            bindings.push(rusqlite::types::Value::Text(h.as_str().to_owned()));
+        }
+        let rows = stmt.query_map(rusqlite::params_from_iter(&bindings), |row| {
+            let key: String = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            Ok((key, blob))
+        })?;
+        for r in rows {
+            let (key, blob) = r?;
+            let v = bytes_to_vec(&blob);
+            out.insert(ContentHash::from_hex(&key), v);
+        }
     }
     Ok(out)
 }
@@ -138,6 +147,40 @@ mod tests {
         assert_eq!(out.len(), 1);
         let got = out.get(&hash).unwrap();
         assert_eq!(got, &vec);
+    }
+
+    #[tokio::test]
+    async fn get_many_handles_more_hashes_than_sqlite_bind_limit() {
+        let storage = temp_storage().await;
+        let conn = storage.pool().get().await.unwrap();
+
+        // Insert 1500 entries (well above SQLITE_MAX_VARIABLE_NUMBER=999).
+        let hashes: Vec<ContentHash> = (0..1500)
+            .map(|i| ContentHash::from_hex(&format!("{:040x}", i)))
+            .collect();
+        let entries: Vec<(ContentHash, Vec<f32>)> = hashes
+            .iter()
+            .map(|h| (h.clone(), vec![0.0_f32; 4]))
+            .collect();
+        let model = "model".to_owned();
+        let model_for_put = model.clone();
+        conn.interact(move |c| put_many(c, &entries, &model_for_put))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let hashes_for_get = hashes.clone();
+        let model_for_get = model.clone();
+        let out = conn
+            .interact(move |c| get_many(c, &hashes_for_get, &model_for_get))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            out.len(),
+            1500,
+            "must return all 1500 entries despite chunking"
+        );
     }
 
     #[tokio::test]
