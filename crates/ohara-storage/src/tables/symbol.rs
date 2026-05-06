@@ -106,27 +106,7 @@ pub fn bm25_by_name(
     language: Option<&str>,
     since_unix: Option<i64>,
 ) -> Result<Vec<HunkHit>> {
-    let lang_filter = language.map(|_| "AND fp.language = :lang").unwrap_or("");
-    let ts_filter = since_unix.map(|_| "AND cr.ts >= :ts").unwrap_or("");
-
-    // SQLite's bm25() must be used in a SELECT that directly references the
-    // FTS5 virtual table; calling it inside an aggregate (e.g. MIN(bm25(t)))
-    // raises "unable to use function bm25 in the requested context". So we
-    // pull (hunk_id, bm25_score) one row per matched symbol, ordered by
-    // BM25 ASC, and dedup-by-first-seen in Rust before truncating to k.
-    let sql = format!(
-        "SELECT h.id, h.commit_sha, fp.path, fp.language, h.change_kind, h.diff_text,
-                cr.parent_sha, cr.is_merge, cr.author, cr.ts, cr.message,
-                bm25(fts_symbol_name) AS rank_score
-         FROM fts_symbol_name
-         JOIN symbol sym ON sym.id = fts_symbol_name.symbol_id
-         JOIN file_path fp ON fp.id = sym.file_path_id
-         JOIN hunk h ON h.file_path_id = fp.id
-         JOIN commit_record cr ON cr.sha = h.commit_sha
-         WHERE fts_symbol_name MATCH :query
-           {ts_filter} {lang_filter}
-         ORDER BY rank_score ASC"
-    );
+    let sql = build_bm25_sql(language, since_unix);
 
     let mut binds: Vec<(&str, Box<dyn rusqlite::ToSql>)> = Vec::new();
     binds.push((
@@ -162,6 +142,33 @@ pub fn bm25_by_name(
         }
     }
     Ok(out)
+}
+
+/// Build the BM25-by-symbol-name SQL string. Extracted so unit tests can
+/// pin invariants of the query (LIMIT clause, clause ordering) without
+/// having to construct an FTS5 fixture for every assertion.
+///
+/// SQLite's bm25() must be used in a SELECT that directly references the
+/// FTS5 virtual table; calling it inside an aggregate (e.g. MIN(bm25(t)))
+/// raises "unable to use function bm25 in the requested context". So we
+/// pull (hunk_id, bm25_score) one row per matched symbol, ordered by
+/// BM25 ASC, and dedup-by-first-seen in Rust before truncating to k.
+pub(crate) fn build_bm25_sql(language: Option<&str>, since_unix: Option<i64>) -> String {
+    let lang_filter = language.map(|_| "AND fp.language = :lang").unwrap_or("");
+    let ts_filter = since_unix.map(|_| "AND cr.ts >= :ts").unwrap_or("");
+    format!(
+        "SELECT h.id, h.commit_sha, fp.path, fp.language, h.change_kind, h.diff_text,
+                cr.parent_sha, cr.is_merge, cr.author, cr.ts, cr.message,
+                bm25(fts_symbol_name) AS rank_score
+         FROM fts_symbol_name
+         JOIN symbol sym ON sym.id = fts_symbol_name.symbol_id
+         JOIN file_path fp ON fp.id = sym.file_path_id
+         JOIN hunk h ON h.file_path_id = fp.id
+         JOIN commit_record cr ON cr.sha = h.commit_sha
+         WHERE fts_symbol_name MATCH :query
+           {ts_filter} {lang_filter}
+         ORDER BY rank_score ASC"
+    )
 }
 
 fn row_to_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<HunkHit> {
@@ -214,5 +221,42 @@ fn symbol_kind_to_str(k: &SymbolKind) -> &'static str {
         SymbolKind::Method => "method",
         SymbolKind::Class => "class",
         SymbolKind::Const => "const",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #57: the BM25-by-symbol-name SQL **MUST** carry a `LIMIT`
+    /// clause. Without it, SQLite's `TEMP B-TREE FOR ORDER BY`
+    /// materialises the full hunk-fan-out before Rust's
+    /// dedup-by-first-seen ever sees a row (thousands of rows for
+    /// hot-file queries). Pinning the literal in this regression
+    /// test catches future edits that drop the bound.
+    #[test]
+    fn bm25_sql_contains_limit_clause() {
+        let sql = build_bm25_sql(None, None);
+        assert!(
+            sql.contains("LIMIT"),
+            "BM25-by-symbol-name SQL must include a LIMIT clause to bound \
+             the temp B-tree fan-out (issue #57); got:\n{sql}"
+        );
+    }
+
+    /// Issue #57: the LIMIT must be applied **after** `ORDER BY` so the
+    /// rows we keep are the best-scoring ones, not an arbitrary
+    /// fan-out prefix. Pin the textual order so a future refactor
+    /// can't accidentally swap them.
+    #[test]
+    fn bm25_sql_orders_before_limit() {
+        let sql = build_bm25_sql(None, None);
+        let order_idx = sql.find("ORDER BY").expect("SQL contains ORDER BY clause");
+        let limit_idx = sql.find("LIMIT").expect("SQL contains LIMIT clause");
+        assert!(
+            order_idx < limit_idx,
+            "ORDER BY must precede LIMIT so SQLite returns the top-scoring \
+             rows; got order_idx={order_idx} limit_idx={limit_idx}\nSQL:\n{sql}"
+        );
     }
 }
