@@ -345,6 +345,7 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         ohara_embed::DEFAULT_RERANKER_ID,
         ohara_parse::CHUNKER_VERSION,
         ohara_parse::parser_versions(),
+        "semantic",
     );
 
     let indexer = Indexer::new(storage.clone(), embedder.clone())

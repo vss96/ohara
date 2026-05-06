@@ -23,6 +23,7 @@ pub fn current_runtime_metadata() -> RuntimeIndexMetadata {
         ohara_embed::DEFAULT_RERANKER_ID,
         ohara_parse::CHUNKER_VERSION,
         ohara_parse::parser_versions(),
+        "semantic",
     )
 }
 
@@ -181,6 +182,8 @@ mod tests {
                 "parser_versions missing language {lang}"
             );
         }
+        // Plan 27: status helper always reports "semantic" (default mode).
+        assert_eq!(m.embed_input_mode, "semantic");
     }
 
     #[test]

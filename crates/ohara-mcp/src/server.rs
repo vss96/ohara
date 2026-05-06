@@ -62,6 +62,7 @@ pub fn current_runtime_metadata() -> RuntimeIndexMetadata {
         ohara_embed::DEFAULT_RERANKER_ID,
         ohara_parse::CHUNKER_VERSION,
         ohara_parse::parser_versions(),
+        "semantic",
     )
 }
 

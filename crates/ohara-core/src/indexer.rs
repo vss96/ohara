@@ -944,6 +944,7 @@ mod phase_timing_tests {
             chunker_version: "1".into(),
             semantic_text_version: "0".into(),
             parser_versions: parsers,
+            embed_input_mode: "semantic".into(),
         }
     }
 
