@@ -17,9 +17,10 @@ use crate::codec::row_codec::{str_to_change_kind, upsert_file_path};
 ///
 /// The lane joins `fts_symbol_name` to every hunk that ever touched the
 /// matched symbol's file, so one matched symbol can fan out to hundreds
-/// of rows on hot files. The SQL aggregates per `hunk.id` (`GROUP BY`)
-/// so distinct-hunk selection happens at the SQL level and LIMIT bounds
-/// distinct hunks rather than fan-out rows; we still oversample by 10×
+/// of rows on hot files. The SQL picks the per-hunk best BM25 via
+/// `ROW_NUMBER() OVER (PARTITION BY h.id ...)` so distinct-hunk
+/// selection happens at the SQL level and LIMIT bounds distinct hunks
+/// rather than fan-out rows; we still oversample by 10×
 /// as defence-in-depth so the optional Rust-side dedup has slack if a
 /// future schema change reintroduces duplicates upstream of LIMIT.
 pub(crate) const SYMBOL_LANE_OVERSAMPLE: i64 = 10;
@@ -121,10 +122,10 @@ pub fn bm25_by_name(
     since_unix: Option<i64>,
 ) -> Result<Vec<HunkHit>> {
     let sql = build_bm25_sql(language, since_unix);
-    // The SQL groups by hunk_id, so LIMIT now bounds distinct hunks.
-    // We still oversample by `SYMBOL_LANE_OVERSAMPLE` as defence-in-depth
-    // for the Rust-side dedup below. Cast through i64 so
-    // u8::MAX * 10 (= 2550) cannot wrap.
+    // The SQL keeps row 1 per hunk (window function), so LIMIT now bounds
+    // distinct hunks. We still oversample by `SYMBOL_LANE_OVERSAMPLE` as
+    // defence-in-depth for the Rust-side dedup below. Cast through i64
+    // so u8::MAX * 10 (= 2550) cannot wrap.
     let k_oversample: i64 = i64::from(k) * SYMBOL_LANE_OVERSAMPLE;
 
     let mut binds: Vec<(&str, Box<dyn rusqlite::ToSql>)> = Vec::new();
@@ -147,12 +148,13 @@ pub fn bm25_by_name(
         .collect();
 
     let rows = stmt.query_map(bind_refs.as_slice(), row_to_hit)?;
-    // The CTE's `GROUP BY h.id` already guarantees one row per hunk, so
-    // this dedup pass is now defence-in-depth: it survives a future
-    // refactor that reintroduces duplicates above LIMIT (e.g. dropping
-    // the GROUP BY) without silently violating the one-hunk-per-row
-    // contract this lane's callers depend on. Cheap (HashSet over up
-    // to k_oversample i64s) so we keep it.
+    // The CTE's `WHERE rn = 1` (over `ROW_NUMBER() PARTITION BY h.id`)
+    // already guarantees one row per hunk, so this dedup pass is now
+    // defence-in-depth: it survives a future refactor that reintroduces
+    // duplicates above LIMIT (e.g. dropping the window function) without
+    // silently violating the one-hunk-per-row contract this lane's
+    // callers depend on. Cheap (HashSet over up to k_oversample i64s)
+    // so we keep it.
     let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut out = Vec::new();
     for r in rows {
