@@ -203,6 +203,63 @@ fn mode_mismatch_on_full_reindex_errors_with_rebuild_hint() {
     );
 }
 
+/// Issue #40: indexing with `--embed-cache=diff` and then running
+/// `ohara status` must not report `compatibility: needs rebuild` —
+/// the runtime-claimed `embed_input_mode` must match the on-disk mode.
+#[test]
+#[ignore = "downloads the embedding model on first run; opt in with --include-ignored"]
+fn diff_mode_status_reports_compatible_not_needs_rebuild() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo = dir.path();
+    let ohara_home = tempfile::tempdir().expect("OHARA_HOME tempdir");
+
+    Command::new("git").arg("init").arg(repo).output().unwrap();
+    write_file(
+        repo.join("src"),
+        "main.rs",
+        "fn main() { println!(\"hi\"); }\n",
+    );
+    git_add_all(repo);
+    git_commit(repo, "feat: initial");
+
+    let idx = Command::new(ohara_bin())
+        .env("OHARA_HOME", ohara_home.path())
+        .args(["index", "--embed-provider", "cpu", "--embed-cache", "diff"])
+        .arg(repo)
+        .output()
+        .unwrap();
+    assert!(
+        idx.status.success(),
+        "ohara index --embed-cache=diff failed: {}",
+        String::from_utf8_lossy(&idx.stderr)
+    );
+
+    let st = Command::new(ohara_bin())
+        .env("OHARA_HOME", ohara_home.path())
+        .arg("status")
+        .arg(repo)
+        .output()
+        .unwrap();
+    assert!(
+        st.status.success(),
+        "ohara status failed: {}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&st.stdout);
+    assert!(
+        stdout.contains("compatibility: compatible"),
+        "expected `compatibility: compatible` after indexing with --embed-cache=diff; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("needs rebuild"),
+        "status must NOT report `needs rebuild` for an internally-consistent diff-mode index; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("embed_cache: diff"),
+        "expected `embed_cache: diff` summary; got:\n{stdout}"
+    );
+}
+
 fn write_file(dir: std::path::PathBuf, name: &str, body: &str) {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(name), body).unwrap();

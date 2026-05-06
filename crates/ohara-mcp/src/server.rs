@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use ohara_core::embed::RerankProvider;
-use ohara_core::index_metadata::RuntimeIndexMetadata;
 use ohara_core::EmbeddingProvider;
 use ohara_engine::RetrievalEngine;
 use std::path::{Path, PathBuf};
@@ -50,20 +49,6 @@ impl OharaServer {
     pub async fn serve_stdio(self) -> Result<()> {
         crate::tools::serve(self).await
     }
-}
-
-/// Build the runtime compatibility expectation from the constants
-/// owned by `ohara-embed` / `ohara-parse`. Delegates to the canonical
-/// `ohara_core::index_metadata::runtime_metadata_from` helper.
-pub fn current_runtime_metadata() -> RuntimeIndexMetadata {
-    ohara_core::index_metadata::runtime_metadata_from(
-        ohara_embed::DEFAULT_MODEL_ID,
-        ohara_embed::DEFAULT_DIM as u32,
-        ohara_embed::DEFAULT_RERANKER_ID,
-        ohara_parse::CHUNKER_VERSION,
-        ohara_parse::parser_versions(),
-        "semantic",
-    )
 }
 
 /// Compose a single hint string from the freshness state and the

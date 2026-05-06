@@ -8,7 +8,7 @@ use crate::error::EngineError;
 use crate::handle::RepoHandle;
 use ohara_core::embed::RerankProvider;
 use ohara_core::explain::ExplainQuery;
-use ohara_core::index_metadata::{CompatibilityStatus, RuntimeIndexMetadata};
+use ohara_core::index_metadata::CompatibilityStatus;
 use ohara_core::query::{PatternQuery, ResponseMeta};
 use ohara_core::types::RepoId;
 use ohara_core::EmbeddingProvider;
@@ -334,26 +334,17 @@ impl RetrievalEngine {
     }
 }
 
-/// Build the [`RuntimeIndexMetadata`] expected by the current binary.
-///
-/// Passes the embed/parse constants into the canonical
-/// `ohara_core::index_metadata::runtime_metadata_from` helper so the
-/// construction logic lives in one place.
-fn current_runtime_metadata() -> RuntimeIndexMetadata {
-    ohara_core::index_metadata::runtime_metadata_from(
-        ohara_embed::DEFAULT_MODEL_ID,
-        ohara_embed::DEFAULT_DIM as u32,
-        ohara_embed::DEFAULT_RERANKER_ID,
-        ohara_parse::CHUNKER_VERSION,
-        ohara_parse::parser_versions(),
-        "semantic",
-    )
-}
-
 /// Compute a fresh [`ResponseMeta`] for `handle` by querying storage for
 /// index status and metadata, then assessing compatibility.
 ///
 /// Called on a MetaCache miss inside [`RetrievalEngine::find_pattern`].
+///
+/// Issue #40: query-time callers don't know the user's `--embed-cache`
+/// intent (no flag at query time), so we adopt the stored
+/// `embed_input_mode` for the runtime expectation when present. An
+/// internally-consistent `--embed-cache=diff` index then assesses as
+/// `Compatible`, not `NeedsRebuild`. Mirrors the same override in
+/// `ohara-cli`'s `status` command.
 async fn compose_response_meta(handle: &RepoHandle) -> crate::Result<ResponseMeta> {
     let behind = ohara_git::GitCommitsBehind::open(&handle.repo_path)
         .map_err(|e| EngineError::Git(format!("commits_behind open: {e}")))?;
@@ -361,12 +352,15 @@ async fn compose_response_meta(handle: &RepoHandle) -> crate::Result<ResponseMet
         ohara_core::query::compute_index_status(handle.storage.as_ref(), &handle.repo_id, &behind)
             .await
             .map_err(EngineError::from)?;
-    let runtime = current_runtime_metadata();
     let stored = handle
         .storage
         .get_index_metadata(&handle.repo_id)
         .await
         .map_err(EngineError::from)?;
+    let mut runtime = crate::current_runtime_metadata(ohara_core::EmbedMode::default());
+    if let Some(stored_mode) = stored.components.get("embed_input_mode") {
+        runtime.embed_input_mode = stored_mode.clone();
+    }
     let compatibility = CompatibilityStatus::assess(&runtime, &stored);
     let hint = ohara_core::index_metadata::compose_hint(&st, &compatibility);
     Ok(ResponseMeta {

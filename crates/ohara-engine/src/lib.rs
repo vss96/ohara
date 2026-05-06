@@ -11,6 +11,7 @@ mod error;
 mod handle;
 pub mod ipc;
 pub mod registry;
+mod runtime_metadata;
 pub mod server;
 
 pub use cache::BlameCache;
@@ -21,6 +22,7 @@ pub use engine::FindPatternResult;
 pub use engine::RetrievalEngine;
 pub use error::EngineError;
 pub use handle::RepoHandle;
+pub use runtime_metadata::current_runtime_metadata;
 pub use server::serve_unix;
 
 pub type Result<T> = std::result::Result<T, EngineError>;

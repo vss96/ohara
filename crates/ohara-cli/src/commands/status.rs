@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Args as ClapArgs;
 use ohara_core::index_metadata::{CompatibilityStatus, RuntimeIndexMetadata};
 use ohara_core::query::compute_index_status;
-use ohara_core::Storage;
+use ohara_core::{EmbedMode, Storage};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -13,18 +13,15 @@ pub struct Args {
 }
 
 /// Build the runtime compatibility expectation from the constants
-/// owned by `ohara-embed` / `ohara-parse`. Does NOT load the embedder
-/// — status must stay cheap. Delegates to the canonical
-/// `ohara_core::index_metadata::runtime_metadata_from`.
-pub fn current_runtime_metadata() -> RuntimeIndexMetadata {
-    ohara_core::index_metadata::runtime_metadata_from(
-        ohara_embed::DEFAULT_MODEL_ID,
-        ohara_embed::DEFAULT_DIM as u32,
-        ohara_embed::DEFAULT_RERANKER_ID,
-        ohara_parse::CHUNKER_VERSION,
-        ohara_parse::parser_versions(),
-        "semantic",
-    )
+/// owned by `ohara-embed` / `ohara-parse` for the given [`EmbedMode`].
+/// Does NOT load the embedder — status must stay cheap. Delegates to
+/// the canonical [`ohara_engine::current_runtime_metadata`].
+///
+/// Issue #40: `mode` flows through to
+/// [`EmbedMode::index_metadata_value`] so that `--embed-cache=diff`
+/// indexes don't get mis-flagged as `NeedsRebuild`.
+pub fn current_runtime_metadata(mode: EmbedMode) -> RuntimeIndexMetadata {
+    ohara_engine::current_runtime_metadata(mode)
 }
 
 /// Render `CompatibilityStatus` as a single line for `ohara status`,
@@ -98,7 +95,7 @@ pub async fn run(args: Args) -> Result<()> {
     let behind = ohara_git::GitCommitsBehind::open(&canonical)?;
     let st = compute_index_status(storage.as_ref(), &repo_id, &behind).await?;
 
-    let mut runtime = current_runtime_metadata();
+    let mut runtime = current_runtime_metadata(EmbedMode::default());
     let stored = storage.get_index_metadata(&repo_id).await?;
     // Plan 27: ohara status has no --embed-cache flag, so it can't
     // know the user's intent. Adopt the stored mode for assessment
@@ -210,7 +207,7 @@ mod tests {
         // expectation without loading the embedder model. This test
         // pins that the helper sources every value from a constant
         // (no I/O, no model download).
-        let m = current_runtime_metadata();
+        let m = current_runtime_metadata(ohara_core::EmbedMode::Semantic);
         assert_eq!(m.schema_version, ohara_core::index_metadata::SCHEMA_VERSION);
         assert_eq!(m.embedding_model, ohara_embed::DEFAULT_MODEL_ID);
         assert_eq!(m.embedding_dimension, ohara_embed::DEFAULT_DIM as u32);
@@ -227,13 +224,28 @@ mod tests {
                 "parser_versions missing language {lang}"
             );
         }
-        // Plan 27: status helper always reports "semantic" (default mode).
-        assert_eq!(m.embed_input_mode, "semantic");
+        // Issue #40: helper must report the mode it was given, not a hardcoded literal.
+        assert_eq!(
+            m.embed_input_mode,
+            ohara_core::EmbedMode::Semantic.index_metadata_value()
+        );
+    }
+
+    #[test]
+    fn current_runtime_metadata_reports_diff_mode_when_requested() {
+        // Issue #40 regression: passing EmbedMode::Diff must yield the
+        // "diff" string, not the previously-hardcoded "semantic".
+        let m = current_runtime_metadata(ohara_core::EmbedMode::Diff);
+        assert_eq!(
+            m.embed_input_mode,
+            ohara_core::EmbedMode::Diff.index_metadata_value()
+        );
+        assert_eq!(m.embed_input_mode, "diff");
     }
 
     #[test]
     fn assess_against_complete_stored_metadata_is_compatible() {
-        let runtime = current_runtime_metadata();
+        let runtime = current_runtime_metadata(ohara_core::EmbedMode::Semantic);
         let stored = stored_complete_for(&runtime);
         assert_eq!(
             CompatibilityStatus::assess(&runtime, &stored),
@@ -243,7 +255,7 @@ mod tests {
 
     #[test]
     fn assess_with_dimension_mismatch_is_needs_rebuild() {
-        let runtime = current_runtime_metadata();
+        let runtime = current_runtime_metadata(ohara_core::EmbedMode::Semantic);
         let mut stored = stored_complete_for(&runtime);
         stored
             .components
@@ -257,7 +269,7 @@ mod tests {
 
     #[test]
     fn assess_with_empty_stored_is_unknown() {
-        let runtime = current_runtime_metadata();
+        let runtime = current_runtime_metadata(ohara_core::EmbedMode::Semantic);
         let stored = StoredIndexMetadata::default();
         assert!(matches!(
             CompatibilityStatus::assess(&runtime, &stored),
@@ -270,7 +282,7 @@ mod tests {
         // Plan 27: when the stored embed_input_mode is "diff" and all other
         // components match runtime, adopting the stored mode before calling
         // assess must yield Compatible (not NeedsRebuild).
-        let mut runtime = current_runtime_metadata();
+        let mut runtime = current_runtime_metadata(ohara_core::EmbedMode::default());
         let mut stored = stored_complete_for(&runtime);
         // Simulate a user who indexed with --embed-cache=diff.
         stored

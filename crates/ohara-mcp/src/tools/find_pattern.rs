@@ -112,7 +112,15 @@ impl OharaService {
             .get_index_metadata(&handle.repo_id)
             .await
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        let runtime = crate::server::current_runtime_metadata();
+        // Issue #40: at query time we don't know the user's
+        // `--embed-cache` intent, so adopt the stored mode for the
+        // runtime expectation. An internally-consistent
+        // `--embed-cache=diff` index then assesses as Compatible
+        // rather than the previous false-positive NeedsRebuild.
+        let mut runtime = ohara_engine::current_runtime_metadata(ohara_core::EmbedMode::default());
+        if let Some(stored_mode) = stored.components.get("embed_input_mode") {
+            runtime.embed_input_mode = stored_mode.clone();
+        }
         let compatibility = CompatibilityStatus::assess(&runtime, &stored);
 
         if let CompatibilityStatus::NeedsRebuild { reason } = &compatibility {
@@ -242,7 +250,12 @@ impl OharaService {
             .get_index_metadata(&handle.repo_id)
             .await
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        let runtime = crate::server::current_runtime_metadata();
+        // Issue #40: adopt stored embed_input_mode so a
+        // `--embed-cache=diff` index isn't mis-flagged as NeedsRebuild.
+        let mut runtime = ohara_engine::current_runtime_metadata(ohara_core::EmbedMode::default());
+        if let Some(stored_mode) = stored.components.get("embed_input_mode") {
+            runtime.embed_input_mode = stored_mode.clone();
+        }
         let compatibility = CompatibilityStatus::assess(&runtime, &stored);
         let hint = crate::server::compose_hint(&st, &compatibility);
 
