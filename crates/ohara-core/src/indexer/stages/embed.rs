@@ -18,6 +18,8 @@ use std::sync::Arc;
 pub struct EmbedStage {
     embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
     embed_batch: usize,
+    embed_mode: crate::EmbedMode,
+    cache: Option<Arc<dyn crate::Storage>>,
 }
 
 /// Output of the embed stage for a single commit.
@@ -37,6 +39,8 @@ impl EmbedStage {
         Self {
             embedder,
             embed_batch: 32,
+            embed_mode: crate::EmbedMode::default(),
+            cache: None,
         }
     }
 
@@ -45,6 +49,22 @@ impl EmbedStage {
     /// more `embed_batch` calls per commit.
     pub fn with_embed_batch(mut self, n: usize) -> Self {
         self.embed_batch = n.max(1);
+        self
+    }
+
+    /// Set the embed mode. Off (default) means no cache lookups;
+    /// Semantic / Diff turn on the chunk-embed cache and (for Diff)
+    /// change the embedder input. Plan 27.
+    pub fn with_embed_mode(mut self, mode: crate::EmbedMode) -> Self {
+        self.embed_mode = mode;
+        self
+    }
+
+    /// Wire a `Storage` impl that backs the chunk embed cache. Only
+    /// consulted when `with_embed_mode` is set to Semantic or Diff.
+    /// Plan 27.
+    pub fn with_cache(mut self, storage: Arc<dyn crate::Storage>) -> Self {
+        self.cache = Some(storage);
         self
     }
 
@@ -75,26 +95,99 @@ impl EmbedStage {
             });
         }
 
-        // Build the full text list: commit message first, then hunks.
-        let mut texts: Vec<String> = Vec::with_capacity(attributed_hunks.len() + 1);
-        texts.push(commit_message.to_owned());
-        for ah in attributed_hunks {
-            texts.push(ah.effective_semantic_text().to_owned());
+        // Plan 27: compute embedder input per hunk based on mode.
+        //   Off / Semantic → effective_semantic_text
+        //   Diff           → record.diff_text  (drops commit message)
+        let mode = self.embed_mode;
+        let hunk_inputs: Vec<String> = attributed_hunks
+            .iter()
+            .map(|ah| match mode {
+                crate::EmbedMode::Diff => ah.record.diff_text.clone(),
+                _ => ah.effective_semantic_text().to_owned(),
+            })
+            .collect();
+
+        // Cache lookup (mode != Off and cache is wired).
+        let model_id = self.embedder.model_id().to_owned();
+        let cached: std::collections::HashMap<crate::types::ContentHash, Vec<f32>> =
+            match (mode, self.cache.as_ref()) {
+                (crate::EmbedMode::Off, _) | (_, None) => std::collections::HashMap::new(),
+                (_, Some(cache)) => {
+                    let hashes: Vec<crate::types::ContentHash> = hunk_inputs
+                        .iter()
+                        .map(|s| crate::types::ContentHash::from_text(s))
+                        .collect();
+                    cache.embed_cache_get_many(&hashes, &model_id).await?
+                }
+            };
+
+        // Build the text batch: commit message at index 0, then only
+        // the hunk inputs that missed the cache.  Deduplicate within
+        // the batch by hash so identical inputs (e.g. same diff_text in
+        // Diff mode) are embedded only once per commit.
+        let mut batch_texts: Vec<String> = Vec::with_capacity(hunk_inputs.len() + 1);
+        batch_texts.push(commit_message.to_owned());
+        // Maps content-hash → batch index (1-based, after commit msg).
+        let mut hash_to_batch_idx: std::collections::HashMap<crate::types::ContentHash, usize> =
+            std::collections::HashMap::new();
+        for input in &hunk_inputs {
+            let hash = crate::types::ContentHash::from_text(input);
+            if cached.contains_key(&hash) || hash_to_batch_idx.contains_key(&hash) {
+                continue;
+            }
+            let idx = batch_texts.len(); // position in batch_texts
+            hash_to_batch_idx.insert(hash, idx);
+            batch_texts.push(input.clone());
         }
 
-        // Chunked embedding (plan-15 knob).
-        let all_embs = self.embed_in_chunks(&texts).await?;
-
-        let (commit_vec, hunk_vecs) = all_embs.split_first().ok_or_else(|| {
+        // Embed the batch (commit message + unique misses).
+        let all_embs = self.embed_in_chunks(&batch_texts).await?;
+        let (commit_vec, miss_vecs) = all_embs.split_first().ok_or_else(|| {
             OhraError::Embedding("embed_batch returned empty for non-empty input".into())
         })?;
+        if miss_vecs.len() != hash_to_batch_idx.len() {
+            return Err(OhraError::Embedding(format!(
+                "miss vector count {} != unique miss count {}",
+                miss_vecs.len(),
+                hash_to_batch_idx.len()
+            )));
+        }
 
-        let hunks = attributed_hunks
+        // Write misses back to the cache.
+        if mode != crate::EmbedMode::Off {
+            if let Some(cache) = self.cache.as_ref() {
+                let entries: Vec<(crate::types::ContentHash, Vec<f32>)> = hash_to_batch_idx
+                    .iter()
+                    .map(|(hash, &batch_idx)| {
+                        // batch_idx is 1-based (0 = commit msg), so subtract 1 for miss_vecs index.
+                        (hash.clone(), miss_vecs[batch_idx - 1].clone())
+                    })
+                    .collect();
+                cache.embed_cache_put_many(&entries, &model_id).await?;
+            }
+        }
+
+        // Assemble final EmbeddedHunk list in original input order.
+        // For each hunk, resolve its embedding from: cache hit, or
+        // the batch result (looked up by content-hash → batch_idx).
+        let hunks: Vec<EmbeddedHunk> = attributed_hunks
             .iter()
-            .zip(hunk_vecs.iter())
-            .map(|(ah, emb)| EmbeddedHunk {
-                attributed: ah.clone(),
-                embedding: emb.clone(),
+            .zip(hunk_inputs.iter())
+            .map(|(ah, input)| {
+                let hash = crate::types::ContentHash::from_text(input);
+                let embedding = match cached.get(&hash) {
+                    Some(v) => v.clone(),
+                    None => {
+                        let batch_idx = hash_to_batch_idx
+                            .get(&hash)
+                            .expect("invariant: every miss hash has a batch index");
+                        miss_vecs[batch_idx - 1].clone()
+                    }
+                };
+                EmbeddedHunk {
+                    attributed: ah.clone(),
+                    embedding,
+                }
             })
             .collect();
 
@@ -145,6 +238,9 @@ mod tests {
     use crate::Result;
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
+
+    // InMemoryCacheStorage lives in test_helpers to keep this file ≤ 500 lines.
+    use super::super::test_helpers::InMemoryCacheStorage;
 
     fn attributed(text: &str) -> AttributedHunk {
         AttributedHunk {
@@ -236,5 +332,127 @@ mod tests {
                 "embedding must have dimension {dim}"
             );
         }
+    }
+
+    /// Embedder fake that records the texts it received per call. Used
+    /// to assert that `Diff` mode changes the embedder input.
+    struct RecordingEmbedder {
+        seen: Arc<Mutex<Vec<Vec<String>>>>,
+        dim: usize,
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for RecordingEmbedder {
+        fn dimension(&self) -> usize {
+            self.dim
+        }
+        fn model_id(&self) -> &str {
+            "recorder"
+        }
+        async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            self.seen.lock().unwrap().push(texts.to_vec());
+            Ok(texts.iter().map(|_| vec![0.0_f32; self.dim]).collect())
+        }
+    }
+
+    fn attributed_with_diff(diff: &str, semantic: &str) -> AttributedHunk {
+        AttributedHunk {
+            record: HunkRecord {
+                commit_sha: "abc".into(),
+                file_path: "f.rs".into(),
+                diff_text: diff.into(),
+                semantic_text: semantic.into(),
+                source_hunk: Hunk::default(),
+            },
+            symbols: None,
+            attributed_semantic_text: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn diff_mode_feeds_diff_text_to_embedder_not_semantic_text() {
+        // Plan 27 Task C.3: in Diff mode the embedder receives
+        // diff_text, not the commit-message-prefixed semantic_text.
+        // The cache key is sha256(diff_text), so two hunks with
+        // identical diff_text but different semantic_text produce a
+        // single embed call for the second hunk.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let embedder = Arc::new(RecordingEmbedder {
+            seen: seen.clone(),
+            dim: 4,
+        });
+        // Use the InMemoryCacheStorage from test_helpers (added in C.2).
+        let cache: Arc<dyn crate::Storage> =
+            Arc::new(super::super::test_helpers::InMemoryCacheStorage::default());
+        let stage = EmbedStage::new(embedder.clone())
+            .with_embed_mode(crate::EmbedMode::Diff)
+            .with_cache(cache.clone());
+
+        // Two hunks: identical diff_text, distinct semantic_text.
+        let hunks = vec![
+            attributed_with_diff("+let x = 1;\n", "msg one\n\n+let x = 1;\n"),
+            attributed_with_diff("+let x = 1;\n", "msg two\n\n+let x = 1;\n"),
+        ];
+        let _ = stage.run("commit msg", &hunks).await.unwrap();
+
+        // The first call should contain commit_msg + the diff_text
+        // ONCE (the second hunk's diff_text matches the first → cache
+        // hit → not in batch).
+        let calls = seen.lock().unwrap().clone();
+        let total_seen: Vec<&String> = calls.iter().flatten().collect();
+        let diff_count = total_seen
+            .iter()
+            .filter(|s| s.contains("+let x = 1;"))
+            .count();
+        assert_eq!(
+            diff_count, 1,
+            "Diff mode should embed identical diff_text only once, got {diff_count}: {calls:?}"
+        );
+
+        // The embedder must NOT have seen the prefixed semantic_text
+        // in Diff mode.
+        let saw_semantic = total_seen
+            .iter()
+            .any(|s| s.contains("msg one") || s.contains("msg two"));
+        assert!(
+            !saw_semantic,
+            "Diff mode should not feed semantic_text to embedder: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_mode_second_run_reuses_cached_vectors_and_skips_embed() {
+        // Plan 27 Task C.2: with EmbedMode::Semantic + a cache, the
+        // first call embeds normally and writes to the cache; the
+        // second call with the same hunks must hit the cache and call
+        // embed_batch only for the commit message.
+        let calls = Arc::new(Mutex::new(Vec::<usize>::new()));
+        let embedder = Arc::new(CountingEmbedder {
+            calls: calls.clone(),
+            dim: 4,
+        });
+        let cache: Arc<dyn crate::Storage> = Arc::new(InMemoryCacheStorage::default());
+        let stage = EmbedStage::new(embedder.clone())
+            .with_embed_mode(crate::EmbedMode::Semantic)
+            .with_cache(cache.clone());
+
+        let hunks = vec![attributed("hunk one"), attributed("hunk two")];
+        let _ = stage.run("commit msg", &hunks).await.unwrap();
+
+        // First run: 1 commit message + 2 hunks = 3 inputs.
+        let observed = calls.lock().unwrap().clone();
+        let total_first: usize = observed.iter().sum();
+        assert_eq!(total_first, 3, "first run must embed 3 texts: {observed:?}");
+
+        // Second run with identical hunks: only the commit message
+        // should be embedded (commit messages are not cached). The
+        // two hunks must be served from cache.
+        let _ = stage.run("commit msg", &hunks).await.unwrap();
+        let after = calls.lock().unwrap().clone();
+        let total_second: usize = after.iter().sum::<usize>() - total_first;
+        assert_eq!(
+            total_second, 1,
+            "second run must embed only 1 text (commit msg): added {total_second} after first run"
+        );
     }
 }

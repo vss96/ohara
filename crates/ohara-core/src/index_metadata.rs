@@ -50,6 +50,10 @@ pub struct RuntimeIndexMetadata {
     /// `language -> parser_version` for every language the binary
     /// can index. Stored under `parser_<language>` component keys.
     pub parser_versions: BTreeMap<String, String>,
+    /// Plan 27: which input the embedder consumes. `"semantic"` (Off or
+    /// Semantic mode — vector-equivalent) or `"diff"` (Diff mode).
+    /// Mismatch on resume forces a `NeedsRebuild` assessment.
+    pub embed_input_mode: String,
 }
 
 impl RuntimeIndexMetadata {
@@ -70,6 +74,7 @@ impl RuntimeIndexMetadata {
                 "semantic_text_version".into(),
                 self.semantic_text_version.clone(),
             ),
+            ("embed_input_mode".into(), self.embed_input_mode.clone()),
         ];
         for (lang, ver) in &self.parser_versions {
             out.push((format!("parser_{lang}"), ver.clone()));
@@ -132,12 +137,16 @@ impl CompatibilityStatus {
         //    migrations are append-only and additive, so a schema bump
         //    needs a refresh to populate the new columns / tables, not
         //    a vector rebuild.
-        let vector_affecting: [(&str, String); 2] = [
+        // Plan 27: embed_input_mode is vector-affecting because switching
+        // from "semantic" to "diff" (or vice-versa) produces incompatible
+        // embeddings — every stored vector would be wrong.
+        let vector_affecting: [(&str, String); 3] = [
             ("embedding_model", runtime.embedding_model.clone()),
             (
                 "embedding_dimension",
                 runtime.embedding_dimension.to_string(),
             ),
+            ("embed_input_mode", runtime.embed_input_mode.clone()),
         ];
         let mut missing: Vec<String> = Vec::new();
         for (key, expected) in &vector_affecting {
@@ -209,12 +218,15 @@ impl CompatibilityStatus {
 /// * `reranker_model` — stable reranker model id (e.g. `"bge-reranker-base"`).
 /// * `chunker_version` — `ohara_parse::CHUNKER_VERSION`.
 /// * `parser_versions` — `ohara_parse::parser_versions()`.
+/// * `embed_input_mode` — `EmbedMode::index_metadata_value()` (plan 27):
+///   `"semantic"` for Off/Semantic mode, `"diff"` for Diff mode.
 pub fn runtime_metadata_from(
     embedding_model: impl Into<String>,
     embedding_dimension: u32,
     reranker_model: impl Into<String>,
     chunker_version: impl Into<String>,
     parser_versions: BTreeMap<String, String>,
+    embed_input_mode: impl Into<String>,
 ) -> RuntimeIndexMetadata {
     RuntimeIndexMetadata {
         schema_version: SCHEMA_VERSION.to_string(),
@@ -224,6 +236,7 @@ pub fn runtime_metadata_from(
         chunker_version: chunker_version.into(),
         semantic_text_version: SEMANTIC_TEXT_VERSION.to_string(),
         parser_versions,
+        embed_input_mode: embed_input_mode.into(),
     }
 }
 
@@ -285,7 +298,13 @@ mod tests {
             chunker_version: "1".to_string(),
             semantic_text_version: "1".to_string(),
             parser_versions: parsers,
+            embed_input_mode: "semantic".to_string(),
         }
+    }
+
+    /// Alias used by the plan-27 regression test.
+    fn current_runtime_metadata_for_test() -> RuntimeIndexMetadata {
+        runtime_baseline()
     }
 
     fn stored_complete(runtime: &RuntimeIndexMetadata) -> StoredIndexMetadata {
@@ -302,10 +321,17 @@ mod tests {
             "semantic_text_version".into(),
             runtime.semantic_text_version.clone(),
         );
+        components.insert("embed_input_mode".into(), runtime.embed_input_mode.clone());
         for (lang, ver) in &runtime.parser_versions {
             components.insert(format!("parser_{lang}"), ver.clone());
         }
         StoredIndexMetadata { components }
+    }
+
+    /// Alias for the plan-27 regression test (matches the name used in
+    /// the task description to make the test easier to read).
+    fn stored_complete_for(runtime: &RuntimeIndexMetadata) -> StoredIndexMetadata {
+        stored_complete(runtime)
     }
 
     #[test]
@@ -493,6 +519,7 @@ mod tests {
             "bge-reranker-base",
             "2",
             parsers.clone(),
+            "semantic",
         );
         assert_eq!(meta.embedding_model, "bge-small-en-v1.5");
         assert_eq!(meta.embedding_dimension, 384);
@@ -500,5 +527,25 @@ mod tests {
         assert_eq!(meta.chunker_version, "2");
         assert_eq!(meta.parser_versions, parsers);
         assert_eq!(meta.schema_version, SCHEMA_VERSION);
+        assert_eq!(meta.embed_input_mode, "semantic");
+    }
+
+    #[test]
+    fn assess_mode_mismatch_is_needs_rebuild() {
+        // Plan 27 Task D.2: switching from semantic to diff mode (or
+        // vice versa) on --incremental must trigger NeedsRebuild.
+        let mut runtime = current_runtime_metadata_for_test();
+        runtime.embed_input_mode = "diff".into();
+        let stored = stored_complete_for(&runtime);
+        // Now flip stored to "semantic" and reassess.
+        let mut stored_semantic = stored.clone();
+        stored_semantic
+            .components
+            .insert("embed_input_mode".into(), "semantic".into());
+        let assessment = CompatibilityStatus::assess(&runtime, &stored_semantic);
+        assert!(
+            matches!(assessment, CompatibilityStatus::NeedsRebuild { .. }),
+            "expected NeedsRebuild, got {assessment:?}"
+        );
     }
 }

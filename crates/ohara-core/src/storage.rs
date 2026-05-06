@@ -115,6 +115,13 @@ pub struct HunkHit {
     pub similarity: f32,
 }
 
+/// Plan 27: snapshot of the chunk_embed_cache state for `ohara status`.
+#[derive(Debug, Clone, Default)]
+pub struct EmbedCacheStats {
+    pub row_count: u64,
+    pub total_bytes: u64,
+}
+
 #[async_trait]
 pub trait Storage: Send + Sync {
     // --- Repo lifecycle ---
@@ -270,6 +277,46 @@ pub trait Storage: Send + Sync {
     /// Record that `(blob_sha, embedding_model)` has been embedded.
     /// Idempotent on the pair.
     async fn record_blob_seen(&self, blob_sha: &str, embedding_model: &str) -> Result<()>;
+
+    // --- Chunk-level embed cache (plan 27) ---
+
+    /// Plan 27: chunk-level embed cache. Look up cached vectors for
+    /// `hashes` under the given `embed_model`. Returns a map keyed by
+    /// the `ContentHash` values that hit; misses are simply absent
+    /// from the map.
+    ///
+    /// Default impl returns an empty map — appropriate for in-memory
+    /// test storages that don't carry a cache. `SqliteStorage`
+    /// overrides with a real batched SELECT.
+    async fn embed_cache_get_many(
+        &self,
+        hashes: &[crate::types::ContentHash],
+        embed_model: &str,
+    ) -> Result<std::collections::HashMap<crate::types::ContentHash, Vec<f32>>> {
+        let _ = (hashes, embed_model);
+        Ok(std::collections::HashMap::new())
+    }
+
+    /// Plan 27: read-only stats over the chunk_embed_cache. Default
+    /// returns an all-zero snapshot for in-memory storages.
+    async fn embed_cache_stats(&self) -> Result<EmbedCacheStats> {
+        Ok(EmbedCacheStats::default())
+    }
+
+    /// Plan 27: chunk-level embed cache write. Insert one row per
+    /// `(hash, model)` pair (composite primary key). Re-insertion of
+    /// an existing key is a no-op via `INSERT OR IGNORE`.
+    ///
+    /// Default impl is a no-op. `SqliteStorage` overrides with a
+    /// real batched INSERT.
+    async fn embed_cache_put_many(
+        &self,
+        entries: &[(crate::types::ContentHash, Vec<f32>)],
+        embed_model: &str,
+    ) -> Result<()> {
+        let _ = (entries, embed_model);
+        Ok(())
+    }
 
     // --- Explain support ---
 

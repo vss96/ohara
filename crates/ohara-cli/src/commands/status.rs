@@ -23,6 +23,7 @@ pub fn current_runtime_metadata() -> RuntimeIndexMetadata {
         ohara_embed::DEFAULT_RERANKER_ID,
         ohara_parse::CHUNKER_VERSION,
         ohara_parse::parser_versions(),
+        "semantic",
     )
 }
 
@@ -55,6 +56,23 @@ pub fn render_ignore_summary(builtins: usize, gitattrs: usize, user: usize) -> S
     )
 }
 
+/// Plan 27: render the embed-cache summary line for `ohara status`,
+/// or None when the cache is empty (line is omitted entirely).
+pub fn render_embed_cache_summary(
+    mode: &str,
+    stats: &ohara_core::storage::EmbedCacheStats,
+) -> Option<String> {
+    if stats.row_count == 0 {
+        return None;
+    }
+    Some(format!(
+        "embed_cache: {} ({} cached vectors / {} KB)",
+        mode,
+        stats.row_count,
+        stats.total_bytes / 1024
+    ))
+}
+
 fn count_ignore_layers(repo_root: &std::path::Path) -> (usize, usize, usize) {
     let builtins = ohara_core::BUILT_IN_DEFAULTS.len();
     let gitattrs = std::fs::read_to_string(repo_root.join(".gitattributes"))
@@ -80,8 +98,17 @@ pub async fn run(args: Args) -> Result<()> {
     let behind = ohara_git::GitCommitsBehind::open(&canonical)?;
     let st = compute_index_status(storage.as_ref(), &repo_id, &behind).await?;
 
-    let runtime = current_runtime_metadata();
+    let mut runtime = current_runtime_metadata();
     let stored = storage.get_index_metadata(&repo_id).await?;
+    // Plan 27: ohara status has no --embed-cache flag, so it can't
+    // know the user's intent. Adopt the stored mode for assessment
+    // so an internally-consistent index doesn't false-alarm as
+    // NeedsRebuild. The compatibility check inside `ohara index`
+    // uses the *requested* mode and remains the source of truth for
+    // mode-switch detection.
+    if let Some(stored_mode) = stored.components.get("embed_input_mode") {
+        runtime.embed_input_mode = stored_mode.clone();
+    }
     let compatibility = CompatibilityStatus::assess(&runtime, &stored);
 
     println!(
@@ -95,6 +122,17 @@ pub async fn run(args: Args) -> Result<()> {
     );
     let (b, g, u) = count_ignore_layers(&canonical);
     println!("{}", render_ignore_summary(b, g, u));
+    let cache_stats = storage.embed_cache_stats().await?;
+    if let Some(line) = render_embed_cache_summary(
+        stored
+            .components
+            .get("embed_input_mode")
+            .map(|s| s.as_str())
+            .unwrap_or("(unset)"),
+        &cache_stats,
+    ) {
+        println!("{line}");
+    }
     Ok(())
 }
 
@@ -181,6 +219,8 @@ mod tests {
                 "parser_versions missing language {lang}"
             );
         }
+        // Plan 27: status helper always reports "semantic" (default mode).
+        assert_eq!(m.embed_input_mode, "semantic");
     }
 
     #[test]
@@ -218,6 +258,27 @@ mod tests {
     }
 
     #[test]
+    fn assess_with_stored_diff_mode_is_compatible_after_override() {
+        // Plan 27: when the stored embed_input_mode is "diff" and all other
+        // components match runtime, adopting the stored mode before calling
+        // assess must yield Compatible (not NeedsRebuild).
+        let mut runtime = current_runtime_metadata();
+        let mut stored = stored_complete_for(&runtime);
+        // Simulate a user who indexed with --embed-cache=diff.
+        stored
+            .components
+            .insert("embed_input_mode".into(), "diff".into());
+        // Apply the same override that run() does.
+        if let Some(stored_mode) = stored.components.get("embed_input_mode") {
+            runtime.embed_input_mode = stored_mode.clone();
+        }
+        assert_eq!(
+            CompatibilityStatus::assess(&runtime, &stored),
+            CompatibilityStatus::Compatible
+        );
+    }
+
+    #[test]
     fn render_ignore_summary_counts_by_layer() {
         // Plan 26 Task E.1: a one-line summary of the active filter.
         let s = render_ignore_summary(
@@ -233,5 +294,23 @@ mod tests {
     fn render_ignore_summary_zero_user_no_gitattrs_still_prints() {
         let s = render_ignore_summary(18, 0, 0);
         assert!(s.contains("18 patterns"), "got: {s}");
+    }
+
+    #[test]
+    fn render_embed_cache_summary_omits_when_empty() {
+        let stats = ohara_core::storage::EmbedCacheStats::default();
+        assert_eq!(render_embed_cache_summary("semantic", &stats), None);
+    }
+
+    #[test]
+    fn render_embed_cache_summary_formats_kb() {
+        let stats = ohara_core::storage::EmbedCacheStats {
+            row_count: 100,
+            total_bytes: 153_600, // 150 KB
+        };
+        assert_eq!(
+            render_embed_cache_summary("diff", &stats),
+            Some("embed_cache: diff (100 cached vectors / 150 KB)".to_string())
+        );
     }
 }

@@ -330,6 +330,7 @@ async fn rerank_pool_sweep() -> Result<()> {
         embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Cpu),
         resources: ohara_cli::resources::ResourcesArg::Auto,
         embed_batch: None,
+        embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
     };
     ohara_cli::commands::index::run(index_args)
         .await

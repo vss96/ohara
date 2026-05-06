@@ -4,6 +4,7 @@
       "missing_components": [
         "embedding_model",
         "embedding_dimension",
+        "embed_input_mode",
         "schema",
         "chunker_version",
         "semantic_text_version",
@@ -17,7 +18,7 @@
       ],
       "status": "unknown"
     },
-    "hint": "Index not built. Run `ohara index` in this repo. Index has no recorded metadata for embedding_model, embedding_dimension, schema, chunker_version, semantic_text_version, reranker_model, parser_java, parser_javascript, parser_kotlin, parser_python, parser_rust, parser_typescript. Run `ohara index --force` to record current versions.",
+    "hint": "Index not built. Run `ohara index` in this repo. Index has no recorded metadata for embedding_model, embedding_dimension, embed_input_mode, schema, chunker_version, semantic_text_version, reranker_model, parser_java, parser_javascript, parser_kotlin, parser_python, parser_rust, parser_typescript. Run `ohara index --force` to record current versions.",
     "index_status": {
       "commits_behind_head": 1,
       "indexed_at": null,
