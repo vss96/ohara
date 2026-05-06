@@ -92,6 +92,15 @@ path = "embed_cache_sweep.rs"
 name = "index_bench"
 path = "index_bench.rs"
 
+[[test]]
+# Plan 28 Task E.1 — parallel-indexer --workers sweep. Runs `ohara
+# index` with --workers 1|2|4|8 and reports wall-time side-by-side.
+# `#[ignore]`'d; opt in via:
+#   cargo test -p ohara-perf-tests --release -- \
+#       --ignored parallel_indexer_sweep --nocapture
+name = "parallel_indexer_sweep"
+path = "parallel_indexer_sweep.rs"
+
 [dependencies]
 libc.workspace = true
 
