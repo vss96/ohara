@@ -53,9 +53,17 @@ pub async fn run(args: Args) -> Result<()> {
         elapsed.as_secs_f64()
     );
 
-    print_hotmap(&agg);
+    print!("\n{}", super::plan_summary::render_hotmap_bars(&agg, 20));
     let suggestions = suggest_patterns(&agg);
-    print_suggestions(&suggestions, agg.total_commits());
+    print_suggestions(&suggestions);
+    print!(
+        "\n{}",
+        super::plan_summary::render_plan_banner(
+            agg.total_commits(),
+            elapsed.as_millis() as u64,
+            suggestions.len(),
+        )
+    );
     print_gpu_hint();
 
     if !args.write {
@@ -82,26 +90,7 @@ pub async fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
-/// Print the top-N directories by commit share.
-fn print_hotmap(agg: &HotmapAggregator) {
-    let total = agg.total_commits().max(1);
-    let mut top: Vec<(&String, &u64)> = agg
-        .counts()
-        .iter()
-        .filter(|(k, _)| {
-            let slash_count = k.matches('/').count();
-            slash_count == 1 && k.ends_with('/')
-        })
-        .collect();
-    top.sort_by(|a, b| b.1.cmp(a.1));
-    println!("\ntop-level directories by commit share:");
-    for (k, count) in top.iter().take(20) {
-        let share = (**count as f64 / total as f64) * 100.0;
-        println!("  {:<40} {:>7} ({:>4.1}%)", k, count, share);
-    }
-}
-
-fn print_suggestions(suggestions: &[String], total: u64) {
+fn print_suggestions(suggestions: &[String]) {
     println!("\nproposed auto-generated section:");
     if suggestions.is_empty() {
         println!("  (no high-share top-level directories — nothing suggested)");
@@ -109,7 +98,6 @@ fn print_suggestions(suggestions: &[String], total: u64) {
     for s in suggestions {
         println!("  {s}");
     }
-    println!("\ntotal commits surveyed: {total}");
 }
 
 fn print_gpu_hint() {
