@@ -36,4 +36,30 @@ features = ["coreml"]
 # `.github/workflows/release.yml` with that scope. With `allow-dirty = ["ci"]`,
 # `dist generate` does not overwrite CI; remove `ci` from this list temporarily when
 # refreshing generated workflows from a newer cargo-dist, then restore the permissions.
+#
+# Manual maintenance required after each `dist generate` regen:
+#   1. `permissions: contents: write` → also add `workflows: write` (above).
+#   2. `runs-on: "ubuntu-22.04"` → `runs-on: "ubuntu-24.04"` for the four
+#      orchestration jobs (`plan`, `build-global-artifacts`, `host`,
+#      `announce`). These are not driven by `[dist.github-custom-runners]`
+#      below — that override only flows through `${{ matrix.runner }}` for
+#      `build-local-artifacts`. Keeping the orchestration jobs on 24.04
+#      matters because some of them run `dist host`, which loads the
+#      onnxruntime prebuilt for sanity checks.
 allow-dirty = ["ci"]
+
+# Override cargo-dist 0.31's `DEFAULT_LINUX_RUNNER = ubuntu-22.04`. The
+# rc.12 onnxruntime prebuilt that fastembed 5.13 transitively pulls
+# requires glibc ≥2.38 at runtime; ubuntu-22.04 (glibc 2.35) cannot
+# even link the workspace, so released binaries built there would
+# silently regress for end users on glibc-2.38+ distros. The static
+# runner swaps in `release.yml` (plan / build-global-artifacts / host /
+# announce) cover orchestration jobs only; this override is what
+# actually moves the binary-producing `build-local-artifacts` matrix
+# job to a glibc-2.39 host. Keep these in sync with `release.yml`'s
+# `runs-on:` lines.
+[dist.github-custom-runners.x86_64-unknown-linux-gnu]
+runner = "ubuntu-24.04"
+
+[dist.github-custom-runners.aarch64-unknown-linux-gnu]
+runner = "ubuntu-24.04-arm"
