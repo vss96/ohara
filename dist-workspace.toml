@@ -9,11 +9,15 @@ cargo-dist-version = "0.31.0"
 ci = "github"
 # The installers to generate for each app
 installers = ["shell"]
-# Target platforms to build apps for (Rust target-triple syntax)
+# Target platforms to build apps for (Rust target-triple syntax).
 # Windows is intentionally omitted: ort_sys (transitive via fastembed) fails to
 # link against MSVC's CRT on the standard runners. WSL users can use the Linux
 # x86_64 binary.
-targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
+# x86_64-apple-darwin is also omitted as of v0.9.0: ort 2.0.0-rc.12 ships its
+# CoreML-featured prebuilt as an Apple-Silicon-only xcframework, so there is
+# no Intel-Mac prebuilt download path. Intel Mac users build from source —
+# see README.md.
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
 # Where to host releases
 hosting = "github"
 # Ship an `<app>-update` helper script alongside the binaries so users

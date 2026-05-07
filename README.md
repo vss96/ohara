@@ -54,7 +54,14 @@ Pre-built binaries for macOS and Linux are published on each release:
     curl --proto '=https' --tlsv1.2 -LsSf https://github.com/vss96/ohara/releases/latest/download/ohara-cli-installer.sh | sh
     curl --proto '=https' --tlsv1.2 -LsSf https://github.com/vss96/ohara/releases/latest/download/ohara-mcp-installer.sh | sh
 
-Or grab a tarball directly from the [releases page](https://github.com/vss96/ohara/releases). Windows isn't supported yet (use WSL); see the [release notes](https://github.com/vss96/ohara/releases) for the current matrix.
+Or grab a tarball directly from the [releases page](https://github.com/vss96/ohara/releases). The released matrix is:
+
+- macOS: **Apple Silicon only** (`aarch64-apple-darwin`).
+- Linux: `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`.
+- Windows: not supported (use WSL).
+
+Intel Macs and Windows users build from source — see [Build from
+source](#build-from-source) below.
 
 > **Linux glibc baseline**: released binaries link against the
 > prebuilt `onnxruntime` shipped with `ort 2.0+` and require
@@ -62,6 +69,10 @@ Or grab a tarball directly from the [releases page](https://github.com/vss96/oha
 > Fedora 39+). On older distros (Ubuntu 22.04, Debian 12, RHEL 9),
 > build from source — see [Build from source](#build-from-source)
 > below.
+>
+> **Intel Macs (`x86_64-apple-darwin`)**: dropped from the released
+> matrix in v0.9.0 because ort 2.0.0-rc.12 ships its CoreML-featured
+> prebuilt as an Apple-Silicon-only xcframework. Build from source.
 
 ### Updating
 
