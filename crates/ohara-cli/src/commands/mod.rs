@@ -7,6 +7,7 @@ pub mod explain;
 pub mod index;
 pub mod init;
 pub mod plan;
+pub mod plan_summary;
 pub mod provider;
 pub mod query;
 pub mod serve;
