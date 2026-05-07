@@ -56,6 +56,13 @@ Pre-built binaries for macOS and Linux are published on each release:
 
 Or grab a tarball directly from the [releases page](https://github.com/vss96/ohara/releases). Windows isn't supported yet (use WSL); see the [release notes](https://github.com/vss96/ohara/releases) for the current matrix.
 
+> **Linux glibc baseline**: released binaries link against the
+> prebuilt `onnxruntime` shipped with `ort 2.0+` and require
+> **glibc ≥2.38** (Ubuntu 24.04+, Debian 13+, RHEL/Rocky 10+,
+> Fedora 39+). On older distros (Ubuntu 22.04, Debian 12, RHEL 9),
+> build from source — see [Build from source](#build-from-source)
+> below.
+
 ### Updating
 
 Self-update from the CLI:
