@@ -1,5 +1,19 @@
 # `ohara query`
 
+> **For interactive use, prefer the MCP server.** `ohara query` is a
+> one-off CLI entry point: each invocation re-loads the embedder and
+> reranker (~3s warm, ~25s cold first download). The MCP server
+> (`ohara-mcp`) loads those models once per session, so an MCP client
+> (Claude Code, Cursor, Codex, OpenCode) is the right surface for
+> repeated or interactive querying. See
+> [`find_pattern`](../tools/find_pattern.md) for the MCP equivalent.
+>
+> If you need warm-model CLI queries (no MCP client), run
+> `ohara serve` in the background — it keeps the embedder + reranker
+> loaded across `ohara query` invocations. The CLI itself is
+> intended for one-off scripted use — CI glue, ad-hoc `jq`
+> pipelines, debugging an index. See issue #60 for context.
+
 Run a `find_pattern` query from the command line. Useful for
 sanity-checking an index without going through an MCP client, and for
 piping ranked hits into `jq` for ad-hoc analysis.

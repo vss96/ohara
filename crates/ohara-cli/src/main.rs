@@ -38,7 +38,10 @@ enum Cmd {
     /// Survey a repo's history and write a `.oharaignore` with
     /// suggested skip patterns. Plan-26.
     Plan(commands::plan::Args),
-    /// Run a debug pattern query against an indexed repo.
+    /// Run a one-off pattern query against an indexed repo. For repeated
+    /// / interactive use, prefer the MCP server (`ohara-mcp`) — it loads
+    /// models once per session. For warm-model CLI queries without an MCP
+    /// client, run `ohara serve` in the background.
     Query(commands::query::Args),
     /// Print index status for a repo.
     Status(commands::status::Args),
