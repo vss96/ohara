@@ -17,6 +17,15 @@ const BAR_WIDTH: usize = 32;
 /// Always emits the header line. With an empty aggregator (or no
 /// top-level rows) only the header is produced — never panics on
 /// division by zero.
+/// Render the one-line closing banner for `ohara plan` — the analogue
+/// of `index_summary_human`'s header, e.g.
+/// `surveyed 12345 commits in 8.4s — 3 suggested ignore patterns`.
+/// Pluralises commits and patterns independently so the banner stays
+/// grammatical at all counts (including zero suggestions).
+pub fn render_plan_banner(_total_commits: u64, _elapsed_ms: u64, _suggestion_count: usize) -> String {
+    String::new()
+}
+
 pub fn render_hotmap_bars(agg: &HotmapAggregator, top_n: usize) -> String {
     let mut out = String::from("top-level directories by commit share:\n");
 
@@ -140,6 +149,61 @@ mod tests {
         assert!(
             !out.contains("vendor/"),
             "top_n=2 must drop the third-place row: {out}"
+        );
+    }
+
+    #[test]
+    fn render_plan_banner_pluralizes_commits_and_patterns() {
+        let singular = render_plan_banner(1, 1_000, 1);
+        assert!(
+            singular.contains("1 commit ") || singular.contains("1 commit\n") || singular.contains("1 commit "),
+            "singular commit form expected: {singular}"
+        );
+        assert!(
+            !singular.contains("1 commits"),
+            "singular must not pluralise 'commit': {singular}"
+        );
+        assert!(
+            singular.contains("1 suggested ignore pattern")
+                && !singular.contains("1 suggested ignore patterns"),
+            "singular pattern form expected: {singular}"
+        );
+
+        let plural = render_plan_banner(5, 1_000, 3);
+        assert!(
+            plural.contains("5 commits"),
+            "plural commits form expected: {plural}"
+        );
+        assert!(
+            plural.contains("3 suggested ignore patterns"),
+            "plural patterns form expected: {plural}"
+        );
+    }
+
+    #[test]
+    fn render_plan_banner_zero_suggestions_says_zero() {
+        let out = render_plan_banner(100, 1_000, 0);
+        assert!(
+            out.contains("0 suggested ignore patterns"),
+            "zero-suggestion banner expected: {out}"
+        );
+        assert!(
+            out.contains("100 commits"),
+            "commits count must still appear: {out}"
+        );
+    }
+
+    #[test]
+    fn render_plan_banner_uses_seconds_format_above_one_second() {
+        let above = render_plan_banner(10, 8_400, 2);
+        assert!(
+            above.contains("8.4s"),
+            "ms >= 1000 should render as seconds: {above}"
+        );
+        let below = render_plan_banner(10, 420, 2);
+        assert!(
+            below.contains("420ms"),
+            "ms < 1000 should render as ms: {below}"
         );
     }
 
