@@ -14,6 +14,8 @@ use clap::Args as ClapArgs;
 use ohara_git::GitWalker;
 use std::path::PathBuf;
 
+mod summary;
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(ClapArgs, Debug)]
