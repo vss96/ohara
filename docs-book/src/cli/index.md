@@ -85,11 +85,22 @@ ohara index --resources aggressive --commit-batch 1024   # explicit flag still w
 
 ## Output
 
-A summary line on stdout:
+A summary block on stdout — header line plus a per-phase bar chart
+sorted by descending wall-time, so the dominant stage leads:
 
 ```
-indexed: 132 new commits, 487 hunks, 1204 HEAD symbols
+indexed in 8.4s — 132 commits, 487 hunks, 1204 HEAD symbols
+
+  embed     6.1s  ████████████████████████████████   73%
+  storage   1.2s  ██████                             14%
+  diff      0.6s  ███                                 7%
+  parse     0.3s  ██                                  4%
+  symbols   0.1s  █                                   1%
+  fts       100ms                                    <1%
 ```
+
+Phases with zero recorded ms are omitted. Percentages are anchored to
+the wall-clock total.
 
 Plus structured tracing events on stderr (drive verbosity with
 `RUST_LOG`, e.g. `RUST_LOG=info`). With `--profile`, a JSON line
