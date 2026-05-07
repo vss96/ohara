@@ -10,11 +10,23 @@
 //! The lookup ranges are deliberately conservative until the v0.6
 //! Phase 2 baseline is populated (see `docs/perf/v0.6-baseline.md`):
 //!
-//! | logical cores | commit_batch | threads | provider |
-//! |---|---|---|---|
-//! | <8 | 128 | cores | auto |
-//! | 8..16 | 256 | cores | auto |
-//! | 16+ | 512 | cores | auto |
+//! | logical cores | commit_batch | embed_batch | threads | provider |
+//! |---|---|---|---|---|
+//! | <8 | 128 | 64 | cores | auto |
+//! | 8..16 | 256 | 128 | cores | auto |
+//! | 16+ | 512 | 256 | cores | auto |
+//!
+//! Issue #56: the per-tier `embed_batch` was retuned 16/32/64 → 64/128/256
+//! after a microbench (`tests/perf/embed_batch_micro.rs`) against
+//! BGE-small (the current default embedder) showed +30% steady-state
+//! throughput moving mid-tier from 32 → 128. The previous defaults
+//! under-fed fastembed's internal rayon-parallel batch (its own
+//! `DEFAULT_BATCH_SIZE` is 256) and incurred extra Mutex acquisitions
+//! per commit on the shared embedder. The retuned values keep
+//! `embed_batch <= commit_batch` so the chunking still bounds peak
+//! per-commit allocation; on workloads where peak RSS matters more
+//! than wall-time, `--resources conservative` halves these to 32/64/128
+//! and an explicit `--embed-batch` flag still wins outright.
 //!
 //! `conservative` halves the picked thread count and batch size;
 //! `aggressive` doubles them. Both still respect the explicit-flag
@@ -112,12 +124,14 @@ pub fn pick_resources(host: &Host) -> ResourcePlan {
     } else {
         512
     };
+    // Issue #56: bumped 16/32/64 → 64/128/256. See the module-level
+    // doc table for the rationale + measurement source.
     let embed_batch = if cores < 8 {
-        16
-    } else if cores < 16 {
-        32
-    } else {
         64
+    } else if cores < 16 {
+        128
+    } else {
+        256
     };
     ResourcePlan {
         commit_batch,
