@@ -8,6 +8,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-05-07
+
+Default embedder switched to the quantized BGE-small variant. Existing
+indexes will report `compatibility: needs rebuild` on the first
+`ohara status` after upgrade — re-run `ohara index --rebuild --yes` to
+rebuild against the new model. Released Linux binaries now require
+**glibc ≥2.38** (Ubuntu 24.04+, Debian 13+, RHEL/Rocky 10+,
+Fedora 39+); see the [README install section](README.md#install) for
+the build-from-source path on older distros.
+
+### Added
+
+- **Default embedder is now quantized BGE-small (`BGESmallENV15Q`).**
+  Released binaries link against `fastembed 5.13` / `ort 2.0.0-rc.12`,
+  which ships ONNX Runtime 1.24.2 — moving past the 1.20.0
+  `SkipLayerNormalization` regression that previously blocked the Q
+  variant. Identical recall/MRR/nDCG to full-precision on the existing
+  eval fixture (`recall_at_1=0.875, recall_at_5=1.0, mrr=0.9375,
+  ndcg_lite=0.954`). Index identity now keys on
+  `bge-small-en-v1.5-q`, so existing indexes correctly trigger the
+  `needs rebuild` flow
+  ([070557f](https://github.com/vss96/ohara/commit/070557f)) ([#71](https://github.com/vss96/ohara/pull/71)).
+
+### Changed
+
+- **`--resources auto` embed batch defaults bumped 4×** (16/32/64 →
+  64/128/256 across the conservative/auto/aggressive tiers). Microbench
+  shows ~30% indexing throughput gain on the auto tier (160 r/s →
+  208 r/s at batch=128). Root cause: fastembed's internal
+  `DEFAULT_BATCH_SIZE=256` + rayon `par_chunks` was under-fed at the
+  old defaults. Library `EmbedderBuilder` defaults are unchanged
+  ([94c0ce1](https://github.com/vss96/ohara/commit/94c0ce1)) ([#74](https://github.com/vss96/ohara/pull/74)).
+- **CI + release runners bumped to ubuntu-24.04** to handle the
+  ONNX Runtime 1.24.2 glibc 2.38+ requirement. `dist-workspace.toml`
+  carries a `[dist.github-custom-runners]` override so the
+  binary-producing `build-local-artifacts` matrix runs on 24.04 too,
+  not just the orchestration jobs
+  ([070557f](https://github.com/vss96/ohara/commit/070557f)) ([#71](https://github.com/vss96/ohara/pull/71)).
+
+### Documentation
+
+- **`ohara query` is documented as one-off-only**; for repeated /
+  interactive querying the docs now point at the MCP server
+  (`ohara-mcp`) and the `ohara serve` daemon (which already amortizes
+  model load across CLI invocations)
+  ([853160b](https://github.com/vss96/ohara/commit/853160b)) ([#68](https://github.com/vss96/ohara/pull/68)).
+
+### Internal
+
+- Ported a strict-distinguisher descending-sort test for the
+  `ohara plan` summary renderer from PR #70 (closed without merging
+  in favour of #69). The previous test's fixture happened to use names
+  whose alphabetical order matched count order, so an alphabetical-sort
+  regression would have slipped through; the ported variant
+  (`zoo`/`alpha`) is anti-alphabetical
+  ([9a30e19](https://github.com/vss96/ohara/commit/9a30e19)) ([#73](https://github.com/vss96/ohara/pull/73)).
+
 ## [0.8.4] - 2026-05-07
 
 ### Added
@@ -431,7 +488,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pin rmcp to `=0.1.5` for stable API surface ([9935c7b](https://github.com/vss96/ohara/commit/9935c7bf369d6a7ecce5366d38ef43186b762599))
 - Drop dead `OharaServer::embedder` field ([0acf38a](https://github.com/vss96/ohara/commit/0acf38a97c5c2d9f35bec7f37009088647898512))
 
-[Unreleased]: https://github.com/vss96/ohara/compare/v0.8.4...HEAD
+[Unreleased]: https://github.com/vss96/ohara/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/vss96/ohara/compare/v0.8.4...v0.9.0
 [0.8.4]: https://github.com/vss96/ohara/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/vss96/ohara/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/vss96/ohara/compare/v0.8.1...v0.8.2
