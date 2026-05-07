@@ -1,3 +1,15 @@
+//! `ohara query` — one-off CLI entry point for `find_pattern`.
+//!
+//! For repeated / interactive querying, prefer the MCP server
+//! (`ohara-mcp`): it keeps the embedder and reranker loaded across calls,
+//! whereas a fresh `ohara query` process pays the model-load cost on every
+//! invocation (~3s warm, ~25s cold first download). Even with the
+//! background daemon (`ohara serve`) warming models for the CLI, an MCP
+//! client is still the canonical interactive path.
+//!
+//! This command is intended for one-off scripted use (CI glue, ad-hoc
+//! `jq` pipelines, debugging an index). See issue #60 for context.
+
 use anyhow::Result;
 use clap::Args as ClapArgs;
 use ohara_core::perf_trace::timed_phase;
