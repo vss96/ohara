@@ -15,6 +15,14 @@
 
 use super::HotmapAggregator;
 
+/// Width (in cells) of the longest bar. Same as
+/// `index::index_summary_human` so the two summaries align visually.
+const BAR_WIDTH: usize = 32;
+
+/// Maximum number of top-level directory rows shown in the chart. Keeps
+/// the output bounded on monorepos with hundreds of top-level dirs.
+const TOP_N: usize = 20;
+
 /// Render the multi-line cosmetic summary printed at the end of
 /// `ohara plan`. Pure function over its inputs.
 ///
@@ -30,16 +38,97 @@ use super::HotmapAggregator;
 ///   noise/
 ///   vendor/
 /// ```
-#[allow(dead_code)] // stub: wired into `run` in the matching green commit.
 pub fn plan_summary_human(
-    _agg: &HotmapAggregator,
-    _elapsed_ms: u64,
-    _suggestions: &[String],
+    agg: &HotmapAggregator,
+    elapsed_ms: u64,
+    suggestions: &[String],
 ) -> String {
-    // Stub: real implementation lands in the matching green commit.
-    // Tests in this module are the format contract; they MUST fail
-    // against the stub and pass against the impl.
-    String::new()
+    let total = agg.total_commits().max(1);
+
+    // Filter to top-level directories (same predicate as the legacy
+    // `print_hotmap`): exactly one slash, at the end. `BTreeMap`
+    // iteration is alphabetical; we then sort by descending count so
+    // the dominant directory leads.
+    let mut top: Vec<(&str, u64)> = agg
+        .counts()
+        .iter()
+        .filter(|(k, _)| {
+            let slash_count = k.matches('/').count();
+            slash_count == 1 && k.ends_with('/')
+        })
+        .map(|(k, v)| (k.as_str(), *v))
+        .collect();
+    top.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    top.truncate(TOP_N);
+
+    let unique_paths = top.len();
+    let suggestion_count = suggestions.len();
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "surveyed {} commit{} across {} path{} in {} — {} suggested ignore pattern{}\n",
+        agg.total_commits(),
+        plural(agg.total_commits()),
+        unique_paths,
+        plural(unique_paths as u64),
+        fmt_duration_ms(elapsed_ms),
+        suggestion_count,
+        plural(suggestion_count as u64),
+    ));
+
+    if !top.is_empty() {
+        out.push('\n');
+        // Right-pad directory names to a common column so bars line up.
+        // The longest name in the rendered set drives the column.
+        let name_col = top.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+        let max_count = top.first().map(|(_, c)| *c).unwrap_or(1).max(1);
+        let pct_denom = total as f64;
+
+        for (name, count) in &top {
+            let ratio = (*count as f64) / (max_count as f64);
+            let filled = (ratio * BAR_WIDTH as f64).round() as usize;
+            let filled = filled.min(BAR_WIDTH);
+            let bar: String = "\u{2588}".repeat(filled);
+            let pad: String = " ".repeat(BAR_WIDTH - filled);
+            let pct = (*count as f64) / pct_denom * 100.0;
+            let pct_str = if pct < 1.0 {
+                "<1%".to_string()
+            } else {
+                format!("{pct:.0}%")
+            };
+            out.push_str(&format!("  {name:<name_col$}  {bar}{pad}  {pct_str:>3}\n"));
+        }
+    }
+
+    if suggestions.is_empty() {
+        out.push('\n');
+        out.push_str("no top-level directories crossed the 5% threshold — nothing suggested\n");
+        return out;
+    }
+
+    out.push('\n');
+    out.push_str("suggested (.oharaignore patterns):\n");
+    for s in suggestions {
+        out.push_str(&format!("  {s}\n"));
+    }
+
+    out
+}
+
+fn plural(n: u64) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+fn fmt_duration_ms(ms: u64) -> String {
+    if ms >= 1000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        format!("{ms}ms")
+    }
 }
 
 #[cfg(test)]

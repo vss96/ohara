@@ -48,16 +48,16 @@ pub async fn run(args: Args) -> Result<()> {
         agg.record(paths);
         Ok(())
     })?;
-    let elapsed = start.elapsed();
-    println!(
-        "walked {} commits in {:.1}s",
-        agg.total_commits(),
-        elapsed.as_secs_f64()
-    );
+    let elapsed_ms = start.elapsed().as_millis() as u64;
 
-    print_hotmap(&agg);
     let suggestions = suggest_patterns(&agg);
-    print_suggestions(&suggestions, agg.total_commits());
+
+    // Issue #67: replace the legacy text-column hotmap with a
+    // bar-chart summary visually consistent with `ohara index`.
+    print!(
+        "{}",
+        summary::plan_summary_human(&agg, elapsed_ms, &suggestions)
+    );
     print_gpu_hint();
 
     if !args.write {
@@ -82,36 +82,6 @@ pub async fn run(args: Args) -> Result<()> {
     std::fs::write(&target, final_text).with_context(|| format!("write {}", target.display()))?;
     println!("wrote {}", target.display());
     Ok(())
-}
-
-/// Print the top-N directories by commit share.
-fn print_hotmap(agg: &HotmapAggregator) {
-    let total = agg.total_commits().max(1);
-    let mut top: Vec<(&String, &u64)> = agg
-        .counts()
-        .iter()
-        .filter(|(k, _)| {
-            let slash_count = k.matches('/').count();
-            slash_count == 1 && k.ends_with('/')
-        })
-        .collect();
-    top.sort_by(|a, b| b.1.cmp(a.1));
-    println!("\ntop-level directories by commit share:");
-    for (k, count) in top.iter().take(20) {
-        let share = (**count as f64 / total as f64) * 100.0;
-        println!("  {:<40} {:>7} ({:>4.1}%)", k, count, share);
-    }
-}
-
-fn print_suggestions(suggestions: &[String], total: u64) {
-    println!("\nproposed auto-generated section:");
-    if suggestions.is_empty() {
-        println!("  (no high-share top-level directories — nothing suggested)");
-    }
-    for s in suggestions {
-        println!("  {s}");
-    }
-    println!("\ntotal commits surveyed: {total}");
 }
 
 fn print_gpu_hint() {
