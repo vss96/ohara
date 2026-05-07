@@ -158,15 +158,78 @@ pub fn phase_timings_json(pt: &PhaseTimings) -> String {
 ///   fts        0.4s                                     <1%
 /// ```
 pub fn index_summary_human(
-    _pt: &PhaseTimings,
-    _total_ms: u64,
-    _new_commits: u64,
-    _new_hunks: u64,
-    _head_symbols: u64,
+    pt: &PhaseTimings,
+    total_ms: u64,
+    new_commits: u64,
+    new_hunks: u64,
+    head_symbols: u64,
 ) -> String {
-    // Stub — implementation lands in the next commit. See tests below
-    // for the format contract.
-    String::new()
+    let mut phases: Vec<(&str, u64)> = vec![
+        ("walk", pt.commit_walk_ms),
+        ("diff", pt.diff_extract_ms),
+        ("parse", pt.tree_sitter_parse_ms),
+        ("embed", pt.embed_ms),
+        ("storage", pt.storage_write_ms),
+        ("fts", pt.fts_insert_ms),
+        ("symbols", pt.head_symbols_ms),
+    ];
+    phases.retain(|(_, ms)| *ms > 0);
+    phases.sort_by_key(|(_, ms)| std::cmp::Reverse(*ms));
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "indexed in {} — {} commit{}, {} hunk{}, {} HEAD symbol{}\n",
+        fmt_duration_ms(total_ms),
+        new_commits,
+        if new_commits == 1 { "" } else { "s" },
+        new_hunks,
+        if new_hunks == 1 { "" } else { "s" },
+        head_symbols,
+        if head_symbols == 1 { "" } else { "s" },
+    ));
+    if phases.is_empty() {
+        return out;
+    }
+    out.push('\n');
+
+    const BAR_WIDTH: usize = 32;
+    let max_ms = phases.first().map(|(_, m)| *m).unwrap_or(1).max(1);
+    // Anchor the percentage to total_ms so it represents wall-clock
+    // share, not "share of the longest phase". A short phase shows
+    // its real fraction of the run, not an inflated relative number.
+    let pct_denom = total_ms.max(1) as f64;
+
+    for (name, ms) in &phases {
+        let ratio = (*ms as f64) / (max_ms as f64);
+        let filled = (ratio * BAR_WIDTH as f64).round() as usize;
+        let filled = filled.min(BAR_WIDTH);
+        let bar: String = "█".repeat(filled);
+        let pad: String = " ".repeat(BAR_WIDTH - filled);
+        let pct = (*ms as f64) / pct_denom * 100.0;
+        let pct_str = if pct < 1.0 {
+            "<1%".to_string()
+        } else {
+            format!("{:.0}%", pct)
+        };
+        out.push_str(&format!(
+            "  {name:<8}{time:>6}  {bar}{pad}  {pct:>3}\n",
+            name = name,
+            time = fmt_duration_ms(*ms),
+            bar = bar,
+            pad = pad,
+            pct = pct_str,
+        ));
+    }
+
+    out
+}
+
+fn fmt_duration_ms(ms: u64) -> String {
+    if ms >= 1000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        format!("{ms}ms")
+    }
 }
 
 /// Plan 13 Task 3.3 Step 2: refuse `--rebuild` unless the index DB
@@ -642,10 +705,7 @@ mod profile_json_tests {
     fn index_summary_header_singular_when_count_is_one() {
         let s = index_summary_human(&pt_for_summary(), 1_000, 1, 1, 1);
         let header = s.lines().next().expect("header line");
-        assert_eq!(
-            header,
-            "indexed in 1.0s — 1 commit, 1 hunk, 1 HEAD symbol"
-        );
+        assert_eq!(header, "indexed in 1.0s — 1 commit, 1 hunk, 1 HEAD symbol");
     }
 
     #[test]
