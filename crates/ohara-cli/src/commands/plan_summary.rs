@@ -22,8 +22,26 @@ const BAR_WIDTH: usize = 32;
 /// `surveyed 12345 commits in 8.4s — 3 suggested ignore patterns`.
 /// Pluralises commits and patterns independently so the banner stays
 /// grammatical at all counts (including zero suggestions).
-pub fn render_plan_banner(_total_commits: u64, _elapsed_ms: u64, _suggestion_count: usize) -> String {
-    String::new()
+pub fn render_plan_banner(total_commits: u64, elapsed_ms: u64, suggestion_count: usize) -> String {
+    let commits_word = match total_commits {
+        1 => "commit",
+        _ => "commits",
+    };
+    let pattern_word = match suggestion_count {
+        1 => "suggested ignore pattern",
+        _ => "suggested ignore patterns",
+    };
+    format!(
+        "surveyed {total_commits} {commits_word} in {elapsed} — {suggestion_count} {pattern_word}\n",
+        elapsed = fmt_duration_ms(elapsed_ms),
+    )
+}
+
+fn fmt_duration_ms(ms: u64) -> String {
+    match ms >= 1000 {
+        true => format!("{:.1}s", ms as f64 / 1000.0),
+        false => format!("{ms}ms"),
+    }
 }
 
 pub fn render_hotmap_bars(agg: &HotmapAggregator, top_n: usize) -> String {
@@ -51,10 +69,9 @@ pub fn render_hotmap_bars(agg: &HotmapAggregator, top_n: usize) -> String {
         let bar: String = "█".repeat(filled);
         let bar_pad: String = " ".repeat(BAR_WIDTH - filled);
         let pct = (**count as f64) / total * 100.0;
-        let pct_str = if pct < 1.0 {
-            "<1%".to_string()
-        } else {
-            format!("{:.0}%", pct)
+        let pct_str = match pct < 1.0 {
+            true => "<1%".to_string(),
+            false => format!("{:.0}%", pct),
         };
         out.push_str(&format!(
             "  {name:<name_pad$}  {count:>7}  {bar}{bar_pad}  {pct:>3}\n",
