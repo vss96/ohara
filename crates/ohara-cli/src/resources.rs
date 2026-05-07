@@ -10,11 +10,23 @@
 //! The lookup ranges are deliberately conservative until the v0.6
 //! Phase 2 baseline is populated (see `docs/perf/v0.6-baseline.md`):
 //!
-//! | logical cores | commit_batch | threads | provider |
-//! |---|---|---|---|
-//! | <8 | 128 | cores | auto |
-//! | 8..16 | 256 | cores | auto |
-//! | 16+ | 512 | cores | auto |
+//! | logical cores | commit_batch | embed_batch | threads | provider |
+//! |---|---|---|---|---|
+//! | <8 | 128 | 64 | cores | auto |
+//! | 8..16 | 256 | 128 | cores | auto |
+//! | 16+ | 512 | 256 | cores | auto |
+//!
+//! Issue #56: the per-tier `embed_batch` was retuned 16/32/64 → 64/128/256
+//! after a microbench (`tests/perf/embed_batch_micro.rs`) against
+//! BGE-small (the current default embedder) showed +30% steady-state
+//! throughput moving mid-tier from 32 → 128. The previous defaults
+//! under-fed fastembed's internal rayon-parallel batch (its own
+//! `DEFAULT_BATCH_SIZE` is 256) and incurred extra Mutex acquisitions
+//! per commit on the shared embedder. The retuned values keep
+//! `embed_batch <= commit_batch` so the chunking still bounds peak
+//! per-commit allocation; on workloads where peak RSS matters more
+//! than wall-time, `--resources conservative` halves these to 32/64/128
+//! and an explicit `--embed-batch` flag still wins outright.
 //!
 //! `conservative` halves the picked thread count and batch size;
 //! `aggressive` doubles them. Both still respect the explicit-flag
@@ -112,12 +124,14 @@ pub fn pick_resources(host: &Host) -> ResourcePlan {
     } else {
         512
     };
+    // Issue #56: bumped 16/32/64 → 64/128/256. See the module-level
+    // doc table for the rationale + measurement source.
     let embed_batch = if cores < 8 {
-        16
-    } else if cores < 16 {
-        32
-    } else {
         64
+    } else if cores < 16 {
+        128
+    } else {
+        256
     };
     ResourcePlan {
         commit_batch,
@@ -170,32 +184,41 @@ mod tests {
 
     #[test]
     fn lookup_table_low_core_box_picks_small_batch() {
-        // <8 cores → 128 commit_batch, 16 embed_batch. Anchors the
+        // <8 cores → 128 commit_batch, 64 embed_batch. Anchors the
         // conservative end of the table so a future tweak that reorders
-        // the conditions stays caught.
+        // the conditions stays caught. The 4× bump from the original
+        // 16 is the issue-#56 retune: BGE-small / fastembed's internal
+        // rayon batch saturates well above 16, so a smaller knob just
+        // wastes Mutex acquisitions per commit.
         let plan = pick_resources(&host_with(4));
         assert_eq!(plan.commit_batch, 128);
-        assert_eq!(plan.embed_batch, 16);
+        assert_eq!(plan.embed_batch, 64);
         assert_eq!(plan.threads, 4);
     }
 
     #[test]
     fn lookup_table_mid_core_box_picks_medium_batch() {
-        // 8..16 cores → 256 commit_batch, 32 embed_batch. Threads track
-        // cores 1:1.
+        // 8..16 cores → 256 commit_batch, 128 embed_batch. Threads track
+        // cores 1:1. Issue #56: the embed-batch microbench against
+        // BGE-small showed +30% steady-state throughput moving from
+        // batch=32 to batch=128 on a 12-core box, with the marginal
+        // gain at 256 only ~+8% beyond 128. 128 is the sweet spot for
+        // mid-tier hosts.
         let plan = pick_resources(&host_with(12));
         assert_eq!(plan.commit_batch, 256);
-        assert_eq!(plan.embed_batch, 32);
+        assert_eq!(plan.embed_batch, 128);
         assert_eq!(plan.threads, 12);
     }
 
     #[test]
     fn lookup_table_high_core_box_picks_default_batch() {
-        // 16+ cores → 512 commit_batch, 64 embed_batch (matches the
-        // existing `--commit-batch` default).
+        // 16+ cores → 512 commit_batch, 256 embed_batch. The high-tier
+        // bump (issue #56) tracks the same proportional 4× rule applied
+        // to the mid tier; 256 was the maximum sweep step in the
+        // microbench and clears the saturation knee for BGE-small.
         let plan = pick_resources(&host_with(32));
         assert_eq!(plan.commit_batch, 512);
-        assert_eq!(plan.embed_batch, 64);
+        assert_eq!(plan.embed_batch, 256);
         assert_eq!(plan.threads, 32);
     }
 
@@ -205,14 +228,14 @@ mod tests {
         // notice if a refactor flips an inequality.
         let plan = pick_resources(&host_with(8));
         assert_eq!(plan.commit_batch, 256);
-        assert_eq!(plan.embed_batch, 32);
+        assert_eq!(plan.embed_batch, 128);
     }
 
     #[test]
     fn lookup_table_16_core_boundary_lands_in_high_tier() {
         let plan = pick_resources(&host_with(16));
         assert_eq!(plan.commit_batch, 512);
-        assert_eq!(plan.embed_batch, 64);
+        assert_eq!(plan.embed_batch, 256);
     }
 
     #[test]
@@ -223,7 +246,7 @@ mod tests {
         let plan = pick_resources(&host_with(0));
         assert!(plan.threads >= 1);
         assert_eq!(plan.commit_batch, 128);
-        assert_eq!(plan.embed_batch, 16);
+        assert_eq!(plan.embed_batch, 64);
     }
 
     #[test]

@@ -111,6 +111,15 @@ path = "parallel_indexer_sweep.rs"
 name = "symbol_bm25_fan_out"
 path = "symbol_bm25_fan_out.rs"
 
+[[test]]
+# Issue #56 — embed-batch microbench. Times `embed_batch` at varying
+# per-call sizes against BGE-small to surface the saturation curve
+# without indexer/git/storage overhead. `#[ignore]`'d; opt in via:
+#   cargo test -p ohara-perf-tests --release -- \
+#       --ignored embed_batch_micro --nocapture
+name = "embed_batch_micro"
+path = "embed_batch_micro.rs"
+
 [dependencies]
 libc.workspace = true
 
