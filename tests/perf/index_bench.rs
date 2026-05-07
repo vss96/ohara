@@ -45,20 +45,25 @@ struct RunReport {
     iters: Vec<IterReport>,
 }
 
-/// Parse the CLI's one-line summary:
-///   `indexed: <N> new commits, <M> hunks, <K> HEAD symbols`
+/// Parse the CLI's summary header (PR #66):
+///   `indexed in <duration> — <N> commit(s), <M> hunk(s), <K> HEAD symbol(s)`
 fn parse_report_line(stdout: &str) -> (u64, u64) {
     for line in stdout.lines() {
-        if let Some(rest) = line.strip_prefix("indexed: ") {
+        if let Some(rest) = line.strip_prefix("indexed in ") {
+            // After "indexed in <duration>": " — N commits, M hunks, K HEAD symbols"
+            let Some(idx) = rest.find(" — ") else {
+                continue;
+            };
+            let counts = &rest[idx + " — ".len()..];
             let mut commits = 0u64;
             let mut hunks = 0u64;
-            for part in rest.split(", ") {
+            for part in counts.split(", ") {
                 let mut it = part.split_whitespace();
                 let n: u64 = it.next().and_then(|t| t.parse().ok()).unwrap_or(0);
                 let kind = it.next().unwrap_or("");
                 match kind {
-                    "new" => commits = n,
-                    "hunks" => hunks = n,
+                    "commit" | "commits" => commits = n,
+                    "hunk" | "hunks" => hunks = n,
                     _ => {}
                 }
             }
@@ -210,12 +215,36 @@ fn index_bench_emits_run_report() {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_time_rss;
+    use super::{parse_report_line, parse_time_rss};
+
+    #[test]
+    fn parses_post_pr66_summary_header() {
+        let stdout = "\
+indexed in 47.3s — 1670 commits, 5951 hunks, 36976 HEAD symbols
+
+  embed    38.1s  ████████████████████████████████   80%
+  storage   4.2s  ████                                9%
+";
+        assert_eq!(parse_report_line(stdout), (1670, 5951));
+    }
+
+    #[test]
+    fn parses_singular_units() {
+        // Edge case: 1 commit, 1 hunk — singular nouns must still parse.
+        let stdout = "indexed in 1.0s — 1 commit, 1 hunk, 1 HEAD symbol\n";
+        assert_eq!(parse_report_line(stdout), (1, 1));
+    }
+
+    #[test]
+    fn returns_zeros_when_header_missing() {
+        let stdout = "ohara: indexing complete\nsome unrelated noise\n";
+        assert_eq!(parse_report_line(stdout), (0, 0));
+    }
 
     #[test]
     fn parses_macos_time_l_format() {
         let stderr = "\
-indexed: 100 new commits, 500 hunks, 0 HEAD symbols
+indexed in 1.2s — 100 commits, 500 hunks, 0 HEAD symbols
         12345678  maximum resident set size
              1024  page reclaims
 ";
@@ -225,7 +254,7 @@ indexed: 100 new commits, 500 hunks, 0 HEAD symbols
     #[test]
     fn parses_linux_time_v_format() {
         let stderr = "\
-indexed: 100 new commits, 500 hunks, 0 HEAD symbols
+indexed in 1.2s — 100 commits, 500 hunks, 0 HEAD symbols
 \tMaximum resident set size (kbytes): 1500
 \tAverage resident set size (kbytes): 0
 ";

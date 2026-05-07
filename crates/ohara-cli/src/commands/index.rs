@@ -155,7 +155,7 @@ pub fn phase_timings_json(pt: &PhaseTimings) -> String {
 ///   diff       2.6s  ██                                  5%
 ///   parse      1.8s  █                                   4%
 ///   symbols    1.2s  █                                   2%
-///   fts        0.4s                                     <1%
+///   fts       400ms                                     <1%
 /// ```
 pub fn index_summary_human(
     pt: &PhaseTimings,
@@ -333,6 +333,10 @@ fn log_resolution_warnings(
 }
 
 pub async fn run(args: Args) -> Result<IndexerReport> {
+    // Wall-clock starts at the very top so the summary's `total_ms`
+    // covers the whole command — embedder load (which can be 15-25s
+    // on first run) is part of "how long did `ohara index` take".
+    let cmd_start = std::time::Instant::now();
     let (repo_id, canonical, first_commit) = super::resolve_repo_id(&args.path)?;
     let db_path = super::index_db_path(&repo_id)?;
     tracing::info!(repo = %canonical.display(), id = repo_id.as_str(), db = %db_path.display(), "indexing");
@@ -521,9 +525,8 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         Some(n) => indexer.with_workers(n),
         None => indexer,
     };
-    let run_start = std::time::Instant::now();
     let report = indexer.run(&repo_id, commit_source, symbol_source).await?;
-    let total_ms = run_start.elapsed().as_millis() as u64;
+    let total_ms = cmd_start.elapsed().as_millis() as u64;
     // Two-sink summary: human-readable cosmetic block on stdout,
     // structured event on stderr (via tracing) so log aggregators /
     // CI watchdogs / a future `--json` flag see the same numbers.
