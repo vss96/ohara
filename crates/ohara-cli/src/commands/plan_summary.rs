@@ -107,6 +107,31 @@ mod tests {
     }
 
     #[test]
+    fn render_hotmap_bars_sorts_by_count_descending_not_alphabetically() {
+        // Strict distinguisher: anti-alphabetical names where the
+        // dominant-share row is alphabetically *last*. If the sort
+        // ever degrades to lexicographic / `BTreeMap` iteration order,
+        // `alpha/` would lead. Ported from closed PR #70 — the
+        // existing `…top_dirs_descending` test uses names whose
+        // alphabetical order coincides with their count order, so it
+        // does not catch this regression.
+        let mut agg = HotmapAggregator::default();
+        for _ in 0..80 {
+            agg.record(&["zoo/x.rs".into()]);
+        }
+        for _ in 0..20 {
+            agg.record(&["alpha/x.rs".into()]);
+        }
+        let out = render_hotmap_bars(&agg, 20);
+        let zoo_pos = out.find("zoo/").expect("zoo/ row present");
+        let alpha_pos = out.find("alpha/").expect("alpha/ row present");
+        assert!(
+            zoo_pos < alpha_pos,
+            "dominant zoo/ (80) must precede minor alpha/ (20) regardless of name order: {out}"
+        );
+    }
+
+    #[test]
     fn render_hotmap_bars_emits_section_header_and_top_dirs_descending() {
         let agg = three_dir_aggregator();
         let out = render_hotmap_bars(&agg, 20);
