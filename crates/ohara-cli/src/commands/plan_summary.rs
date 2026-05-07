@@ -17,8 +17,48 @@ const BAR_WIDTH: usize = 32;
 /// Always emits the header line. With an empty aggregator (or no
 /// top-level rows) only the header is produced — never panics on
 /// division by zero.
-pub fn render_hotmap_bars(_agg: &HotmapAggregator, _top_n: usize) -> String {
-    String::new()
+pub fn render_hotmap_bars(agg: &HotmapAggregator, top_n: usize) -> String {
+    let mut out = String::from("top-level directories by commit share:\n");
+
+    let mut rows: Vec<(&String, &u64)> = agg
+        .counts()
+        .iter()
+        .filter(|(k, _)| k.matches('/').count() == 1 && k.ends_with('/'))
+        .collect();
+    rows.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    rows.truncate(top_n);
+
+    if rows.is_empty() {
+        return out;
+    }
+
+    let name_pad = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    let max_count = rows.first().map(|(_, c)| **c).unwrap_or(1).max(1);
+    let total = agg.total_commits().max(1) as f64;
+
+    for (name, count) in &rows {
+        let ratio = (**count as f64) / (max_count as f64);
+        let filled = ((ratio * BAR_WIDTH as f64).round() as usize).min(BAR_WIDTH);
+        let bar: String = "█".repeat(filled);
+        let bar_pad: String = " ".repeat(BAR_WIDTH - filled);
+        let pct = (**count as f64) / total * 100.0;
+        let pct_str = if pct < 1.0 {
+            "<1%".to_string()
+        } else {
+            format!("{:.0}%", pct)
+        };
+        out.push_str(&format!(
+            "  {name:<name_pad$}  {count:>7}  {bar}{bar_pad}  {pct:>3}\n",
+            name = name,
+            name_pad = name_pad,
+            count = count,
+            bar = bar,
+            bar_pad = bar_pad,
+            pct = pct_str,
+        ));
+    }
+
+    out
 }
 
 #[cfg(test)]
