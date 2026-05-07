@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-05-07
+
+### Added
+
+- **Cosmetic timing summary at end of `ohara index`.** Replaces the
+  single-line `indexed: N commits, M hunks, K symbols` print with a
+  multi-line block that includes wall-clock total and a per-phase bar
+  chart sorted by descending cost. Phases with zero ms are omitted;
+  percentages are anchored to wall-clock total. Always-on; the existing
+  `--profile` flag still emits the JSON line for scripts
+  ([381a54e](https://github.com/vss96/ohara/commit/381a54e)) ([#66](https://github.com/vss96/ohara/pull/66)).
+- **Bar-chart hotmap + summary banner for `ohara plan`.** Mirrors the
+  visual language of the new `ohara index` summary: header line plus a
+  hotmap bar chart over the top-level directory commit shares, then the
+  suggested `.oharaignore` patterns and the existing `--write` hint
+  ([5c8a717](https://github.com/vss96/ohara/commit/5c8a717)) ([#69](https://github.com/vss96/ohara/pull/69)).
+
 ## [0.8.3] - 2026-05-07
 
 ### Fixed
@@ -414,7 +431,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pin rmcp to `=0.1.5` for stable API surface ([9935c7b](https://github.com/vss96/ohara/commit/9935c7bf369d6a7ecce5366d38ef43186b762599))
 - Drop dead `OharaServer::embedder` field ([0acf38a](https://github.com/vss96/ohara/commit/0acf38a97c5c2d9f35bec7f37009088647898512))
 
-[Unreleased]: https://github.com/vss96/ohara/compare/v0.8.3...HEAD
+[Unreleased]: https://github.com/vss96/ohara/compare/v0.8.4...HEAD
+[0.8.4]: https://github.com/vss96/ohara/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/vss96/ohara/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/vss96/ohara/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/vss96/ohara/compare/v0.8.0...v0.8.1
