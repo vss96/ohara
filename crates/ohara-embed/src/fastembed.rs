@@ -64,8 +64,9 @@ pub enum EmbedProvider {
 }
 
 pub struct FastEmbedProvider {
-    // Mutex serializes access: fastembed 4.9 holds mutable tokenizer/batch
-    // state inside `embed(&self, ...)` and concurrent calls are not audited.
+    // Mutex serializes access: fastembed 5.x's `embed(&mut self, ...)`
+    // signature requires exclusive access to the model session, and the
+    // tokenizer/batch state is not audited for concurrent use either way.
     model: Arc<Mutex<TextEmbedding>>,
     model_id: String,
     dim: usize,
@@ -181,7 +182,12 @@ impl EmbeddingProvider for FastEmbedProvider {
         let model = self.model.clone();
         let owned: Vec<String> = texts.to_vec();
         let result = tokio::task::spawn_blocking(move || {
-            let guard = model.blocking_lock();
+            // fastembed 5.x's `TextEmbedding::embed` is `&mut self`; the
+            // Mutex's blocking guard derefs to `&mut TextEmbedding` so a
+            // single `mut` binding is enough. Tokio's `Mutex` is fair
+            // and we only ever hold the guard for one batch, so callers
+            // get FIFO access on contention.
+            let mut guard = model.blocking_lock();
             let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
             guard.embed(refs, None)
         })
@@ -200,8 +206,9 @@ impl EmbeddingProvider for FastEmbedProvider {
 /// We restore the input ordering before returning (see `align_by_index`).
 pub struct FastEmbedReranker {
     // Mutex serializes access for the same reason as FastEmbedProvider:
-    // fastembed's rerank() takes &self but uses session state that is
-    // not audited for concurrent calls.
+    // fastembed 5.x's `rerank(&mut self, ...)` requires exclusive
+    // access to the model session, and the underlying tokenizer state
+    // is not audited for concurrent use either way.
     model: Arc<Mutex<TextRerank>>,
     model_id: String,
 }
@@ -243,15 +250,18 @@ impl RerankProvider for FastEmbedReranker {
         let docs: Vec<String> = candidates.iter().map(|s| s.to_string()).collect();
         let n = docs.len();
         let join = tokio::task::spawn_blocking(move || {
-            let guard = model.blocking_lock();
+            // fastembed 5.x's `TextRerank::rerank` is `&mut self`. See
+            // FastEmbedProvider::embed_batch for the same pattern.
+            let mut guard = model.blocking_lock();
             // return_documents=false (we only need scores+indices),
             // batch_size=None (use fastembed's default).
-            guard.rerank(
-                query_owned.as_str(),
-                docs.iter().map(|s| s.as_str()).collect(),
-                false,
-                None,
-            )
+            //
+            // Annotated as `Vec<&str>` because fastembed 5.x's `rerank`
+            // takes `impl AsRef<[S]>` where S is inferred from the query
+            // and document slice independently — the inner `.collect()`
+            // needs a concrete type to satisfy that bound.
+            let doc_refs: Vec<&str> = docs.iter().map(|s| s.as_str()).collect();
+            guard.rerank(query_owned.as_str(), doc_refs, false, None)
         })
         .await
         .map_err(|e| ohara_core::OhraError::Embedding(format!("join: {e}")))?;

@@ -14,8 +14,12 @@ tokio = { workspace = true }
 tracing.workspace = true
 
 # Optional ONNX Runtime direct dep — only pulled in when a hardware
-# execution-provider feature is enabled. Pinned to fastembed 4.9's
-# transitive ort version so ExecutionProviderDispatch stays compatible.
+# execution-provider feature is enabled. Pinned to fastembed 5.13's
+# transitive ort version (=2.0.0-rc.12, ONNX Runtime 1.24.2) so
+# `ExecutionProviderDispatch` stays type-compatible with the embedder
+# session. Issue #54: the rc.9 → rc.12 bump is what unblocks the
+# Q-variant's `SkipLayerNormalization` regression
+# (microsoft/onnxruntime#22704, fixed in 1.20.1; rc.12 ships 1.24.2).
 #
 # Per-target wiring: macOS adds the `coreml` feature so `--features
 # coreml` (the cargo-dist released-binary flag) wires the CoreML EP.
@@ -24,10 +28,10 @@ tracing.workspace = true
 # to them — `coreml` becomes a no-op there. CUDA flows independently
 # via the `cuda` feature below.
 [target.'cfg(target_os = "macos")'.dependencies]
-ort = { version = "=2.0.0-rc.9", optional = true, features = ["coreml"] }
+ort = { version = "=2.0.0-rc.12", optional = true, features = ["coreml"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-ort = { version = "=2.0.0-rc.9", optional = true }
+ort = { version = "=2.0.0-rc.12", optional = true }
 
 [features]
 default = []
