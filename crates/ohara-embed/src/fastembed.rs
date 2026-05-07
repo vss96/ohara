@@ -1,5 +1,15 @@
-//! BGE-small-en-v1.5 (384d) embedding provider over fastembed-rs,
-//! plus BGE-reranker-base cross-encoder over `fastembed::TextRerank`.
+//! BGE-small-en-v1.5 quantized (384d) embedding provider over
+//! fastembed-rs, plus BGE-reranker-base cross-encoder over
+//! `fastembed::TextRerank`.
+//!
+//! Issue #54: the default embedder is the INT8-quantized variant
+//! (`Qdrant/bge-small-en-v1.5-onnx-Q`, exposed as
+//! `EmbeddingModel::BGESmallENV15Q` in fastembed). Same 384d output as
+//! the full-precision model, ~1.5–3× CPU throughput, ~50% lower memory
+//! footprint, and the recall delta on the retrieval-quality fixture is
+//! within tolerance (`tests/perf/context_engine_eval.rs`). The model id
+//! `"bge-small-en-v1.5-q"` carries the `-q` suffix so an index built
+//! with the older binary is reported as `compatibility: needs rebuild`.
 //!
 //! Concurrency: both `embed_batch` and `rerank` offload the ONNX
 //! forward pass to `tokio::task::spawn_blocking` and serialize access
@@ -19,10 +29,20 @@ use tokio::sync::{Mutex, OnceCell};
 /// `FastEmbedProvider::model_id()` and recorded in `index_metadata`
 /// (plan 13) so an old index built with a different model triggers a
 /// rebuild prompt.
-pub const DEFAULT_MODEL_ID: &str = "bge-small-en-v1.5";
+///
+/// Issue #54: switched from `"bge-small-en-v1.5"` (full precision) to
+/// the quantized variant. The `-q` suffix is part of the index identity
+/// — old indexes built with the full-precision embedder produce vectors
+/// that are not directly comparable to Q-variant query embeddings, so
+/// the suffix forces `CompatibilityStatus::assess` to return
+/// `NeedsRebuild` after binary upgrade.
+pub const DEFAULT_MODEL_ID: &str = "bge-small-en-v1.5-q";
 /// Vector dimension produced by `DEFAULT_MODEL_ID`. Exposed so the
 /// `ohara status` command can build the runtime compatibility
 /// expectation without loading the embedder (plan 13 Task 3.1).
+///
+/// Both the full-precision and quantized BGE-small variants emit 384d
+/// vectors, so the dimension is stable across the #54 switch.
 pub const DEFAULT_DIM: usize = 384;
 /// Stable id of the default cross-encoder reranker model. Recorded in
 /// `index_metadata` so a reranker swap triggers a refresh prompt.
@@ -44,8 +64,9 @@ pub enum EmbedProvider {
 }
 
 pub struct FastEmbedProvider {
-    // Mutex serializes access: fastembed 4.9 holds mutable tokenizer/batch
-    // state inside `embed(&self, ...)` and concurrent calls are not audited.
+    // Mutex serializes access: fastembed 5.x's `embed(&mut self, ...)`
+    // signature requires exclusive access to the model session, and the
+    // tokenizer/batch state is not audited for concurrent use either way.
     model: Arc<Mutex<TextEmbedding>>,
     model_id: String,
     dim: usize,
@@ -58,16 +79,20 @@ impl FastEmbedProvider {
         Self::with_provider(EmbedProvider::Cpu)
     }
 
-    /// Load BGE-small with the requested ONNX execution provider.
+    /// Load BGE-small (quantized) with the requested ONNX execution
+    /// provider.
     ///
     /// CoreML / CUDA are gated behind cargo features; without the
-    /// feature, the corresponding arm returns an actionable error.
+    /// feature, the corresponding arm returns an actionable error. The
+    /// quantized model file (`Qdrant/bge-small-en-v1.5-onnx-Q`) is
+    /// downloaded on first run; size is comparable to the full-precision
+    /// model since the optimized ONNX export is ~33MB.
     pub fn with_provider(provider: EmbedProvider) -> Result<Self> {
         let opts =
-            InitOptions::new(EmbeddingModel::BGESmallENV15).with_show_download_progress(false);
+            InitOptions::new(EmbeddingModel::BGESmallENV15Q).with_show_download_progress(false);
         let opts = apply_provider_to_init(opts, provider)?;
         let model = TextEmbedding::try_new(opts)
-            .context("loading BGE-small model (downloads ~80MB on first run)")?;
+            .context("loading BGE-small (quantized) model (downloads ~33MB on first run)")?;
         Ok(Self {
             model: Arc::new(Mutex::new(model)),
             model_id: DEFAULT_MODEL_ID.into(),
@@ -157,7 +182,12 @@ impl EmbeddingProvider for FastEmbedProvider {
         let model = self.model.clone();
         let owned: Vec<String> = texts.to_vec();
         let result = tokio::task::spawn_blocking(move || {
-            let guard = model.blocking_lock();
+            // fastembed 5.x's `TextEmbedding::embed` is `&mut self`; the
+            // Mutex's blocking guard derefs to `&mut TextEmbedding` so a
+            // single `mut` binding is enough. Tokio's `Mutex` is fair
+            // and we only ever hold the guard for one batch, so callers
+            // get FIFO access on contention.
+            let mut guard = model.blocking_lock();
             let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
             guard.embed(refs, None)
         })
@@ -176,8 +206,9 @@ impl EmbeddingProvider for FastEmbedProvider {
 /// We restore the input ordering before returning (see `align_by_index`).
 pub struct FastEmbedReranker {
     // Mutex serializes access for the same reason as FastEmbedProvider:
-    // fastembed's rerank() takes &self but uses session state that is
-    // not audited for concurrent calls.
+    // fastembed 5.x's `rerank(&mut self, ...)` requires exclusive
+    // access to the model session, and the underlying tokenizer state
+    // is not audited for concurrent use either way.
     model: Arc<Mutex<TextRerank>>,
     model_id: String,
 }
@@ -219,15 +250,18 @@ impl RerankProvider for FastEmbedReranker {
         let docs: Vec<String> = candidates.iter().map(|s| s.to_string()).collect();
         let n = docs.len();
         let join = tokio::task::spawn_blocking(move || {
-            let guard = model.blocking_lock();
+            // fastembed 5.x's `TextRerank::rerank` is `&mut self`. See
+            // FastEmbedProvider::embed_batch for the same pattern.
+            let mut guard = model.blocking_lock();
             // return_documents=false (we only need scores+indices),
             // batch_size=None (use fastembed's default).
-            guard.rerank(
-                query_owned.as_str(),
-                docs.iter().map(|s| s.as_str()).collect(),
-                false,
-                None,
-            )
+            //
+            // Annotated as `Vec<&str>` because fastembed 5.x's `rerank`
+            // takes `impl AsRef<[S]>` where S is inferred from the query
+            // and document slice independently — the inner `.collect()`
+            // needs a concrete type to satisfy that bound.
+            let doc_refs: Vec<&str> = docs.iter().map(|s| s.as_str()).collect();
+            guard.rerank(query_owned.as_str(), doc_refs, false, None)
         })
         .await
         .map_err(|e| ohara_core::OhraError::Embedding(format!("join: {e}")))?;
@@ -432,6 +466,24 @@ mod tests {
         // resolution layer falls back to `EmbedProvider::default()` for
         // unrecognized hosts, so the default must stay CPU.
         assert_eq!(EmbedProvider::default(), EmbedProvider::Cpu);
+    }
+
+    #[test]
+    fn default_model_id_pins_quantized_variant() {
+        // Issue #54: the default embedder is the quantized BGE-small
+        // variant. The model id MUST be distinct from the full-precision
+        // `"bge-small-en-v1.5"` so that an index built with the old
+        // binary is detected as `NeedsRebuild` after upgrade (vector
+        // geometry differs between the two models).
+        assert_eq!(DEFAULT_MODEL_ID, "bge-small-en-v1.5-q");
+        assert_ne!(
+            DEFAULT_MODEL_ID, "bge-small-en-v1.5",
+            "Q variant must not share the full-precision model id"
+        );
+        // Dimension is unchanged (384 for both variants), but pin it so
+        // a future model swap that changes dim updates this test in
+        // lockstep with `RuntimeIndexMetadata`.
+        assert_eq!(DEFAULT_DIM, 384);
     }
 
     #[tokio::test]
