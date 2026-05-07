@@ -8,15 +8,6 @@ use crate::commands::plan::HotmapAggregator;
 
 const BAR_WIDTH: usize = 32;
 
-/// Render the section header plus a bar-chart of the `top_n` top-level
-/// directories by commit share, sorted descending. Format mirrors
-/// `index_summary_human`: `█`-filled bars of width [`BAR_WIDTH`], with
-/// `<1%` used for sub-percent shares so a small directory still has a
-/// recognisable row instead of `0%`.
-///
-/// Always emits the header line. With an empty aggregator (or no
-/// top-level rows) only the header is produced — never panics on
-/// division by zero.
 /// Render the one-line closing banner for `ohara plan` — the analogue
 /// of `index_summary_human`'s header, e.g.
 /// `surveyed 12345 commits in 8.4s — 3 suggested ignore patterns`.
@@ -44,6 +35,15 @@ fn fmt_duration_ms(ms: u64) -> String {
     }
 }
 
+/// Render the section header plus a bar-chart of the `top_n` top-level
+/// directories by commit share, sorted descending. Format mirrors
+/// `index_summary_human`: `█`-filled bars of width [`BAR_WIDTH`], with
+/// `<1%` used for sub-percent shares so a small directory still has a
+/// recognisable row instead of `0%`.
+///
+/// Always emits the header line. With an empty aggregator (or no
+/// top-level rows) only the header is produced — never panics on
+/// division by zero.
 pub fn render_hotmap_bars(agg: &HotmapAggregator, top_n: usize) -> String {
     let mut out = String::from("top-level directories by commit share:\n");
 
@@ -173,7 +173,9 @@ mod tests {
     fn render_plan_banner_pluralizes_commits_and_patterns() {
         let singular = render_plan_banner(1, 1_000, 1);
         assert!(
-            singular.contains("1 commit ") || singular.contains("1 commit\n") || singular.contains("1 commit "),
+            singular.contains("1 commit ")
+                || singular.contains("1 commit\n")
+                || singular.contains("1 commit "),
             "singular commit form expected: {singular}"
         );
         assert!(
