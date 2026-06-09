@@ -135,9 +135,11 @@ processes. Compounding causes:
 
 ## Error handling
 
-- Daemon connect/IPC failure → log at `debug`, fall back in-process
-  (existing `try_daemon_call` semantics). A daemon crash mid-call
-  surfaces as an IPC error → one reconnect attempt, then fallback.
+- Daemon connect/IPC failure → log and fall back in-process (existing
+  `try_daemon_call` semantics). A daemon crash mid-call surfaces as an
+  IPC error → no explicit reconnect; the client falls back immediately
+  (each call opens a fresh connection, so the next call rediscovers or
+  respawns the daemon).
 - Stale registry entries are pruned by liveness checks
   (`list_alive`), as today.
 - Registry lock contention during concurrent cold start: bounded by

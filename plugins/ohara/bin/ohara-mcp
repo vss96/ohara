@@ -101,7 +101,14 @@ function sweepOldCaches(cacheRoot, keep) {
     if (!e.isDirectory()) continue;
     if (!e.name.startsWith('v')) continue;
     if (e.name === keep) continue;
-    fs.rmSync(path.join(cacheRoot, e.name), { recursive: true, force: true });
+    try {
+      fs.rmSync(path.join(cacheRoot, e.name), { recursive: true, force: true });
+    } catch (err) {
+      // Disk hygiene must never break startup — warn and move on.
+      process.stderr.write(
+        `[ohara-plugin] warning: failed to remove stale cache ${e.name}: ${err.message}\n`
+      );
+    }
   }
 }
 
