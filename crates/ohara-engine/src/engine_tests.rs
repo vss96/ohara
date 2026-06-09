@@ -321,8 +321,7 @@ async fn find_pattern_refuses_when_index_needs_rebuild() {
     {
         let walker = ohara_git::GitWalker::open(&canonical).unwrap();
         let first = walker.first_commit_sha().unwrap();
-        let repo_id =
-            ohara_core::types::RepoId::from_parts(&first, &canonical.to_string_lossy());
+        let repo_id = ohara_core::types::RepoId::from_parts(&first, &canonical.to_string_lossy());
         let db_path = ohara_core::paths::index_db_path(&repo_id).unwrap();
         let storage: Arc<dyn ohara_core::Storage> =
             Arc::new(ohara_storage::SqliteStorage::open(&db_path).await.unwrap());
