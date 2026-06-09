@@ -25,6 +25,7 @@ ohara-git = { path = "../ohara-git" }
 # the MCP server's runtime compatibility expectation.
 ohara-parse = { path = "../ohara-parse" }
 anyhow.workspace = true
+clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
