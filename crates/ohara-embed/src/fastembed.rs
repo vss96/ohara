@@ -354,6 +354,69 @@ impl RerankProvider for LazyFastEmbedReranker {
     }
 }
 
+/// Lazy wrapper around [`FastEmbedProvider`]: defers loading the
+/// BGE-small ONNX session until the first `embed_batch` call.
+///
+/// Plan-29: the `ohara-mcp` in-process fallback uses this so MCP
+/// sessions that never call `find_pattern` (or only call
+/// `explain_change`, which needs no models) never pay the embedder
+/// load. Identity methods answer from compile-time constants.
+pub struct LazyFastEmbedProvider {
+    slot: crate::idle_slot::IdleSlot<Arc<FastEmbedProvider>>,
+    provider: EmbedProvider,
+}
+
+impl LazyFastEmbedProvider {
+    /// Create a lazy embedder that will load with the CPU execution
+    /// provider on first use. Mirrors [`FastEmbedProvider::new`].
+    pub fn new() -> Self {
+        Self::with_provider(EmbedProvider::Cpu)
+    }
+
+    /// Create a lazy embedder that will load with the requested
+    /// execution provider on first use.
+    pub fn with_provider(provider: EmbedProvider) -> Self {
+        Self {
+            slot: crate::idle_slot::IdleSlot::new(),
+            provider,
+        }
+    }
+
+    async fn get_or_init(&self) -> CoreResult<Arc<FastEmbedProvider>> {
+        let provider = self.provider;
+        self.slot
+            .get_or_try_init(async move {
+                tokio::task::spawn_blocking(move || FastEmbedProvider::with_provider(provider))
+                    .await
+                    .map_err(|e| ohara_core::OhraError::Embedding(format!("join: {e}")))?
+                    .map(Arc::new)
+                    .map_err(|e| ohara_core::OhraError::Embedding(e.to_string()))
+            })
+            .await
+    }
+}
+
+impl Default for LazyFastEmbedProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl ohara_core::EmbeddingProvider for LazyFastEmbedProvider {
+    fn dimension(&self) -> usize {
+        DEFAULT_DIM
+    }
+
+    fn model_id(&self) -> &str {
+        DEFAULT_MODEL_ID
+    }
+
+    async fn embed_batch(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
+        self.get_or_init().await?.embed_batch(texts).await
+    }
+}
+
 /// Reorder fastembed's score-descending `Vec<RerankResult>` so the output
 /// `Vec<f32>` aligns positionally with the caller's `candidates` slice
 /// (i.e. `out[i]` is the score for the original `candidates[i]`).
