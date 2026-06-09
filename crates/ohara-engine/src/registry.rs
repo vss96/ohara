@@ -44,8 +44,6 @@ pub struct DaemonRecord {
     /// Seconds since epoch of the most recent successful health ping (0 if
     /// never checked).
     pub last_health_unix: u64,
-    /// `true` while the daemon is actively processing a request.
-    pub busy: bool,
 }
 
 // ── Internal file envelope ────────────────────────────────────────────────────
@@ -156,13 +154,11 @@ impl Registry {
         })
     }
 
-    /// Return the first alive, non-busy daemon that matches `ohara_version`,
+    /// Return the first alive daemon that matches `ohara_version`,
     /// or `None` if no compatible daemon is registered.
     pub fn pick_compatible(&self, ohara_version: &str) -> Result<Option<DaemonRecord>> {
         let alive = self.list_alive()?;
-        Ok(alive
-            .into_iter()
-            .find(|d| d.ohara_version == ohara_version && !d.busy))
+        Ok(alive.into_iter().find(|d| d.ohara_version == ohara_version))
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────
@@ -261,7 +257,6 @@ mod tests {
             ohara_git_sha: Some("abc1234".to_string()),
             started_at_unix: 1_700_000_000,
             last_health_unix: 0,
-            busy: false,
         }
     }
 
@@ -315,7 +310,6 @@ mod tests {
             ohara_version: "0.7.4".to_string(),
             ohara_git_sha: None,
             started_at_unix: now_unix(),
-            busy: false,
         })
         .unwrap();
         let alive = r.list_alive().unwrap();
@@ -323,14 +317,14 @@ mod tests {
     }
 
     #[test]
-    fn pick_compatible_none_when_only_wrong_version_or_busy() {
+    fn pick_compatible_none_when_only_wrong_version() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("registry.json");
         let r = Registry::open(&path).unwrap();
         let fresh = now_unix();
         let my_pid = std::process::id();
 
-        // Register: alive pid, wrong version, not busy — should NOT be picked for 0.7.4.
+        // Register: alive pid, wrong version — should NOT be picked for 0.7.4.
         r.register(DaemonRecord {
             pid: my_pid,
             ohara_version: "0.7.3".into(),
@@ -338,7 +332,6 @@ mod tests {
             socket_path: PathBuf::from("/tmp/a.sock"),
             ohara_git_sha: None,
             started_at_unix: fresh,
-            busy: false,
         })
         .unwrap();
         assert!(
@@ -355,7 +348,7 @@ mod tests {
         let fresh = now_unix();
         let my_pid = std::process::id();
 
-        // Register: alive pid, correct version, not busy — should be picked.
+        // Register: alive pid, correct version — should be picked.
         r.register(DaemonRecord {
             pid: my_pid,
             ohara_version: "0.7.4".into(),
@@ -363,40 +356,13 @@ mod tests {
             socket_path: PathBuf::from("/tmp/c.sock"),
             ohara_git_sha: None,
             started_at_unix: fresh,
-            busy: false,
         })
         .unwrap();
         let pick = r
             .pick_compatible("0.7.4")
             .unwrap()
-            .expect("idle 0.7.4 daemon should be picked");
+            .expect("0.7.4 daemon should be picked");
         assert_eq!(pick.pid, my_pid);
-        assert!(!pick.busy);
-    }
-
-    #[test]
-    fn pick_compatible_skips_busy_daemon() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("registry.json");
-        let r = Registry::open(&path).unwrap();
-        let fresh = now_unix();
-        let my_pid = std::process::id();
-
-        // Register: alive pid, correct version, but busy — should NOT be picked.
-        r.register(DaemonRecord {
-            pid: my_pid,
-            ohara_version: "0.7.4".into(),
-            last_health_unix: fresh,
-            socket_path: PathBuf::from("/tmp/b.sock"),
-            ohara_git_sha: None,
-            started_at_unix: fresh,
-            busy: true,
-        })
-        .unwrap();
-        assert!(
-            r.pick_compatible("0.7.4").unwrap().is_none(),
-            "busy daemon must not be picked"
-        );
     }
 
     fn rec(pid: u32, socket: &str) -> DaemonRecord {
@@ -407,7 +373,6 @@ mod tests {
             ohara_git_sha: None,
             started_at_unix: 1_700_000_000,
             last_health_unix: 0,
-            busy: false,
         }
     }
 

@@ -57,7 +57,6 @@ pub fn find_or_spawn_daemon(
         ohara_git_sha: Some(ohara_git_sha.into()),
         started_at_unix: now_unix(),
         last_health_unix: now_unix(),
-        busy: false,
     };
     if let Err(register_err) = reg.register(record) {
         tracing::warn!(
