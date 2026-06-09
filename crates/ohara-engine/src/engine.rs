@@ -229,11 +229,8 @@ impl RetrievalEngine {
     /// `ResponseMeta` is computed BEFORE retrieval so that a
     /// [`CompatibilityStatus::NeedsRebuild`] index is refused before
     /// touching stale vectors (plan-29 guard). This covers the daemon,
-    /// CLI, and MCP-fallback paths with one check.
-    ///
-    /// `ResponseMeta` is served from [`MetaCache`] when a fresh entry
-    /// exists (TTL = 5 s). On a miss the meta is computed via
-    /// `compose_response_meta` and stored in the cache before returning.
+    /// CLI, and MCP-fallback paths with one check. Meta is cached via
+    /// [`Self::cached_meta`] (TTL = 5 s).
     pub async fn find_pattern(
         &self,
         repo_path: impl AsRef<Path>,
