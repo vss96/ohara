@@ -32,6 +32,17 @@ pub trait EmbeddingProvider: Send + Sync {
 #[async_trait]
 pub trait RerankProvider: Send + Sync {
     async fn rerank(&self, query: &str, candidates: &[&str]) -> Result<Vec<f32>>;
+
+    /// Drop any lazily-loaded model session that has been idle for at
+    /// least `idle`. Returns `true` when a session was dropped.
+    ///
+    /// Default is a no-op `false`: eager rerankers and test stubs hold
+    /// no unloadable state. `LazyFastEmbedReranker` overrides this so
+    /// the `ohara serve` daemon can shed the ~110 MB cross-encoder
+    /// session during quiet periods (plan-29 tiered unload).
+    async fn unload_if_idle(&self, _idle: std::time::Duration) -> bool {
+        false
+    }
 }
 
 /// Plan-27 chunk-embed cache mode. Selects whether the embedder is

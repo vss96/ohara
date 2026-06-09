@@ -520,6 +520,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lazy_reranker_unload_without_load_is_false() {
+        use ohara_core::embed::RerankProvider as _;
+        let r = LazyFastEmbedReranker::new();
+        assert!(
+            !r.unload_if_idle(std::time::Duration::ZERO).await,
+            "nothing loaded yet — nothing to unload"
+        );
+    }
+
+    #[tokio::test]
+    async fn lazy_reranker_empty_candidates_never_loads_or_stamps() {
+        use ohara_core::embed::RerankProvider as _;
+        let r = LazyFastEmbedReranker::new();
+        let scores = r.rerank("q", &[]).await.expect("empty rerank");
+        assert!(scores.is_empty());
+        // Still nothing to unload: the empty-candidates short-circuit
+        // must not have touched the slot.
+        assert!(!r.unload_if_idle(std::time::Duration::ZERO).await);
+    }
+
+    #[tokio::test]
     #[ignore = "downloads ~110MB on first run; opt-in via `cargo test -- --include-ignored`"]
     async fn reranker_orders_relevant_doc_first() {
         let r = FastEmbedReranker::new().unwrap();
