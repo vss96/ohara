@@ -162,6 +162,33 @@ mod tests {
     use crate::engine::tests::make_test_engine;
 
     #[tokio::test]
+    async fn sweep_removes_stale_version_dirs_with_dead_daemons() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path(); // plays the role of `<cache>/ohara/daemon`
+        let stale = root.join("0.0.1");
+        let current = root.join(env!("CARGO_PKG_VERSION"));
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::create_dir_all(&current).unwrap();
+
+        // Dead-pid record in the stale-version registry.
+        let reg = crate::registry::Registry::open(stale.join("registry.json")).unwrap();
+        reg.register(crate::registry::DaemonRecord {
+            pid: u32::MAX - 1, // not a live pid
+            socket_path: stale.join("dead.sock"),
+            ohara_version: "0.0.1".into(),
+            ohara_git_sha: None,
+            started_at_unix: 1,
+            last_health_unix: 1,
+        })
+        .unwrap();
+
+        sweep_stale_versions(root, env!("CARGO_PKG_VERSION")).await;
+
+        assert!(!stale.exists(), "stale version dir must be removed");
+        assert!(current.exists(), "current version dir must be untouched");
+    }
+
+    #[tokio::test]
     async fn run_daemon_with_engine_serves_ping_until_shutdown() {
         let tmp = tempfile::tempdir().unwrap();
         let opts = DaemonOptions {
