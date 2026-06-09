@@ -261,6 +261,32 @@ mod tests {
         assert!(current.exists(), "current version dir must be untouched");
     }
 
+    /// Dirs without a `registry.json` (e.g. user-created dirs co-located in
+    /// the daemon_root) must never be swept, regardless of their name.
+    /// Pins the `Registry::open`-side-effect guard added in commit 00bed39.
+    #[tokio::test]
+    async fn sweep_skips_dirs_without_registry_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // A directory that looks version-like but has no registry.json.
+        let user_dir = root.join("random-user-dir");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        // Put a file inside to make the directory non-empty.
+        std::fs::write(user_dir.join("my-file.txt"), b"precious data").unwrap();
+
+        sweep_stale_versions(root, env!("CARGO_PKG_VERSION")).await;
+
+        assert!(
+            root.join("random-user-dir").exists(),
+            "dirs without a registry must never be swept"
+        );
+        assert!(
+            root.join("random-user-dir").join("my-file.txt").exists(),
+            "files inside a no-registry dir must survive"
+        );
+    }
+
     #[tokio::test]
     async fn sweep_shuts_down_live_stale_version_daemon_over_socket() {
         let tmp = tempfile::tempdir().unwrap();
