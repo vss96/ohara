@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
     }
 
     let workdir = std::env::current_dir()?;
-    let server = server::OharaServer::open(workdir).await?;
+    let server = server::OharaServer::open(workdir)?;
     server.serve_stdio().await
 }
 

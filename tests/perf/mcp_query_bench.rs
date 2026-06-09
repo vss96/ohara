@@ -118,7 +118,7 @@ async fn mcp_query_bench_emits_run_report() {
     let mut explain_wall = PhaseStats::default();
 
     let boot_start = Instant::now();
-    let server = ohara_mcp::server::OharaServer::open(&fixture).await.expect(
+    let server = ohara_mcp::server::OharaServer::open(&fixture).expect(
         "OharaServer::open against medium fixture \
              (run `ohara index fixtures/medium/repo` first)",
     );

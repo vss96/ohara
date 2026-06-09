@@ -123,10 +123,7 @@ async fn make_server(repo_path: &Path, ohara_home: &Path) -> OharaServer {
     let engine = Arc::new(RetrievalEngine::new(embedder, reranker));
     // Warm the handle — this opens (or creates) the SQLite DB.
     engine.open_repo(&canonical).await.expect("open_repo");
-    OharaServer {
-        repo_path: canonical,
-        engine,
-    }
+    OharaServer::with_engine(canonical, engine)
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

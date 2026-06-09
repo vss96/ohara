@@ -15,6 +15,8 @@ use crate::tools::explain_change::{ExplainChangeInput, EXPLAIN_TOOL_DESCRIPTION}
 use ohara_core::count_lines;
 use ohara_core::index_metadata::CompatibilityStatus;
 use ohara_core::query_understanding::{parse_query, RetrievalProfile};
+use ohara_engine::ipc::{ErrorCode, RequestMethod, Response};
+use ohara_engine::FindPatternResult;
 use rmcp::{
     model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
     schemars, tool, ServerHandler,
@@ -22,6 +24,78 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
+
+/// The refusal envelope the in-process and daemon paths both produce when
+/// the index is incompatible with the current runtime. Surfaced to the MCP
+/// client as `invalid_params` so the agent can run the rebuild itself.
+fn rebuild_refusal(detail: &str) -> rmcp::Error {
+    rmcp::Error::invalid_params(
+        format!(
+            "find_pattern refuses to run: {detail}. \
+             Run `ohara index --rebuild` in this repo first."
+        ),
+        None,
+    )
+}
+
+fn map_engine_error(e: ohara_engine::EngineError) -> rmcp::Error {
+    match e {
+        ohara_engine::EngineError::NeedsRebuild { reason } => {
+            rebuild_refusal(&format!("index needs rebuild ({reason})"))
+        }
+        other => rmcp::Error::internal_error(other.to_string(), None),
+    }
+}
+
+/// Daemon response → typed result, mapping NeedsRebuild to the same
+/// refusal envelope the in-process path produces.
+fn decode_find_pattern(resp: Response) -> Result<FindPatternResult, rmcp::Error> {
+    if let Some(err) = resp.error {
+        if err.code == ErrorCode::NeedsRebuild {
+            return Err(rebuild_refusal(&err.message));
+        }
+        return Err(rmcp::Error::internal_error(err.message, None));
+    }
+    let value = resp.result.ok_or_else(|| {
+        rmcp::Error::internal_error("daemon response missing result".to_string(), None)
+    })?;
+    serde_json::from_value(value)
+        .map_err(|e| rmcp::Error::internal_error(format!("decode FindPatternResult: {e}"), None))
+}
+
+/// Successful daemon response → typed value; anything else → None
+/// (caller falls back in-process).
+fn decode_ok<T: serde::de::DeserializeOwned>(resp: Response) -> Option<T> {
+    if resp.error.is_some() {
+        return None;
+    }
+    serde_json::from_value(resp.result?).ok()
+}
+
+/// Shared envelope builder — both paths produce the existing wire shape.
+fn find_pattern_body(
+    result: FindPatternResult,
+    query_text: &str,
+) -> Result<CallToolResult, rmcp::Error> {
+    let parsed = parse_query(query_text);
+    let profile = RetrievalProfile::for_intent(parsed.intent);
+    let meta = result.meta;
+    let body = json!({
+        "hits": result.hits,
+        "_meta": {
+            "index_status": meta.index_status,
+            "hint": meta.hint,
+            "compatibility": meta.compatibility,
+            "query_profile": {
+                "name": profile.name,
+                "explanation": profile.explanation,
+            },
+        }
+    });
+    Ok(CallToolResult::success(vec![Content::text(
+        body.to_string(),
+    )]))
+}
 
 pub const TOOL_DESCRIPTION: &str = "\
 Search this project's git history for past implementations of similar logic.
@@ -92,47 +166,6 @@ impl OharaService {
         let since_unix = parse_since(input.since.as_deref())
             .map_err(|e| rmcp::Error::invalid_params(e.to_string(), None))?;
 
-        // Plan 13 Task 3.2 Step 2: fail early when the index is on an
-        // incompatible embedder / dimension / schema. KNN against a
-        // stale-vector index would silently return wrong results;
-        // returning a structured error with the rebuild command lets
-        // the MCP client surface it instead of acting on bad data.
-        //
-        // The engine's open_repo has already warmed the handle; we derive
-        // compatibility from the per-handle storage via a fresh meta read.
-        let handle = self
-            .server
-            .engine
-            .open_repo(&self.server.repo_path)
-            .await
-            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-
-        let stored = handle
-            .storage
-            .get_index_metadata(&handle.repo_id)
-            .await
-            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        // Issue #40: at query time we don't know the user's
-        // `--embed-cache` intent, so adopt the stored mode for the
-        // runtime expectation. An internally-consistent
-        // `--embed-cache=diff` index then assesses as Compatible
-        // rather than the previous false-positive NeedsRebuild.
-        let mut runtime = ohara_engine::current_runtime_metadata(ohara_core::EmbedMode::default());
-        if let Some(stored_mode) = stored.components.get("embed_input_mode") {
-            runtime.embed_input_mode = stored_mode.clone();
-        }
-        let compatibility = CompatibilityStatus::assess(&runtime, &stored);
-
-        if let CompatibilityStatus::NeedsRebuild { reason } = &compatibility {
-            return Err(rmcp::Error::invalid_params(
-                format!(
-                    "find_pattern refuses to run: index needs rebuild ({reason}). \
-                     Run `ohara index --rebuild` in this repo first."
-                ),
-                None,
-            ));
-        }
-
         let q = ohara_core::query::PatternQuery {
             query: input.query.clone(),
             k: input.k.clamp(1, 20),
@@ -141,41 +174,23 @@ impl OharaService {
             no_rerank: input.no_rerank,
         };
 
-        // Re-derive the query profile from the input text — this is the
-        // same deterministic computation the retriever performs internally.
-        // Surfacing it in `_meta.query_profile` preserves the pre-refactor
-        // wire format so existing Claude Code / Cursor integrations stay
-        // byte-identical.
-        let parsed = parse_query(&input.query);
-        let profile = RetrievalProfile::for_intent(parsed.intent);
-
-        let result = self
+        // Daemon-first (plan-29): one shared engine across sessions.
+        if let Some(resp) = self
             .server
-            .engine
+            .daemon_call(RequestMethod::FindPattern(q.clone()))
+            .await
+        {
+            return find_pattern_body(decode_find_pattern(resp)?, &input.query);
+        }
+
+        // In-process fallback (daemon disabled or unreachable). The engine
+        // now guards NeedsRebuild itself, so the refusal still surfaces here.
+        let engine = self.server.engine().await;
+        let result = engine
             .find_pattern(&self.server.repo_path, q)
             .await
-            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-
-        // Build the ResponseMeta for the index_status / hint / compatibility
-        // fields. The engine's find_pattern already computed it internally;
-        // we re-use the meta it stored (passed back in FindPatternResult).
-        let meta = result.meta;
-
-        let body = json!({
-            "hits": result.hits,
-            "_meta": {
-                "index_status": meta.index_status,
-                "hint": meta.hint,
-                "compatibility": meta.compatibility,
-                "query_profile": {
-                    "name": profile.name,
-                    "explanation": profile.explanation,
-                },
-            }
-        });
-        Ok(CallToolResult::success(vec![Content::text(
-            body.to_string(),
-        )]))
+            .map_err(map_engine_error)?;
+        find_pattern_body(result, &input.query)
     }
 
     #[tool(description = EXPLAIN_TOOL_DESCRIPTION)]
@@ -218,9 +233,38 @@ impl OharaService {
             include_related: false,
         };
 
-        let explain_result = self
+        // Daemon-first: blame result + index status both from the shared
+        // engine. Any miss → full in-process fallback below.
+        if let Some(resp) = self
             .server
-            .engine
+            .daemon_call(RequestMethod::ExplainChange(q.clone()))
+            .await
+        {
+            let explain: Option<ohara_engine::ExplainResult> = decode_ok(resp);
+            let meta: Option<ohara_core::query::ResponseMeta> =
+                match self.server.daemon_call(RequestMethod::IndexStatus).await {
+                    Some(m) => decode_ok(m),
+                    None => None,
+                };
+            if let (Some(explain), Some(meta)) = (explain, meta) {
+                let body = json!({
+                    "hits": explain.hits,
+                    "_meta": {
+                        "index_status": meta.index_status,
+                        "hint": meta.hint,
+                        "explain": explain.meta,
+                    }
+                });
+                return Ok(CallToolResult::success(vec![Content::text(
+                    body.to_string(),
+                )]));
+            }
+        }
+
+        // In-process fallback (daemon disabled or unreachable). The lazy
+        // engine loads no model just to blame + read index status.
+        let engine = self.server.engine().await;
+        let explain_result = engine
             .explain_change(&self.server.repo_path, q)
             .await
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
@@ -228,9 +272,7 @@ impl OharaService {
         // Derive index_meta for the _meta.index_status fields. Re-use the
         // engine's open_repo handle; index status requires a git walk + storage
         // query, so we compute it here rather than caching in the tool.
-        let handle = self
-            .server
-            .engine
+        let handle = engine
             .open_repo(&self.server.repo_path)
             .await
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
@@ -387,5 +429,22 @@ mod tests {
     fn find_pattern_input_requires_query() {
         let raw = r#"{"k":3}"#;
         assert!(serde_json::from_str::<FindPatternInput>(raw).is_err());
+    }
+
+    #[test]
+    fn decode_find_pattern_maps_needs_rebuild_to_refusal() {
+        use ohara_engine::ipc::{ErrorCode, ErrorPayload, Response};
+        let resp = Response {
+            id: 1,
+            result: None,
+            error: Some(ErrorPayload {
+                code: ErrorCode::NeedsRebuild,
+                message: "index needs rebuild: embedding_model mismatch".into(),
+            }),
+        };
+        let err = decode_find_pattern(resp).expect_err("must refuse");
+        let msg = err.to_string();
+        assert!(msg.contains("needs rebuild"), "got: {msg}");
+        assert!(msg.contains("ohara index --rebuild"), "got: {msg}");
     }
 }
