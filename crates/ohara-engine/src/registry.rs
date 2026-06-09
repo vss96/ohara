@@ -400,6 +400,49 @@ mod tests {
     }
 
     #[test]
+    fn locked_update_serialises_concurrent_pick_or_spawn() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let spawns = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let path = path.clone();
+            let spawns = spawns.clone();
+            handles.push(std::thread::spawn(move || {
+                let reg = Registry::open(&path).unwrap();
+                reg.locked_update(|daemons| {
+                    if let Some(existing) =
+                        daemons.iter().find(|d| d.ohara_version == "0.9.0")
+                    {
+                        return existing.pid;
+                    }
+                    // Simulate a slow spawn while the lock is held.
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    spawns.fetch_add(1, Ordering::SeqCst);
+                    let rec = DaemonRecord {
+                        pid: std::process::id(), // alive, survives prune
+                        socket_path: PathBuf::from("/tmp/x.sock"),
+                        ohara_version: "0.9.0".into(),
+                        ohara_git_sha: None,
+                        started_at_unix: 1,
+                        last_health_unix: now_unix(),
+                    };
+                    daemons.push(rec.clone());
+                    rec.pid
+                })
+                .unwrap()
+            }));
+        }
+        let pids: Vec<u32> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(spawns.load(Ordering::SeqCst), 1, "exactly one spawn");
+        assert_eq!(pids[0], pids[1], "both callers see the same daemon");
+    }
+
+    #[test]
     fn concurrent_register_does_not_lose_entries() {
         let dir = tempfile::tempdir().unwrap();
         let path = Arc::new(dir.path().join("daemons.json"));
