@@ -96,6 +96,9 @@ pub async fn run_daemon_with_engine(
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(idle / 2).await;
+                if watchdog_stop.is_cancelled() {
+                    break;
+                }
                 if watchdog_engine.idle_for() >= idle {
                     info!(?idle, "idle timeout reached, shutting down");
                     watchdog_stop.cancel();
