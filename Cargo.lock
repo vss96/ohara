@@ -2444,6 +2444,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "clap",
  "git2",
  "ohara-core",
  "ohara-embed",

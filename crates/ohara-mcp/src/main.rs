@@ -35,6 +35,9 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
+    // "serve" is a reserved first argument (used by spawn_daemon when the
+    // thin client spawns current_exe as the daemon). MCP clients invoke
+    // this binary with no args; never document "serve" as a user-facing flag.
     if std::env::args().nth(1).as_deref() == Some("serve") {
         return run_serve().await;
     }
@@ -50,7 +53,8 @@ async fn run_serve() -> Result<()> {
         .unwrap_or_else(|| "ohara-mcp".into());
     // Drop the literal "serve" so clap sees `argv0 --flags…`.
     let rest = std::env::args_os().skip(2);
-    let cli = ServeCli::parse_from(std::iter::once(argv0).chain(rest));
+    let cli = ServeCli::try_parse_from(std::iter::once(argv0).chain(rest))
+        .map_err(|e| anyhow::anyhow!("serve args: {e}"))?;
     ohara_engine::daemon::run_daemon(ohara_engine::daemon::DaemonOptions {
         socket: cli.socket,
         pid_file: cli.pid_file,
