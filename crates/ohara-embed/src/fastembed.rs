@@ -543,6 +543,16 @@ mod tests {
         assert!(!r.unload_if_idle(std::time::Duration::ZERO).await);
     }
 
+    #[test]
+    fn lazy_embedder_reports_identity_without_init() {
+        use ohara_core::EmbeddingProvider as _;
+        let e = LazyFastEmbedProvider::new();
+        // Both must answer from constants — constructing the provider
+        // and asking for identity must never load the ONNX session.
+        assert_eq!(e.model_id(), DEFAULT_MODEL_ID);
+        assert_eq!(e.dimension(), DEFAULT_DIM);
+    }
+
     #[tokio::test]
     #[ignore = "downloads ~110MB on first run; opt-in via `cargo test -- --include-ignored`"]
     async fn reranker_orders_relevant_doc_first() {
