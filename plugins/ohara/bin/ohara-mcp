@@ -20,7 +20,9 @@ const os = require('node:os');
 function resolveVersion() {
   if (process.env.OHARA_PLUGIN_VERSION) return process.env.OHARA_PLUGIN_VERSION;
   const manifest = path.join(__dirname, '..', '.claude-plugin', 'plugin.json');
-  return JSON.parse(fs.readFileSync(manifest, 'utf8')).version;
+  const v = JSON.parse(fs.readFileSync(manifest, 'utf8')).version;
+  if (!v) throw new Error(`ohara plugin.json at ${manifest} is missing a "version" field`);
+  return v;
 }
 
 const OHARA_VERSION = resolveVersion();
