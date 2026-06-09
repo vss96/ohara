@@ -10,14 +10,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock;
 
-// plan-29: consumed by LazyFastEmbedReranker in the next commit
 pub(crate) struct IdleSlot<T> {
     slot: RwLock<Option<T>>,
     /// Unix-seconds of the most recent `get_or_try_init` call; 0 = never used.
     last_used_unix: AtomicU64,
 }
 
-#[allow(dead_code)]
 impl<T: Clone> IdleSlot<T> {
     pub(crate) fn new() -> Self {
         Self {
@@ -72,8 +70,6 @@ impl<T: Clone> IdleSlot<T> {
     }
 }
 
-// plan-29: consumed by LazyFastEmbedReranker in the next commit
-#[allow(dead_code)]
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
