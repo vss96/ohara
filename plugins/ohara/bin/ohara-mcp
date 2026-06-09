@@ -7,7 +7,7 @@
 //
 // The binary URL pattern assumes ohara publishes per-target tarballs to its
 // GitHub releases (cargo-dist style). If the release artifact naming differs,
-// update OHARA_VERSION / archiveName below.
+// update .claude-plugin/plugin.json (version field) and plugins/ohara/package.json.
 
 'use strict';
 
@@ -17,7 +17,13 @@ const path = require('node:path');
 const https = require('node:https');
 const os = require('node:os');
 
-const OHARA_VERSION = process.env.OHARA_PLUGIN_VERSION || '0.7.4';
+function resolveVersion() {
+  if (process.env.OHARA_PLUGIN_VERSION) return process.env.OHARA_PLUGIN_VERSION;
+  const manifest = path.join(__dirname, '..', '.claude-plugin', 'plugin.json');
+  return JSON.parse(fs.readFileSync(manifest, 'utf8')).version;
+}
+
+const OHARA_VERSION = resolveVersion();
 const RELEASE_HOST = 'https://github.com/vss96/ohara/releases/download';
 const CACHE_ROOT = path.join(os.homedir(), '.cache', 'ohara-plugin');
 const CACHE_DIR = path.join(CACHE_ROOT, `v${OHARA_VERSION}`);
@@ -82,6 +88,21 @@ function extract(archivePath, intoDir) {
   execFileSync('tar', ['-xf', archivePath, '-C', intoDir], { stdio: 'inherit' });
 }
 
+function sweepOldCaches(cacheRoot, keep) {
+  let entries;
+  try {
+    entries = fs.readdirSync(cacheRoot, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    if (!e.name.startsWith('v')) continue;
+    if (e.name === keep) continue;
+    fs.rmSync(path.join(cacheRoot, e.name), { recursive: true, force: true });
+  }
+}
+
 async function ensureBinary() {
   const binName = 'ohara-mcp';
   const cachedSentinel = path.join(CACHE_DIR, '.resolved-path');
@@ -109,6 +130,7 @@ async function ensureBinary() {
   }
   fs.chmodSync(resolved, 0o755);
   fs.writeFileSync(cachedSentinel, resolved);
+  sweepOldCaches(CACHE_ROOT, `v${OHARA_VERSION}`);
   return resolved;
 }
 
@@ -125,7 +147,11 @@ async function main() {
   });
 }
 
-main().catch((err) => {
-  process.stderr.write(`[ohara-plugin] ${err && err.message ? err.message : err}\n`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    process.stderr.write(`[ohara-plugin] ${err && err.message ? err.message : err}\n`);
+    process.exit(1);
+  });
+}
+
+module.exports = { resolveVersion, sweepOldCaches, targetTriple, archiveName };
