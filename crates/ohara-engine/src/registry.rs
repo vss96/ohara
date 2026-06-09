@@ -118,22 +118,26 @@ impl Registry {
     /// the registry file atomically under a single file lock to avoid
     /// overwriting concurrent `register()` calls.
     pub fn list_alive(&self) -> Result<Vec<DaemonRecord>> {
-        let now = now_unix();
-        let mut alive = Vec::new();
-        self.mutate(|f| {
-            f.daemons.retain(|d| {
-                if !pid_alive(d.pid) {
-                    return false;
-                }
-                if now.saturating_sub(d.last_health_unix) > 5 * 60 {
-                    return false;
-                }
-                true
-            });
-            alive = f.daemons.clone();
+        self.locked_update(|daemons| daemons.clone())
+    }
+
+    /// Run `f` under the registry's exclusive file lock, after pruning
+    /// dead/stale records. `f` may mutate the daemon list (e.g. push a
+    /// freshly spawned record); mutations persist before the lock drops.
+    ///
+    /// The closure may block (the find-or-spawn path starts a daemon and
+    /// waits for readiness, bounded at 10s); contention is rare — only
+    /// concurrent cold starts collide here, and the loser then finds the
+    /// winner's record instead of spawning a duplicate.
+    pub fn locked_update<T>(&self, f: impl FnOnce(&mut Vec<DaemonRecord>) -> T) -> Result<T> {
+        let mut out: Option<T> = None;
+        self.mutate(|rf| {
+            prune_dead(rf);
+            out = Some(f(&mut rf.daemons));
             Ok(())
         })?;
-        Ok(alive)
+        #[allow(clippy::expect_used)]
+        Ok(out.expect("invariant: mutate runs the closure exactly once"))
     }
 
     /// Update `last_health_unix` for the daemon with the given PID to the
@@ -152,13 +156,6 @@ impl Registry {
             }
             Ok(())
         })
-    }
-
-    /// Return the first alive daemon that matches `ohara_version`,
-    /// or `None` if no compatible daemon is registered.
-    pub fn pick_compatible(&self, ohara_version: &str) -> Result<Option<DaemonRecord>> {
-        let alive = self.list_alive()?;
-        Ok(alive.into_iter().find(|d| d.ohara_version == ohara_version))
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────
@@ -219,7 +216,13 @@ impl Registry {
     }
 }
 
-// ── OS helpers ────────────────────────────────────────────────────────────────
+// ── OS helpers / prune ───────────────────────────────────────────────────────
+
+fn prune_dead(rf: &mut RegistryFile) {
+    let now = now_unix();
+    rf.daemons
+        .retain(|d| pid_alive(d.pid) && now.saturating_sub(d.last_health_unix) <= 5 * 60);
+}
 
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
@@ -316,55 +319,6 @@ mod tests {
         assert!(alive.is_empty(), "dead-pid record must be pruned");
     }
 
-    #[test]
-    fn pick_compatible_none_when_only_wrong_version() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("registry.json");
-        let r = Registry::open(&path).unwrap();
-        let fresh = now_unix();
-        let my_pid = std::process::id();
-
-        // Register: alive pid, wrong version — should NOT be picked for 0.7.4.
-        r.register(DaemonRecord {
-            pid: my_pid,
-            ohara_version: "0.7.3".into(),
-            last_health_unix: fresh,
-            socket_path: PathBuf::from("/tmp/a.sock"),
-            ohara_git_sha: None,
-            started_at_unix: fresh,
-        })
-        .unwrap();
-        assert!(
-            r.pick_compatible("0.7.4").unwrap().is_none(),
-            "wrong-version daemon must not be picked"
-        );
-    }
-
-    #[test]
-    fn pick_compatible_returns_idle_matching_daemon() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("registry.json");
-        let r = Registry::open(&path).unwrap();
-        let fresh = now_unix();
-        let my_pid = std::process::id();
-
-        // Register: alive pid, correct version — should be picked.
-        r.register(DaemonRecord {
-            pid: my_pid,
-            ohara_version: "0.7.4".into(),
-            last_health_unix: fresh,
-            socket_path: PathBuf::from("/tmp/c.sock"),
-            ohara_git_sha: None,
-            started_at_unix: fresh,
-        })
-        .unwrap();
-        let pick = r
-            .pick_compatible("0.7.4")
-            .unwrap()
-            .expect("0.7.4 daemon should be picked");
-        assert_eq!(pick.pid, my_pid);
-    }
-
     fn rec(pid: u32, socket: &str) -> DaemonRecord {
         DaemonRecord {
             pid,
@@ -415,9 +369,7 @@ mod tests {
             handles.push(std::thread::spawn(move || {
                 let reg = Registry::open(&path).unwrap();
                 reg.locked_update(|daemons| {
-                    if let Some(existing) =
-                        daemons.iter().find(|d| d.ohara_version == "0.9.0")
-                    {
+                    if let Some(existing) = daemons.iter().find(|d| d.ohara_version == "0.9.0") {
                         return existing.pid;
                     }
                     // Simulate a slow spawn while the lock is held.
