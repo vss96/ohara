@@ -167,7 +167,9 @@ async fn wait_for_socket(p: &std::path::Path, total: Duration) -> crate::Result<
 /// (`<cache>/ohara/daemon`). For every sibling version dir: shut down
 /// its live daemons over their sockets, then remove the dir once empty.
 /// Failures are logged and skipped — the old daemons' own idle timeout
-/// remains the backstop.
+/// remains the backstop. A concurrently-booting daemon of a different
+/// version may be swept once; its clients respawn it — acceptable for
+/// the rare mid-upgrade race.
 pub(crate) async fn sweep_stale_versions(daemon_root: &std::path::Path, current_version: &str) {
     let entries = match std::fs::read_dir(daemon_root) {
         Ok(e) => e,
@@ -178,6 +180,11 @@ pub(crate) async fn sweep_stale_versions(daemon_root: &std::path::Path, current_
             continue;
         }
         if !entry.path().is_dir() {
+            continue;
+        }
+        // Never adopt-and-delete a dir the registry didn't create
+        // (Registry::open would seed an empty registry.json).
+        if !entry.path().join("registry.json").exists() {
             continue;
         }
         let reg = match crate::registry::Registry::open(entry.path().join("registry.json")) {
@@ -250,6 +257,63 @@ mod tests {
 
         sweep_stale_versions(root, env!("CARGO_PKG_VERSION")).await;
 
+        assert!(!stale.exists(), "stale version dir must be removed");
+        assert!(current.exists(), "current version dir must be untouched");
+    }
+
+    #[tokio::test]
+    async fn sweep_shuts_down_live_stale_version_daemon_over_socket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path(); // plays the role of `<cache>/ohara/daemon`
+        let stale = root.join("0.0.1");
+        let current = root.join(env!("CARGO_PKG_VERSION"));
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::create_dir_all(&current).unwrap();
+
+        // Real daemon listening on a socket inside the stale-version dir.
+        let socket = stale.join("live.sock");
+        let engine = Arc::new(make_test_engine());
+        let stop = CancellationToken::new();
+        let task = {
+            let s = socket.clone();
+            let stop = stop.clone();
+            tokio::spawn(async move { serve_unix(engine, &s, stop).await })
+        };
+        for _ in 0..100 {
+            if socket.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(socket.exists(), "test daemon socket did not appear");
+
+        // Live record: the pid is this (running) test process and the health
+        // stamp is fresh, so list_alive keeps it and the sweep must deliver
+        // Shutdown over the socket rather than just pruning the record.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let reg = crate::registry::Registry::open(stale.join("registry.json")).unwrap();
+        reg.register(crate::registry::DaemonRecord {
+            pid: std::process::id(),
+            socket_path: socket.clone(),
+            ohara_version: "0.0.1".into(),
+            ohara_git_sha: None,
+            started_at_unix: now,
+            last_health_unix: now,
+        })
+        .unwrap();
+
+        sweep_stale_versions(root, env!("CARGO_PKG_VERSION")).await;
+
+        // (a) Shutdown was delivered: the listener task completes cleanly.
+        let joined = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+            .await
+            .expect("daemon must exit after sweep's Shutdown")
+            .expect("join");
+        assert!(joined.is_ok(), "daemon exited with error: {joined:?}");
+        // (b) The emptied stale-version dir is removed.
         assert!(!stale.exists(), "stale version dir must be removed");
         assert!(current.exists(), "current version dir must be untouched");
     }
