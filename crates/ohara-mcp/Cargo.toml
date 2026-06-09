@@ -40,6 +40,7 @@ chrono.workspace = true
 tempfile.workspace = true
 git2.workspace = true
 async-trait.workspace = true
+tokio-util.workspace = true
 
 [features]
 default = []
