@@ -73,6 +73,15 @@ pub async fn run_daemon_with_engine(
         .map_err(|e| EngineError::Internal(format!("write readiness file: {e}")))?;
     info!(socket = ?opts.socket, pid_file = ?opts.pid_file, "ohara daemon ready");
 
+    if let Some(reg_path) = &opts.registry_path {
+        if let Some(daemon_root) = reg_path.parent().and_then(|p| p.parent()) {
+            let root = daemon_root.to_path_buf();
+            tokio::spawn(async move {
+                sweep_stale_versions(&root, env!("CARGO_PKG_VERSION")).await;
+            });
+        }
+    }
+
     if let Some(reg_path) = opts.registry_path.clone() {
         let pid = std::process::id();
         let watchdog_stop = stop.clone();
@@ -150,6 +159,63 @@ async fn wait_for_socket(p: &std::path::Path, total: Duration) -> crate::Result<
     Err(EngineError::Internal(format!(
         "socket {p:?} did not appear within {total:?}"
     )))
+}
+
+/// Best-effort cleanup of daemons left behind by other ohara versions.
+///
+/// `daemon_root` is the parent of the per-version registry dirs
+/// (`<cache>/ohara/daemon`). For every sibling version dir: shut down
+/// its live daemons over their sockets, then remove the dir once empty.
+/// Failures are logged and skipped — the old daemons' own idle timeout
+/// remains the backstop.
+pub(crate) async fn sweep_stale_versions(daemon_root: &std::path::Path, current_version: &str) {
+    let entries = match std::fs::read_dir(daemon_root) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy() == current_version {
+            continue;
+        }
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let reg = match crate::registry::Registry::open(entry.path().join("registry.json")) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(dir = ?entry.path(), error = %e, "sweep: registry open failed");
+                continue;
+            }
+        };
+        let alive = match reg.list_alive() {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        let mut all_stopped = true;
+        for d in alive {
+            let req = crate::ipc::Request {
+                id: 1,
+                repo_path: None,
+                method: crate::ipc::RequestMethod::Shutdown,
+            };
+            match crate::client::Client::connect(&d.socket_path)
+                .call(req)
+                .await
+            {
+                Ok(_) => {
+                    let _ = reg.unregister(d.pid);
+                    tracing::info!(pid = d.pid, "sweep: shut down stale-version daemon");
+                }
+                Err(e) => {
+                    all_stopped = false;
+                    tracing::warn!(pid = d.pid, error = %e, "sweep: shutdown failed");
+                }
+            }
+        }
+        if all_stopped {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 #[cfg(test)]
