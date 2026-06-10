@@ -354,6 +354,19 @@ mod tests {
     }
 
     #[test]
+    fn open_seeds_a_pre_existing_empty_registry_file() {
+        // Reproduces the CI race deterministically: a concurrent open()'s
+        // create_new succeeds (zero-length file exists) but the seed bytes
+        // haven't landed yet when another caller's mutate reads the file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        std::fs::File::create(&path).unwrap(); // zero-length
+        let reg = Registry::open(&path).unwrap();
+        let all = reg.list().unwrap();
+        assert!(all.is_empty(), "empty file must read as an empty registry");
+    }
+
+    #[test]
     fn locked_update_serialises_concurrent_pick_or_spawn() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
