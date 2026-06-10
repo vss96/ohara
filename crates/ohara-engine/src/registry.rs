@@ -63,10 +63,15 @@ pub struct Registry {
 impl Registry {
     /// Open (or create) the registry at `path`.
     ///
-    /// If the file does not exist its parent directories are created and the
-    /// file is initialised with an empty daemon list.  The initialisation is
-    /// atomic: `create_new` guarantees that exactly one concurrent caller
-    /// writes the seed content; others see `AlreadyExists` and proceed.
+    /// If the file does not exist (or exists but is empty) its parent
+    /// directories are created and the file is initialised with an empty
+    /// daemon list. Seeding happens under the same exclusive file lock
+    /// every reader/writer takes, so a concurrent `open` + `mutate` can
+    /// never observe a zero-length file. (The previous `create_new`-based
+    /// seeding wrote the seed bytes WITHOUT the lock: one caller could
+    /// create the file, a second could lock-and-read it before the seed
+    /// landed, and fail to parse the empty contents — a race CI hit in
+    /// `locked_update_serialises_concurrent_pick_or_spawn`.)
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
 
@@ -74,16 +79,24 @@ impl Registry {
             fs::create_dir_all(parent)?;
         }
 
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut f) => {
-                f.write_all(b"{\"daemons\":[]}")?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+        file.lock_exclusive()?;
+        let seed = (|| -> Result<()> {
+            if file.metadata()?.len() == 0 {
+                file.write_all(b"{\"daemons\":[]}")?;
+                file.flush()?;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Race: another process (or this process on a previous call)
-                // already created the file.  That is fine.
-            }
-            Err(e) => return Err(e.into()),
-        }
+            Ok(())
+        })();
+        // Always unlock — even on error. See the note on `mutate`.
+        #[allow(clippy::incompatible_msrv)]
+        let _ = file.unlock();
+        seed?;
 
         Ok(Self { path })
     }
@@ -351,6 +364,19 @@ mod tests {
             "touch_health must advance last_health_unix, got {}",
             after.last_health_unix
         );
+    }
+
+    #[test]
+    fn open_seeds_a_pre_existing_empty_registry_file() {
+        // Reproduces the CI race deterministically: a concurrent open()'s
+        // create_new succeeds (zero-length file exists) but the seed bytes
+        // haven't landed yet when another caller's mutate reads the file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        std::fs::File::create(&path).unwrap(); // zero-length
+        let reg = Registry::open(&path).unwrap();
+        let all = reg.list().unwrap();
+        assert!(all.is_empty(), "empty file must read as an empty registry");
     }
 
     #[test]
