@@ -6,6 +6,7 @@
 
 mod cache;
 pub mod client;
+pub mod daemon;
 mod engine;
 mod error;
 mod handle;

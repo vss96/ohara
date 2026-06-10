@@ -24,15 +24,14 @@ pub async fn run(action: DaemonAction) -> Result<()> {
     match action {
         DaemonAction::List => {
             let all = reg.list().map_err(|e| anyhow::anyhow!("list: {e}"))?;
-            println!("PID\tVERSION\tSTARTED\tHEALTH\tBUSY\tSOCKET");
+            println!("PID\tVERSION\tSTARTED\tHEALTH\tSOCKET");
             for d in all {
                 println!(
-                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}",
                     d.pid,
                     d.ohara_version,
                     d.started_at_unix,
                     d.last_health_unix,
-                    d.busy,
                     d.socket_path.display()
                 );
             }

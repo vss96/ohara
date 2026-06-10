@@ -3,9 +3,6 @@ use crate::error::EngineError;
 use crate::registry::{DaemonRecord, Registry};
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
-use libc;
-
 /// A live or newly-spawned daemon the client can connect to.
 pub struct DaemonHandle {
     pub socket_path: PathBuf,
@@ -39,47 +36,49 @@ pub fn find_or_spawn_daemon(
     }
     let reg = Registry::open(registry_path)
         .map_err(|e| EngineError::Internal(format!("registry open: {e}")))?;
-    if let Some(existing) = reg
-        .pick_compatible(ohara_version)
-        .map_err(|e| EngineError::Internal(format!("registry pick: {e}")))?
-    {
-        return Ok(Some(DaemonHandle {
-            socket_path: existing.socket_path.clone(),
-            pid: existing.pid,
+
+    enum Pick {
+        Existing(DaemonRecord),
+        Spawned(DaemonRecord),
+        SpawnFailed(String),
+    }
+
+    let pick = reg
+        .locked_update(|daemons| {
+            if let Some(existing) = daemons.iter().find(|d| d.ohara_version == ohara_version) {
+                return Pick::Existing(existing.clone());
+            }
+            match spawn_daemon(ohara_binary, &runtime_dir(), ohara_version, registry_path) {
+                Ok(sd) => {
+                    let rec = DaemonRecord {
+                        pid: sd.pid,
+                        socket_path: sd.socket_path,
+                        ohara_version: ohara_version.into(),
+                        ohara_git_sha: Some(ohara_git_sha.into()),
+                        started_at_unix: now_unix(),
+                        last_health_unix: now_unix(),
+                    };
+                    daemons.push(rec.clone());
+                    Pick::Spawned(rec)
+                }
+                Err(e) => Pick::SpawnFailed(e.to_string()),
+            }
+        })
+        .map_err(|e| EngineError::Internal(format!("registry locked_update: {e}")))?;
+
+    match pick {
+        Pick::Existing(d) => Ok(Some(DaemonHandle {
+            socket_path: d.socket_path,
+            pid: d.pid,
             spawned: false,
-        }));
+        })),
+        Pick::Spawned(d) => Ok(Some(DaemonHandle {
+            socket_path: d.socket_path,
+            pid: d.pid,
+            spawned: true,
+        })),
+        Pick::SpawnFailed(e) => Err(EngineError::Internal(format!("spawn daemon: {e}"))),
     }
-    let sd = spawn_daemon(ohara_binary, &runtime_dir(), ohara_version, registry_path)?;
-    let record = DaemonRecord {
-        pid: sd.pid,
-        socket_path: sd.socket_path.clone(),
-        ohara_version: ohara_version.into(),
-        ohara_git_sha: Some(ohara_git_sha.into()),
-        started_at_unix: now_unix(),
-        last_health_unix: now_unix(),
-        busy: false,
-    };
-    if let Err(register_err) = reg.register(record) {
-        tracing::warn!(
-            pid = sd.pid,
-            error = %register_err,
-            "register failed; killing orphan daemon"
-        );
-        #[cfg(unix)]
-        // SAFETY: SIGTERM is delivered to the child we just spawned.
-        // The pid is fresh from spawn_daemon and has not been reused.
-        unsafe {
-            libc::kill(sd.pid as libc::pid_t, libc::SIGTERM);
-        }
-        return Err(EngineError::Internal(format!(
-            "registry register: {register_err}"
-        )));
-    }
-    Ok(Some(DaemonHandle {
-        socket_path: sd.socket_path,
-        pid: sd.pid,
-        spawned: true,
-    }))
 }
 
 /// Return the platform-appropriate path for the daemon registry file.

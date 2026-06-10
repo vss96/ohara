@@ -151,10 +151,22 @@ async fn dispatch(engine: &RetrievalEngine, req: Request) -> Response {
                 Err(e) => Err(e),
             }
         }
-        // Not yet implemented — callers should fall back to in-process logic.
-        RequestMethod::IndexStatus => Err(EngineError::NotImplemented {
-            method: "index_status",
-        }),
+        RequestMethod::IndexStatus => {
+            let path = match req.repo_path {
+                Some(p) => p,
+                None => {
+                    return error_response(
+                        id,
+                        ErrorCode::Internal,
+                        "index_status requires repo_path",
+                    )
+                }
+            };
+            match engine.index_status(&path).await {
+                Ok(m) => serde_json::to_value(&m).map_err(|e| EngineError::Internal(e.to_string())),
+                Err(e) => Err(e),
+            }
+        }
         RequestMethod::Metrics => Err(EngineError::NotImplemented { method: "metrics" }),
     };
     match result {
@@ -312,7 +324,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn index_status_returns_not_implemented_error() {
+    async fn index_status_requires_repo_path() {
+        // IndexStatus without a repo_path must return an internal error
+        // (missing required parameter), not a NotImplemented.
         let req = Request {
             id: 10,
             repo_path: None,
@@ -321,13 +335,15 @@ mod tests {
         let resp = round_trip(req).await;
         assert!(
             resp.result.is_none(),
-            "IndexStatus must not return a result: {resp:?}"
+            "IndexStatus without repo_path must not return a result: {resp:?}"
         );
-        let err = resp.error.expect("IndexStatus must return an error");
+        let err = resp
+            .error
+            .expect("IndexStatus without repo_path must return an error");
         assert_eq!(
             err.code,
-            ErrorCode::NotImplemented,
-            "code must be not_implemented, got {:?}",
+            ErrorCode::Internal,
+            "missing repo_path must produce internal error, got {:?}",
             err.code
         );
     }

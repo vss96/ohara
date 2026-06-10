@@ -1,17 +1,11 @@
 //! `ohara serve` — run the retrieval engine as a long-lived Unix-socket daemon.
 //!
-//! The process binds a Unix socket, writes a PID file and a readiness file,
-//! then services IPC requests until either a `Shutdown` request arrives or the
-//! optional idle-timeout watchdog fires.
+//! Argument parsing lives here; the runner itself lives in
+//! [`ohara_engine::daemon`] so both `ohara-cli` and `ohara-mcp` can share it.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Args;
-use ohara_engine::{serve_unix, RetrievalEngine};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio_util::sync::CancellationToken;
-use tracing::info;
 
 #[derive(Args, Debug)]
 pub struct ServeArgs {
@@ -34,107 +28,21 @@ pub struct ServeArgs {
     /// registry stays current.
     #[arg(long)]
     pub registry_path: Option<PathBuf>,
+    /// Drop the lazily-loaded reranker session after this many seconds
+    /// without a rerank. 0 disables idle unload.
+    #[arg(long, default_value_t = 600)]
+    pub reranker_idle_secs: u64,
 }
 
 pub async fn run(args: ServeArgs) -> Result<()> {
-    let embedder: Arc<dyn ohara_core::EmbeddingProvider> = Arc::new(
-        tokio::task::spawn_blocking(ohara_embed::FastEmbedProvider::new)
-            .await
-            .context("spawn_blocking FastEmbedProvider")?
-            .context("FastEmbedProvider::new")?,
-    );
-    // Issue #58: defer the ~110 MB cross-encoder load until the first
-    // rerank call. The daemon may receive zero requests (idle-timeout
-    // exit) or only `no_rerank: true` requests, in which case we never
-    // pay the load cost.
-    let reranker: Arc<dyn ohara_core::embed::RerankProvider> =
-        Arc::new(ohara_embed::LazyFastEmbedReranker::new());
-    let engine = Arc::new(RetrievalEngine::new(embedder, reranker));
-
-    let stop = CancellationToken::new();
-    let listener_engine = engine.clone();
-    let listener_stop = stop.clone();
-    let socket = args.socket.clone();
-    let mut listener =
-        tokio::spawn(async move { serve_unix(listener_engine, &socket, listener_stop).await });
-
-    // Race: surface a bind/startup error immediately rather than timing out.
-    let ready = wait_for_socket(&args.socket, Duration::from_secs(10));
-    tokio::select! {
-        biased; // prefer listener errors over the readiness poll
-        res = &mut listener => {
-            match res {
-                Ok(Ok(())) => {
-                    return Err(anyhow::anyhow!("listener exited before socket was ready"))
-                }
-                Ok(Err(e)) => {
-                    return Err(anyhow::anyhow!("serve_unix failed at startup: {e}"))
-                }
-                Err(e) => return Err(anyhow::anyhow!("listener task join: {e}")),
-            }
-        }
-        res = ready => res?,
-    }
-
-    std::fs::write(&args.pid_file, std::process::id().to_string()).context("write pid file")?;
-    std::fs::write(&args.readiness_file, "ready").context("write readiness file")?;
-
-    info!(
-        socket = ?args.socket,
-        pid_file = ?args.pid_file,
-        readiness_file = ?args.readiness_file,
-        "ohara serve ready"
-    );
-
-    if let Some(reg_path) = args.registry_path.clone() {
-        let pid = std::process::id();
-        let watchdog_stop = stop.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                if watchdog_stop.is_cancelled() {
-                    break;
-                }
-                if let Ok(reg) = ohara_engine::registry::Registry::open(&reg_path) {
-                    let _ = reg.touch_health(pid);
-                }
-            }
-        });
-    }
-
-    if args.idle_timeout > 0 {
-        let idle = Duration::from_secs(args.idle_timeout);
-        let watchdog_engine = engine.clone();
-        let watchdog_stop = stop.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(idle / 2).await;
-                if watchdog_engine.idle_for() >= idle {
-                    info!(?idle, "idle timeout reached, shutting down");
-                    watchdog_stop.cancel();
-                    break;
-                }
-            }
-        });
-    }
-
-    let _ = listener
-        .await
-        .map_err(|e| anyhow::anyhow!("listener join: {e}"))?;
-
-    let _ = std::fs::remove_file(&args.pid_file);
-    let _ = std::fs::remove_file(&args.readiness_file);
-    Ok(())
-}
-
-/// Poll until `p` exists or `total` elapses. Returns an error on timeout.
-async fn wait_for_socket(p: &std::path::Path, total: Duration) -> Result<()> {
-    let started = std::time::Instant::now();
-    while started.elapsed() < total {
-        if p.exists() {
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    anyhow::bail!("socket {p:?} did not appear within {total:?}")
+    ohara_engine::daemon::run_daemon(ohara_engine::daemon::DaemonOptions {
+        socket: args.socket,
+        pid_file: args.pid_file,
+        readiness_file: args.readiness_file,
+        idle_timeout_secs: args.idle_timeout,
+        registry_path: args.registry_path,
+        reranker_idle_secs: args.reranker_idle_secs,
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("daemon: {e}"))
 }

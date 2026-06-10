@@ -23,7 +23,7 @@ use fastembed::{
 use ohara_core::embed::RerankProvider;
 use ohara_core::{EmbeddingProvider, Result as CoreResult};
 use std::sync::Arc;
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::Mutex;
 
 /// Stable id of the default embedder model. Mirrored on every
 /// `FastEmbedProvider::model_id()` and recorded in `index_metadata`
@@ -280,18 +280,18 @@ impl RerankProvider for FastEmbedReranker {
 /// retriever's `no_rerank` filter). Eagerly loading the model at
 /// startup paid the cold-init cost on every boot — issue #58.
 ///
-/// First-call init uses [`tokio::sync::OnceCell`] so concurrent first
-/// callers serialize on a single load; subsequent calls bypass the
-/// cell entirely and dispatch straight into the inner reranker.
+/// Load is serialized by a write lock inside [`crate::idle_slot::IdleSlot`];
+/// concurrent first callers funnel through a single blocking init.
+/// Failed inits leave the slot empty so the next call retries
+/// (matching the behaviour of a constructor that would have failed at
+/// startup). Plan-29: the session can be dropped after a quiet period
+/// via [`RerankProvider::unload_if_idle`] and transparently reloads on
+/// next use.
 ///
 /// Init failures are surfaced through [`ohara_core::OhraError::Embedding`]
 /// because the [`RerankProvider`] trait can't return `anyhow::Error`.
-/// `OnceCell::get_or_try_init` only stores the success value, so a
-/// failed first init is retried on the next call (which matches the
-/// behavior of an eagerly-constructed reranker that would have failed
-/// at startup).
 pub struct LazyFastEmbedReranker {
-    cell: OnceCell<FastEmbedReranker>,
+    slot: crate::idle_slot::IdleSlot<Arc<FastEmbedReranker>>,
     provider: EmbedProvider,
 }
 
@@ -306,7 +306,7 @@ impl LazyFastEmbedReranker {
     /// execution provider on first use.
     pub fn with_provider(provider: EmbedProvider) -> Self {
         Self {
-            cell: OnceCell::new(),
+            slot: crate::idle_slot::IdleSlot::new(),
             provider,
         }
     }
@@ -317,13 +317,14 @@ impl LazyFastEmbedReranker {
         DEFAULT_RERANKER_ID
     }
 
-    async fn get_or_init(&self) -> CoreResult<&FastEmbedReranker> {
+    async fn get_or_init(&self) -> CoreResult<Arc<FastEmbedReranker>> {
         let provider = self.provider;
-        self.cell
-            .get_or_try_init(|| async move {
+        self.slot
+            .get_or_try_init(async move {
                 tokio::task::spawn_blocking(move || FastEmbedReranker::with_provider(provider))
                     .await
                     .map_err(|e| ohara_core::OhraError::Embedding(format!("join: {e}")))?
+                    .map(Arc::new)
                     .map_err(|e| ohara_core::OhraError::Embedding(e.to_string()))
             })
             .await
@@ -346,6 +347,73 @@ impl RerankProvider for LazyFastEmbedReranker {
             return Ok(vec![]);
         }
         self.get_or_init().await?.rerank(query, candidates).await
+    }
+
+    async fn unload_if_idle(&self, idle: std::time::Duration) -> bool {
+        self.slot.unload_if_idle(idle).await
+    }
+}
+
+/// Lazy wrapper around [`FastEmbedProvider`]: defers loading the
+/// BGE-small ONNX session until the first `embed_batch` call.
+///
+/// Plan-29: the `ohara-mcp` in-process fallback uses this so MCP
+/// sessions that never call `find_pattern` (or only call
+/// `explain_change`, which needs no models) never pay the embedder
+/// load. Identity methods answer from compile-time constants.
+pub struct LazyFastEmbedProvider {
+    slot: crate::idle_slot::IdleSlot<Arc<FastEmbedProvider>>,
+    provider: EmbedProvider,
+}
+
+impl LazyFastEmbedProvider {
+    /// Create a lazy embedder that will load with the CPU execution
+    /// provider on first use. Mirrors [`FastEmbedProvider::new`].
+    pub fn new() -> Self {
+        Self::with_provider(EmbedProvider::Cpu)
+    }
+
+    /// Create a lazy embedder that will load with the requested
+    /// execution provider on first use.
+    pub fn with_provider(provider: EmbedProvider) -> Self {
+        Self {
+            slot: crate::idle_slot::IdleSlot::new(),
+            provider,
+        }
+    }
+
+    async fn get_or_init(&self) -> CoreResult<Arc<FastEmbedProvider>> {
+        let provider = self.provider;
+        self.slot
+            .get_or_try_init(async move {
+                tokio::task::spawn_blocking(move || FastEmbedProvider::with_provider(provider))
+                    .await
+                    .map_err(|e| ohara_core::OhraError::Embedding(format!("join: {e}")))?
+                    .map(Arc::new)
+                    .map_err(|e| ohara_core::OhraError::Embedding(e.to_string()))
+            })
+            .await
+    }
+}
+
+impl Default for LazyFastEmbedProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl ohara_core::EmbeddingProvider for LazyFastEmbedProvider {
+    fn dimension(&self) -> usize {
+        DEFAULT_DIM
+    }
+
+    fn model_id(&self) -> &str {
+        DEFAULT_MODEL_ID
+    }
+
+    async fn embed_batch(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
+        self.get_or_init().await?.embed_batch(texts).await
     }
 }
 
@@ -490,19 +558,17 @@ mod tests {
     async fn lazy_reranker_empty_candidates_does_not_load_model() {
         // Regression: the empty-candidates short-circuit in
         // `LazyFastEmbedReranker::rerank` is the entire performance claim
-        // of issue #58 — without it, `OnceCell::get_or_init` would fire on
-        // the first query (even with zero survivors after RRF) and pay the
-        // ~110 MB cold-init cost. If someone reorders the empty-check to
-        // run after `get_or_init`, the inner `OnceCell` will transition to
-        // initialized and this assertion will fail.
-        //
-        // Strict-distinguisher check: mentally swap the two lines in
-        // `rerank` so `get_or_init().await?` runs before the
-        // `candidates.is_empty()` guard — the cell would be populated and
-        // `cell.get()` would return `Some`, failing the assertion below.
+        // of issue #58 — without it, `IdleSlot::get_or_try_init` would
+        // fire on the first query (even with zero survivors after RRF) and
+        // pay the ~110 MB cold-init cost.  The observable consequence is
+        // that after the short-circuit call the slot must still be empty,
+        // which `unload_if_idle(Duration::ZERO)` detects: it returns
+        // `false` both before and after the empty rerank (nothing was ever
+        // loaded to unload).
+        use ohara_core::embed::RerankProvider as _;
         let lazy = LazyFastEmbedReranker::new();
         assert!(
-            lazy.cell.get().is_none(),
+            !lazy.unload_if_idle(std::time::Duration::ZERO).await,
             "freshly-constructed lazy reranker must not have loaded the model"
         );
 
@@ -513,10 +579,41 @@ mod tests {
         assert!(scores.is_empty(), "empty input must yield empty output");
 
         assert!(
-            lazy.cell.get().is_none(),
-            "rerank(_, &[]) must short-circuit BEFORE get_or_init — \
-             OnceCell should still be uninitialized"
+            !lazy.unload_if_idle(std::time::Duration::ZERO).await,
+            "rerank(_, &[]) must short-circuit BEFORE get_or_try_init — \
+             slot should still be empty"
         );
+    }
+
+    #[tokio::test]
+    async fn lazy_reranker_unload_without_load_is_false() {
+        use ohara_core::embed::RerankProvider as _;
+        let r = LazyFastEmbedReranker::new();
+        assert!(
+            !r.unload_if_idle(std::time::Duration::ZERO).await,
+            "nothing loaded yet — nothing to unload"
+        );
+    }
+
+    #[tokio::test]
+    async fn lazy_reranker_empty_candidates_never_loads_or_stamps() {
+        use ohara_core::embed::RerankProvider as _;
+        let r = LazyFastEmbedReranker::new();
+        let scores = r.rerank("q", &[]).await.expect("empty rerank");
+        assert!(scores.is_empty());
+        // Still nothing to unload: the empty-candidates short-circuit
+        // must not have touched the slot.
+        assert!(!r.unload_if_idle(std::time::Duration::ZERO).await);
+    }
+
+    #[test]
+    fn lazy_embedder_reports_identity_without_init() {
+        use ohara_core::EmbeddingProvider as _;
+        let e = LazyFastEmbedProvider::new();
+        // Both must answer from constants — constructing the provider
+        // and asking for identity must never load the ONNX session.
+        assert_eq!(e.model_id(), DEFAULT_MODEL_ID);
+        assert_eq!(e.dimension(), DEFAULT_DIM);
     }
 
     #[tokio::test]

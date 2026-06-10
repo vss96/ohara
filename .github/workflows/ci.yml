@@ -65,3 +65,22 @@ jobs:
 
       - name: cargo nextest
         run: cargo nextest run --workspace --all-features
+
+      - name: Plugin wrapper tests + version drift check
+        run: |
+          node --test plugins/ohara/test/wrapper.test.js
+          CARGO_V=$(awk '
+            $0=="[workspace.package]"{in_ws=1; next}
+            /^\[/{in_ws=0}
+            in_ws && $1=="version" {gsub(/"/, "", $3); print $3; exit}
+          ' Cargo.toml)
+          PLUGIN_V=$(node -p "require('./plugins/ohara/.claude-plugin/plugin.json').version")
+          PACKAGE_V=$(node -p "require('./plugins/ohara/package.json').version")
+          if [ "$CARGO_V" != "$PLUGIN_V" ]; then
+            echo "::error::plugin.json version ($PLUGIN_V) != workspace version ($CARGO_V) — bump plugins/ohara/{.claude-plugin/plugin.json,package.json} in the release commit"
+            exit 1
+          fi
+          if [ "$PACKAGE_V" != "$PLUGIN_V" ]; then
+            echo "::error::package.json version ($PACKAGE_V) != plugin.json version ($PLUGIN_V) — keep both plugin manifests in lockstep"
+            exit 1
+          fi

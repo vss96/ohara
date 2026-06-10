@@ -303,3 +303,80 @@ async fn explain_change_blame_cache_hit_on_second_call() {
         "second call must increment blame_cache_hits by 1"
     );
 }
+
+// env_lock held across awaits intentionally — see note above the
+// explain_change test.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn find_pattern_refuses_when_index_needs_rebuild() {
+    let ohara_home = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let _g = env_lock();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    build_test_repo(tmp.path());
+    let canonical = std::fs::canonicalize(tmp.path()).unwrap();
+
+    // Index, then sabotage the vector-affecting metadata so
+    // CompatibilityStatus::assess yields NeedsRebuild.
+    {
+        let walker = ohara_git::GitWalker::open(&canonical).unwrap();
+        let first = walker.first_commit_sha().unwrap();
+        let repo_id = ohara_core::types::RepoId::from_parts(&first, &canonical.to_string_lossy());
+        let db_path = ohara_core::paths::index_db_path(&repo_id).unwrap();
+        let storage: Arc<dyn ohara_core::Storage> =
+            Arc::new(ohara_storage::SqliteStorage::open(&db_path).await.unwrap());
+        let commit_src = Arc::new(ohara_git::GitCommitSource::open(&canonical).unwrap());
+        let symbol_src = Arc::new(ohara_parse::GitSymbolSource::open(&canonical).unwrap());
+        let indexer = ohara_core::Indexer::new(storage.clone(), Arc::new(DummyEmbedder));
+        indexer.run(&repo_id, commit_src, symbol_src).await.unwrap();
+        storage
+            .put_index_metadata(
+                &repo_id,
+                &[("embedding_model".to_string(), "other-model".to_string())],
+            )
+            .await
+            .unwrap();
+    }
+
+    let engine = make_test_engine();
+    let q = ohara_core::query::PatternQuery {
+        query: "one".into(),
+        k: 5,
+        language: None,
+        since_unix: None,
+        no_rerank: true,
+    };
+    let err = engine
+        .find_pattern(&canonical, q)
+        .await
+        .expect_err("incompatible index must refuse");
+    assert!(
+        matches!(err, EngineError::NeedsRebuild { .. }),
+        "expected NeedsRebuild, got: {err:?}"
+    );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn index_status_returns_meta_for_indexed_repo() {
+    let ohara_home = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let _g = env_lock();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    build_test_repo(tmp.path());
+    let engine = make_test_engine();
+    let meta = engine.index_status(tmp.path()).await.expect("index_status");
+    // Empty stored metadata → compatibility is present but not NeedsRebuild.
+    let is_rebuild = matches!(
+        meta.compatibility,
+        Some(ohara_core::index_metadata::CompatibilityStatus::NeedsRebuild { .. })
+    );
+    assert!(!is_rebuild, "fresh test repo must not need rebuild");
+}
+
+#[tokio::test]
+async fn unload_idle_reranker_with_dummy_is_false() {
+    let engine = make_test_engine();
+    // DummyReranker uses the trait default — nothing to unload.
+    assert!(!engine.unload_idle_reranker(std::time::Duration::ZERO).await);
+}

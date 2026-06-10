@@ -207,41 +207,67 @@ impl RetrievalEngine {
         Ok(handle)
     }
 
+    /// Serve `ResponseMeta` from [`MetaCache`] when a fresh entry exists
+    /// (TTL = 5 s). On a miss the meta is computed via `compose_response_meta`
+    /// and stored before returning.
+    async fn cached_meta(&self, handle: &RepoHandle) -> crate::Result<ResponseMeta> {
+        if let Some(cached) = self.meta_cache.get(&handle.repo_id) {
+            self.meta_hit_count.fetch_add(1, Ordering::Relaxed);
+            return Ok(cached);
+        }
+        let fresh = compose_response_meta(handle).await?;
+        self.meta_cache.put(handle.repo_id.clone(), fresh.clone());
+        Ok(fresh)
+    }
+
     /// Semantic search over a repo's indexed git history.
     ///
     /// Opens (or reuses) the per-repo handle, then delegates to the
     /// retriever's three-lane pipeline (vector KNN + BM25 text + BM25
     /// symbol → RRF → optional cross-encoder rerank → recency multiplier).
     ///
-    /// `ResponseMeta` is served from [`MetaCache`] when a fresh entry
-    /// exists (TTL = 5 s). On a miss the meta is computed via
-    /// `compose_response_meta` and stored in the cache before returning.
+    /// `ResponseMeta` is computed BEFORE retrieval so that a
+    /// [`CompatibilityStatus::NeedsRebuild`] index is refused before
+    /// touching stale vectors (plan-29 guard). This covers the daemon,
+    /// CLI, and MCP-fallback paths with one check. Meta is cached via
+    /// [`Self::cached_meta`] (TTL = 5 s).
     pub async fn find_pattern(
         &self,
         repo_path: impl AsRef<Path>,
         query: PatternQuery,
     ) -> crate::Result<FindPatternResult> {
         let handle = self.open_repo(repo_path).await?;
+        let meta = self.cached_meta(&handle).await?;
+        // Plan-29: refuse before touching the vector index. KNN against
+        // stale vectors silently returns wrong results; surfacing
+        // NeedsRebuild here covers the daemon, CLI, and MCP-fallback
+        // paths with one guard (previously the MCP tool checked locally).
+        if let Some(CompatibilityStatus::NeedsRebuild { reason }) = &meta.compatibility {
+            return Err(EngineError::NeedsRebuild {
+                reason: reason.clone(),
+            });
+        }
         let now_unix = chrono::Utc::now().timestamp();
         let (hits, _profile) = handle
             .retriever
             .find_pattern_with_profile(&handle.repo_id, &query, now_unix)
             .await
             .map_err(EngineError::from)?;
-
-        let meta = match self.meta_cache.get(&handle.repo_id) {
-            Some(cached) => {
-                self.meta_hit_count.fetch_add(1, Ordering::Relaxed);
-                cached
-            }
-            None => {
-                let fresh = compose_response_meta(&handle).await?;
-                self.meta_cache.put(handle.repo_id.clone(), fresh.clone());
-                fresh
-            }
-        };
-
         Ok(FindPatternResult { hits, meta })
+    }
+
+    /// Freshness + compatibility envelope for a repo, without running a
+    /// query. Backs the IPC `IndexStatus` method so thin MCP clients can
+    /// build the `_meta` block of `explain_change` responses.
+    pub async fn index_status(&self, repo_path: impl AsRef<Path>) -> crate::Result<ResponseMeta> {
+        let handle = self.open_repo(repo_path).await?;
+        self.cached_meta(&handle).await
+    }
+
+    /// Ask the reranker to drop its session when idle for at least `idle`.
+    /// Returns `true` when a session was dropped (plan-29 tiered unload).
+    pub async fn unload_idle_reranker(&self, idle: std::time::Duration) -> bool {
+        self.reranker.unload_if_idle(idle).await
     }
 
     /// Evict the cached [`RepoHandle`] and [`MetaCache`] entry for `repo_path`.
