@@ -8,6 +8,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-10
+
+The MCP server is now a thin client of a single shared `ohara serve`
+daemon (#77): N concurrent editor sessions share one engine process
+instead of each loading their own embedder (previously ~1 GB+ per
+session). `ohara-mcp` boots without loading any model; the daemon
+drops the ~110 MB cross-encoder session after 10 minutes idle and
+exits entirely after 30 minutes idle. No index rebuild is required
+for this upgrade.
+
+### Added
+
+- **`ohara-mcp serve`** — the MCP binary can host the shared daemon,
+  so plugin installs (which ship only `ohara-mcp`) spawn it as
+  `current_exe() serve …`. `serve` is a reserved first argument and
+  not a user-facing command.
+- **`--reranker-idle-secs <secs>`** on `ohara serve` / `ohara-mcp
+  serve` (default 600, `0` disables): drop the lazily-loaded reranker
+  session after idle; it reloads transparently on the next reranked
+  query.
+- `IndexStatus` IPC method (previously a `NotImplemented` stub), used
+  by thin clients to build `explain_change` response metadata.
+- CI gate keeping the workspace, `plugin.json`, and `package.json`
+  versions in lockstep.
+
+### Changed
+
+- `ohara-mcp` routes `find_pattern` / `explain_change` over IPC to the
+  shared daemon, auto-spawning it when absent. `OHARA_NO_DAEMON=1`
+  pins the in-process fallback, which now loads models lazily —
+  sessions that never query (or only run `explain_change`) load
+  nothing.
+- `find_pattern` refuses incompatible (needs-rebuild) indexes inside
+  the engine, covering the daemon, MCP, and CLI-daemon paths with one
+  guard.
+- Daemon find-or-spawn is atomic under the registry file lock —
+  concurrent cold starts can no longer spawn duplicate daemons.
+- On startup the daemon sweeps daemons left behind by other ohara
+  versions (best-effort shutdown + registry cleanup; dirs without a
+  registry are never touched).
+- The Claude Code plugin wrapper resolves its binary version from
+  `plugin.json` instead of a hardcoded constant (previously pinned at
+  0.7.4), and sweeps stale `~/.cache/ohara-plugin/v*` dirs after an
+  upgrade download (non-fatal on failure).
+
+### Removed
+
+- Vestigial `DaemonRecord.busy` registry field (never set in
+  production; old registry files still parse).
+
 ## [0.9.0] - 2026-05-07
 
 Default embedder switched to the quantized BGE-small variant. Existing
@@ -488,7 +538,8 @@ the build-from-source path on older distros.
 - Pin rmcp to `=0.1.5` for stable API surface ([9935c7b](https://github.com/vss96/ohara/commit/9935c7bf369d6a7ecce5366d38ef43186b762599))
 - Drop dead `OharaServer::embedder` field ([0acf38a](https://github.com/vss96/ohara/commit/0acf38a97c5c2d9f35bec7f37009088647898512))
 
-[Unreleased]: https://github.com/vss96/ohara/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/vss96/ohara/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/vss96/ohara/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/vss96/ohara/compare/v0.8.4...v0.9.0
 [0.8.4]: https://github.com/vss96/ohara/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/vss96/ohara/compare/v0.8.2...v0.8.3
