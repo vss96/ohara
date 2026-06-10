@@ -12,23 +12,25 @@ Named after Ohara, the island in One Piece whose Tree of Knowledge held 5,000
 years of accumulated history — and whose archaeologists devoted their lives to
 reading it.
 
-**Status: v0.7.5.** Two MCP tools shipped (`find_pattern`, `explain_change`),
-plus an opt-in daemon, multi-repo support, and memory-efficient indexing:
+**Status: v0.10.0.** Two MCP tools shipped (`find_pattern`, `explain_change`),
+served by a single shared daemon across all your editor sessions:
 
 - **`find_pattern`** — "how was X done before?" (semantic search over git
-  history with three-lane retrieval pipeline + cross-encoder rerank,
-  shipped in v0.3).
+  history with a five-lane retrieval pipeline + cross-encoder rerank).
 - **`explain_change`** — "why does THIS code look the way it does?"
   Blame-backed exact provenance (`hits[]`) plus contextual commit
   neighbours (`_meta.explain.related_commits[]`).
 
-v0.7.x highlights:
+Recent highlights:
 
-- **v0.7.0** — eval harness + symbol attribution + rebuild safety (plans 10/11/13).
-- **v0.7.2** — perf tracing + per-method storage metrics (plan-14).
-- **v0.7.3** — memory-efficient indexing: `embed_batch` chunking + source-text cap + peak-RSS harness (plan-15).
-- **v0.7.4** — gitlink-skip fix in `file_at_commit` for uninitialized submodules.
-- **v0.7.5** — `ohara serve` daemon + `RetrievalEngine` + multi-repo support (plan-16).
+- **v0.10.0** — daemon consolidation (plan-29): N MCP sessions share one
+  engine process; `ohara-mcp` boots without loading models; the reranker
+  unloads after idle; the plugin auto-tracks the released binary version.
+- **v0.9.0** — quantized BGE-small becomes the default embedder.
+- **v0.8.x** — `ohara plan` + `.oharaignore`, contextual BM25 lane,
+  chunk-embed cache, parallel indexer (plans 25–28).
+- **v0.7.x** — eval harness, perf tracing, memory-efficient indexing,
+  `ohara serve` daemon + multi-repo support (plans 10–16).
 
 History: v0.1 = Plan 1 foundation + `find_pattern`; v0.2 = `ohara init`
 post-commit hook + `--incremental` fast path; v0.3 = three-lane

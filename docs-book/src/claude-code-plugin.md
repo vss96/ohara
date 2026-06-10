@@ -66,8 +66,11 @@ When ohara cuts a new release, refresh the marketplace and reinstall:
 /plugin install ohara@vss96
 ```
 
-The wrapper's hard-coded version determines which release tarball
-gets fetched, so plugin updates and ohara releases stay in lock-step.
+The wrapper reads its version from the plugin's `plugin.json` (since
+v0.10.0), so updating the plugin automatically fetches the matching
+release tarball — plugin updates and ohara releases stay in lock-step.
+Stale cached binaries under `~/.cache/ohara-plugin/` are swept
+automatically after an upgrade download.
 
 ## Uninstall
 
