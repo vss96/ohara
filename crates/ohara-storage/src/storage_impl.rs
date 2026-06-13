@@ -524,6 +524,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn writes_funnel_through_a_single_writer_connection() {
+        // Plan 32: the parallel indexer's workers all write to one WAL
+        // writer; with a multi-connection pool they fought SQLite's busy
+        // handler and the tail dropped commits ("database is locked").
+        // All writes now go through a dedicated max-size-1 write pool, so
+        // workers serialize FIFO on one connection — no contention, no
+        // drops. Reads stay concurrent on the main pool.
+        let dir = tempfile::tempdir().unwrap();
+        let s = std::sync::Arc::new(
+            SqliteStorage::open(dir.path().join("i.sqlite"))
+                .await
+                .unwrap(),
+        );
+        let id = RepoId::from_parts("first", "/repo");
+        s.open_repo(&id, "/repo", "first").await.unwrap();
+
+        assert_eq!(
+            s.write_pool().status().max_size,
+            1,
+            "index writes must funnel through a single writer connection"
+        );
+
+        let mut handles = Vec::new();
+        for i in 0..16i64 {
+            let s = s.clone();
+            let id = id.clone();
+            handles.push(tokio::spawn(async move {
+                let cm = CommitMeta {
+                    commit_sha: format!("sha{i}"),
+                    parent_sha: None,
+                    is_merge: false,
+                    author: Some("a".into()),
+                    ts: 1_700_000_000 + i,
+                    message: format!("commit {i}"),
+                };
+                s.put_commit(
+                    &id,
+                    &CommitRecord {
+                        meta: cm,
+                        message_emb: vec![0.1f32; 384],
+                        ulid: String::new(),
+                    },
+                )
+                .await
+            }));
+        }
+        for h in handles {
+            h.await
+                .unwrap()
+                .expect("every concurrent write must succeed, none dropped");
+        }
+        let count: i64 = s
+            .pool()
+            .get()
+            .await
+            .unwrap()
+            .interact(|c| c.query_row("SELECT count(*) FROM commit_record", [], |r| r.get(0)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, 16, "all 16 concurrent writes must persist");
+    }
+
+    #[tokio::test]
     async fn put_commit_is_idempotent_under_resume() {
         // Resume safety: re-running put_commit on the same SHA after a
         // mid-walk abort must not raise "UNIQUE constraint failed on
