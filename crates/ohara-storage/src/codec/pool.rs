@@ -9,13 +9,25 @@ static VEC_AUTO_EXT_RC: std::sync::OnceLock<std::os::raw::c_int> = std::sync::On
 
 pub struct SqlitePoolBuilder {
     path: std::path::PathBuf,
+    max_size: Option<usize>,
 }
 
 impl SqlitePoolBuilder {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         Self {
             path: path.as_ref().to_path_buf(),
+            max_size: None,
         }
+    }
+
+    /// Cap the pool at `n` connections. Plan 32: the dedicated write
+    /// pool uses `max_size(1)` so all index writes serialize on one
+    /// connection (the single WAL writer) instead of fighting the busy
+    /// handler and dropping commits. Unset = deadpool's default
+    /// (`num_cpus * 4`), used for the concurrent read pool.
+    pub fn max_size(mut self, n: usize) -> Self {
+        self.max_size = Some(n);
+        self
     }
 
     pub async fn build(self) -> Result<Pool> {
@@ -28,6 +40,13 @@ impl SqlitePoolBuilder {
         register_vec_auto_extension()?;
         let cfg = Config::new(&self.path);
         let manager = Manager::from_config(&cfg, Runtime::Tokio1);
+        let mut pool_cfg = cfg.get_pool_config();
+        if let Some(n) = self.max_size {
+            if n == 0 {
+                anyhow::bail!("pool max_size must be >= 1 (0 yields a pool that never hands out a connection)");
+            }
+            pool_cfg.max_size = n;
+        }
         // Apply pragmas via a `post_create` hook so they run on every connection
         // the pool creates, not just the first checkout. Per-connection settings
         // like `synchronous`, `mmap_size`, `cache_size`, `temp_store`, and
@@ -35,7 +54,7 @@ impl SqlitePoolBuilder {
         // does. Without this hook, lazily-created connections silently inherit
         // SQLite defaults for everything else.
         let pool = Pool::builder(manager)
-            .config(cfg.get_pool_config())
+            .config(pool_cfg)
             .runtime(Runtime::Tokio1)
             .post_create(Hook::async_fn(|conn, _: &Metrics| {
                 Box::pin(async move {
@@ -261,6 +280,18 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(mode.to_lowercase(), "wal");
+    }
+
+    #[tokio::test]
+    async fn max_size_zero_is_rejected() {
+        // A zero-sized pool can never hand out a connection — fail fast
+        // instead of deadlocking the first checkout.
+        let dir = tempfile::tempdir().unwrap();
+        let result = SqlitePoolBuilder::new(dir.path().join("idx.sqlite"))
+            .max_size(0)
+            .build()
+            .await;
+        assert!(result.is_err(), "max_size(0) must be rejected");
     }
 
     #[tokio::test]
