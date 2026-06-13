@@ -94,22 +94,27 @@ Produces two binaries under `target/release/`:
 - `ohara` — CLI for indexing and debugging
 - `ohara-mcp` — MCP server (stdio) for Claude Code
 
-### Build with hardware acceleration
+### Hardware acceleration
 
-The pre-built cargo-dist binaries are CPU-only — same artifact for
-every host. To get hardware ONNX execution providers wired into the
-embedder, build from source with the matching cargo feature:
+**Apple Silicon (v0.11+):** the released macOS binary has CoreML
+support built in. Opt in per index pass:
 
-    # Apple silicon — CoreML
-    cargo build --release --features coreml
+    ohara index --embed-provider coreml
 
-    # Linux x86_64 + NVIDIA — CUDA
+This runs a fixed-shape fp32 BGE-small on the GPU+Neural Engine —
+~3× the CPU embed throughput on an M4 Pro (see
+`docs/perf/v0.11-coreml-fixed-shape.md`). First use downloads the
+fp32 model (~130MB); each run pays a one-time ~30s CoreML compile.
+Indexes built with either provider share one vector space, so no
+rebuild is needed when switching.
+
+**Linux + NVIDIA:** CUDA requires a source build:
+
     cargo build --release --features cuda
 
-Pair the resulting binary with `ohara index --embed-provider coreml`
-(or `cuda`); see [`ohara index`](https://vss96.github.io/ohara/cli/index.html)
-for the full flag set. Default features stay CPU-only so the released
-binaries work everywhere out of the box.
+then `ohara index --embed-provider cuda`. See
+[`ohara index`](https://vss96.github.io/ohara/cli/index.html) for the
+full flag set. Source builds stay CPU-only by default.
 
 ## Quickstart
 
@@ -178,9 +183,9 @@ patterns. Review the output, then re-run with `ohara plan --write` to
 apply the suggestions to `.oharaignore` at the repo root (this is also
 the only path that writes the file — the default is print-only). Use
 `.oharaignore` to drop mechanical noise (vendored deps, generated
-code, lockfiles). This is also where the `--features coreml` (Apple)
-/ `--features cuda` (NVIDIA Linux) builds pay off — embedding on the
-accelerator is 3-5x faster.
+code, lockfiles). This is also where hardware acceleration pays off —
+`ohara index --embed-provider coreml` (Apple Silicon, ~3× embed
+throughput) or a `--features cuda` build (NVIDIA Linux).
 
 ## Upgrading & index compatibility
 

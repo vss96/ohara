@@ -90,6 +90,35 @@ pub struct StoredIndexMetadata {
     pub components: BTreeMap<String, String>,
 }
 
+/// Embedding-model ids whose vectors are interchangeable for KNN.
+///
+/// Plan 30: `bge-small-en-v1.5-q` is an INT8 quantization of the same
+/// weights as `bge-small-en-v1.5`; measured cross-model parity is min
+/// cosine 1.0000 over full-length probes (see
+/// `docs/perf/v0.11-coreml-fixed-shape.md`), and both emit l2-normalized
+/// 384d vectors, so KNN ordering is preserved across a mixed index.
+/// A future embedder that is NOT vector-equivalent MUST get a model id
+/// outside the class.
+const EQUIVALENT_EMBEDDING_MODELS: &[&[&str]] = &[&["bge-small-en-v1.5", "bge-small-en-v1.5-q"]];
+
+fn embedding_models_equivalent(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    EQUIVALENT_EMBEDDING_MODELS
+        .iter()
+        .any(|class| class.contains(&a) && class.contains(&b))
+}
+
+/// Component-aware version comparison: `embedding_model` honours the
+/// equivalence classes above; every other component is exact-match.
+fn component_versions_match(key: &str, actual: &str, expected: &str) -> bool {
+    if key == "embedding_model" {
+        return embedding_models_equivalent(actual, expected);
+    }
+    actual == expected
+}
+
 /// Compatibility verdict between `RuntimeIndexMetadata` and
 /// `StoredIndexMetadata`. Each non-`Compatible` variant carries the
 /// offending component(s) so the CLI / MCP layer can report something
@@ -151,7 +180,7 @@ impl CompatibilityStatus {
         let mut missing: Vec<String> = Vec::new();
         for (key, expected) in &vector_affecting {
             match stored.components.get(*key) {
-                Some(actual) if actual != expected => {
+                Some(actual) if !component_versions_match(key, actual, expected) => {
                     return CompatibilityStatus::NeedsRebuild {
                         reason: format!(
                             "{key} mismatch (index has \"{actual}\", binary expects \"{expected}\")"
@@ -387,6 +416,37 @@ mod tests {
             CompatibilityStatus::assess(&runtime, &stored),
             CompatibilityStatus::NeedsRebuild { .. }
         ));
+    }
+
+    #[test]
+    fn quantized_and_fp32_bge_small_are_equivalent() {
+        // Plan 30: the CoreML fixed-shape path indexes with the fp32
+        // model ("bge-small-en-v1.5") while queries keep using the INT8
+        // default ("bge-small-en-v1.5-q"). Measured cross-model parity
+        // is min cosine 1.0000, so the two ids form an equivalence
+        // class — neither direction forces a rebuild.
+        let mut runtime = runtime_baseline();
+        runtime.embedding_model = "bge-small-en-v1.5-q".to_string();
+        let mut stored = stored_complete(&runtime);
+        stored
+            .components
+            .insert("embedding_model".into(), "bge-small-en-v1.5".into());
+        assert_eq!(
+            CompatibilityStatus::assess(&runtime, &stored),
+            CompatibilityStatus::Compatible,
+            "fp32-stamped index must stay queryable by the quantized binary"
+        );
+
+        runtime.embedding_model = "bge-small-en-v1.5".to_string();
+        let mut stored = stored_complete(&runtime);
+        stored
+            .components
+            .insert("embedding_model".into(), "bge-small-en-v1.5-q".into());
+        assert_eq!(
+            CompatibilityStatus::assess(&runtime, &stored),
+            CompatibilityStatus::Compatible,
+            "quantized-stamped index must accept the fp32 runtime"
+        );
     }
 
     #[test]

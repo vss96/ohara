@@ -1,14 +1,11 @@
 use anyhow::{bail, Result};
 use clap::Args as ClapArgs;
 use ohara_core::index_metadata::CompatibilityStatus;
-use ohara_core::query::CommitsBehind;
-use ohara_core::{EmbeddingProvider, Indexer, IndexerReport, PhaseTimings, Storage};
+use ohara_core::{Indexer, IndexerReport, PhaseTimings, Storage};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::provider::{
-    resolve_with_downgrade, ProviderArg, ProviderResolution, LONG_PASS_THRESHOLD,
-};
+use super::provider::{resolve_provider, ProviderArg};
 use crate::resources::{apply_intensity, detect_host, pick_resources, ResourcePlan, ResourcesArg};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, clap::ValueEnum)]
@@ -90,9 +87,11 @@ pub struct Args {
     pub profile: bool,
     /// ONNX execution provider for the embedder. When unset, defers to
     /// the value picked by `--resources` (which itself defaults to
-    /// `auto`: CoreML on Apple silicon, CUDA when `CUDA_VISIBLE_DEVICES`
-    /// is set, else CPU). CoreML / CUDA arms currently fail with a
-    /// build-time-dependency error pending Plan 6 Task 3.1 follow-up.
+    /// `auto`: CUDA when `CUDA_VISIBLE_DEVICES` is set, else CPU).
+    /// `coreml` (opt-in, Apple Silicon) indexes with the fixed-shape
+    /// fp32 BGE-small on the GPU+ANE — ~3x CPU throughput; first use
+    /// downloads ~130MB and each run pays a one-time ~30s CoreML
+    /// compile. Existing indexes stay compatible (same vector space).
     #[arg(long, value_enum)]
     pub embed_provider: Option<ProviderArg>,
     /// Resource intensity. `auto` (default) picks reasonable
@@ -273,63 +272,21 @@ pub fn delete_index_files(db_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Count commits the upcoming `index` run would walk, then resolve the
-/// `--embed-provider` flag with the Plan 7 Phase 2B long-pass downgrade
-/// applied.
-///
-/// The two log emissions live here, not in
-/// [`super::provider::resolve_with_downgrade`], because they depend on
-/// the runtime context (commit count, `tracing` subscriber): the
-/// downgrade `warn!` so users can see why CoreML wasn't picked, and a
-/// separate `warn!` when the user passed `--embed-provider coreml`
-/// explicitly on Apple Silicon (the path most likely to OOM).
-///
-/// Returns the concrete [`ohara_embed::EmbedProvider`] the embedder
-/// should be constructed with.
-async fn resolve_and_warn(
-    arg: ProviderArg,
-    repo_id: &ohara_core::RepoId,
-    storage: &Arc<ohara_storage::SqliteStorage>,
-    repo_path: &std::path::Path,
-) -> Result<ohara_embed::EmbedProvider> {
-    let st = storage.get_index_status(repo_id).await?;
-    let commits_behind = ohara_git::GitCommitsBehind::open(repo_path)?;
-    let commits_to_walk = commits_behind
-        .count_since(st.last_indexed_commit.as_deref())
-        .await?;
-
-    let resolution = resolve_with_downgrade(arg, commits_to_walk, LONG_PASS_THRESHOLD);
-    log_resolution_warnings(arg, commits_to_walk, &resolution);
-    Ok(resolution.provider)
-}
-
-/// Pure helper for the warnings emitted by [`resolve_and_warn`].
-/// Pulled out so the wording is unit-testable without a real repo or
-/// storage handle.
-fn log_resolution_warnings(
-    arg: ProviderArg,
-    commits_to_walk: u64,
-    resolution: &ProviderResolution,
-) {
-    if let Some(commits) = resolution.downgraded_from_coreml {
-        tracing::warn!(
-            commits,
-            threshold = LONG_PASS_THRESHOLD,
-            "auto-downgrading embedder from CoreML to CPU: long index pass would OOM (see docs/perf/v0.6.1-leak-diagnosis.md). \
-             Pass --embed-provider coreml explicitly to bypass.",
-        );
-        return;
-    }
-    if matches!(arg, ProviderArg::Coreml)
-        && cfg!(target_os = "macos")
-        && cfg!(target_arch = "aarch64")
-    {
-        tracing::warn!(
-            commits = commits_to_walk,
-            "--embed-provider coreml on Apple Silicon leaks ~4 MB/batch (see docs/perf/v0.6.1-leak-diagnosis.md). \
-             For long index passes use --embed-provider auto to fall back to CPU automatically.",
+/// Resolve the `--embed-provider` flag and emit the CoreML first-use
+/// note. Plan 30 removed the plan-7 long-pass downgrade: the
+/// fixed-shape CoreML embedder has a flat memory footprint (the old
+/// "leak" was per-shape specialization churn —
+/// `docs/perf/v0.11-coreml-fixed-shape.md`), so the only thing worth
+/// telling the user is the one-time setup cost.
+fn resolve_and_note(arg: ProviderArg) -> ohara_embed::EmbedProvider {
+    let provider = resolve_provider(arg);
+    if matches!(provider, ohara_embed::EmbedProvider::CoreMl) {
+        tracing::info!(
+            "CoreML fixed-shape embedder: first use downloads the fp32 model (~130MB) \
+             and each run pays a one-time ~30s CoreML compile before embedding starts.",
         );
     }
+    provider
 }
 
 pub async fn run(args: Args) -> Result<IndexerReport> {
@@ -455,8 +412,7 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         tracing::info!(threads = plan.threads, "capping embedder threads");
     }
 
-    let chosen_provider =
-        resolve_and_warn(plan.embed_provider, &repo_id, &storage, &canonical).await?;
+    let chosen_provider = resolve_and_note(plan.embed_provider);
     tracing::info!(provider = ?chosen_provider, "embedder");
 
     // Construct the progress sink BEFORE the embedder loads so the
@@ -473,14 +429,28 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
     };
 
     progress.pre_walk("loading embedder model");
-    tracing::info!(model = ohara_embed::DEFAULT_MODEL_ID, "loading embedder");
     let embedder_load_start = std::time::Instant::now();
-    let embedder = Arc::new(
-        tokio::task::spawn_blocking(move || {
-            ohara_embed::FastEmbedProvider::with_provider(chosen_provider)
-        })
-        .await??,
-    );
+    // Plan 30: explicit `coreml` routes to the fixed-shape fp32
+    // provider (same 384d vector space — equivalence class in
+    // CompatibilityStatus); every other arm keeps the INT8 default.
+    let embedder: Arc<dyn ohara_core::EmbeddingProvider> = match chosen_provider {
+        ohara_embed::EmbedProvider::CoreMl => {
+            tracing::info!(
+                model = ohara_embed::coreml_fixed::FP32_MODEL_ID,
+                "loading embedder"
+            );
+            Arc::new(tokio::task::spawn_blocking(ohara_embed::CoreMlFixedProvider::new).await??)
+        }
+        other => {
+            tracing::info!(model = ohara_embed::DEFAULT_MODEL_ID, "loading embedder");
+            Arc::new(
+                tokio::task::spawn_blocking(move || {
+                    ohara_embed::FastEmbedProvider::with_provider(other)
+                })
+                .await??,
+            )
+        }
+    };
     tracing::info!(
         elapsed_ms = embedder_load_start.elapsed().as_millis() as u64,
         "embedder loaded"
@@ -856,42 +826,29 @@ mod merge_tests {
 }
 
 #[cfg(test)]
-mod warning_tests {
+mod provider_resolution_tests {
     use super::*;
-    use ohara_embed::EmbedProvider;
 
-    /// `log_resolution_warnings` is pure (just emits `tracing` events)
-    /// so it can't directly fail a test, but the branches are
-    /// straightforward enough that an "it doesn't panic on every
-    /// permutation" smoke test plus the
-    /// `super::super::provider::tests::*` resolution tests cover the
-    /// behaviour. This module exists so the function is referenced
-    /// from a test target — protecting against accidental dead-code
-    /// removal — and so a future structured-log assertion has a
-    /// place to land.
     #[test]
-    fn warnings_handle_every_resolution_permutation() {
-        let downgraded = ProviderResolution {
-            provider: EmbedProvider::Cpu,
-            downgraded_from_coreml: Some(LONG_PASS_THRESHOLD + 1),
-        };
-        let coreml_passthrough = ProviderResolution {
-            provider: EmbedProvider::CoreMl,
-            downgraded_from_coreml: None,
-        };
-        let cpu_passthrough = ProviderResolution {
-            provider: EmbedProvider::Cpu,
-            downgraded_from_coreml: None,
-        };
-        for arg in [
-            ProviderArg::Auto,
-            ProviderArg::Cpu,
-            ProviderArg::Coreml,
-            ProviderArg::Cuda,
-        ] {
-            log_resolution_warnings(arg, 0, &cpu_passthrough);
-            log_resolution_warnings(arg, 50, &coreml_passthrough);
-            log_resolution_warnings(arg, LONG_PASS_THRESHOLD + 1, &downgraded);
-        }
+    fn resolve_and_note_passes_every_arm_through() {
+        // Plan 30: no downgrade machinery — what the user asks for is
+        // what gets constructed (the CoreML arm just logs a first-use
+        // note alongside).
+        assert_eq!(
+            resolve_and_note(ProviderArg::Cpu),
+            ohara_embed::EmbedProvider::Cpu
+        );
+        assert_eq!(
+            resolve_and_note(ProviderArg::Coreml),
+            ohara_embed::EmbedProvider::CoreMl
+        );
+        assert_eq!(
+            resolve_and_note(ProviderArg::Cuda),
+            ohara_embed::EmbedProvider::Cuda
+        );
+        assert_eq!(
+            resolve_and_note(ProviderArg::Auto),
+            resolve_provider(ProviderArg::Auto)
+        );
     }
 }

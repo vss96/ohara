@@ -120,8 +120,39 @@ path = "symbol_bm25_fan_out.rs"
 name = "embed_batch_micro"
 path = "embed_batch_micro.rs"
 
+[[test]]
+# B2 spike — Apple-Silicon CoreML matrix: {INT8,FP32} BGE-small ×
+# {CPU, CoreML-NeuralNetwork, CoreML-MLProgram, CoreML-ANE} throughput
+# + parity + footprint against a questdb-shaped corpus. Hardware-bound,
+# `#[ignore]`'d, and gated behind this crate's `coreml` feature:
+#   cargo test -p ohara-perf-tests --release --features coreml \
+#       --test coreml_matrix -- --include-ignored --nocapture
+name = "coreml_matrix"
+path = "coreml_matrix.rs"
+required-features = ["coreml"]
+
 [dependencies]
 libc.workspace = true
+
+# Direct ort dep for the coreml_matrix harness's EP builder types
+# (ModelFormat / ComputeUnits — fastembed only re-exports the dispatch
+# type). Same pin + same target-conditional shape as ohara-embed's:
+# must match fastembed 5.13's transitive ort exactly so the dispatch
+# stays type-compatible.
+[target.'cfg(target_os = "macos")'.dependencies]
+ort = { version = "=2.0.0-rc.12", optional = true, features = ["coreml"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+ort = { version = "=2.0.0-rc.12", optional = true }
+
+[features]
+# Enables the coreml_matrix harness. Pulls the CoreML EP into ort on
+# macOS (feature-unified with fastembed's transitive ort, so the EP
+# registers inside fastembed's session); a no-op elsewhere (the
+# harness file is cfg'd to macOS). Note: deliberately does NOT enable
+# ohara-embed/coreml — the harness constructs EPs itself, and feature
+# tables cannot reference dev-dependencies.
+coreml = ["dep:ort"]
 
 [dev-dependencies]
 ohara-cli = { path = "../../crates/ohara-cli" }
@@ -131,6 +162,7 @@ ohara-mcp = { path = "../../crates/ohara-mcp" }
 ohara-storage = { path = "../../crates/ohara-storage" }
 anyhow.workspace = true
 chrono.workspace = true
+fastembed.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 tempfile = "3"

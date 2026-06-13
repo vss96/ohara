@@ -68,24 +68,23 @@ cargo build --release --features coreml
 
 The features flow through `ohara-embed` to both `ohara` and
 `ohara-mcp`. Pair the resulting binary with
-[`ohara index --embed-provider coreml`](./cli/index.md) (or `cuda`) —
-or leave it on the default `auto`, which picks CoreML on Apple
-silicon, CUDA when `CUDA_VISIBLE_DEVICES` is set, and CPU otherwise.
-Default features stay CPU-only.
+[`ohara index --embed-provider coreml`](./cli/index.md) (or `cuda`).
+The default `auto` picks CUDA when `CUDA_VISIBLE_DEVICES` is set and
+CPU otherwise — CoreML is opt-in. Default source-build features stay
+CPU-only.
 
-> **CoreML on long index runs (auto-downgrade still applies).** On
-> Apple Silicon, the CoreML execution path leaks ~4 MB per
-> `embed_batch` call (`MALLOC_LARGE` heap, see
-> [`docs/perf/v0.6.1-leak-diagnosis.md`](https://github.com/vss96/ohara/blob/main/docs/perf/v0.6.1-leak-diagnosis.md)) —
-> a 5,000+ commit first-time index would OOM the host before
-> completing. The released v0.6.2 binary's `--embed-provider auto`
-> therefore resolves to CPU on Apple Silicon when the upcoming index
-> pass would walk 1,000 commits or more; short passes (`query`,
-> `index --incremental`, small repos) still pick CoreML. Pass
-> `--embed-provider coreml` explicitly to bypass the downgrade and
-> accept the OOM risk; CPU and CUDA paths are unaffected. Re-opened
-> upstream investigation (fastembed / ort) is tracked for a future
-> release.
+> **CoreML rework (v0.11).** Earlier releases auto-downgraded CoreML
+> to CPU on long index passes because the dynamic-shape CoreML path
+> leaked ~4 MB per batch and could OOM the host. v0.11 replaced that
+> path with a fixed-shape fp32 model that runs on the GPU+Neural
+> Engine at ~3× CPU throughput with a flat memory footprint (the
+> "leak" was CoreML re-specializing per tensor shape — see
+> [`docs/perf/v0.11-coreml-fixed-shape.md`](https://github.com/vss96/ohara/blob/main/docs/perf/v0.11-coreml-fixed-shape.md)).
+> The downgrade machinery is gone; `--embed-provider coreml` is now
+> simply opt-in for `ohara index`. First use downloads the fp32 model
+> (~130MB) and each run pays a one-time ~30s CoreML compile. Indexes
+> built with either provider share one vector space — no rebuild when
+> switching.
 
 ## Updating
 
