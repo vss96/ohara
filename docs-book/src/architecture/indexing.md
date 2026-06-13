@@ -197,11 +197,12 @@ A few v0.6 additions worth singling out — the full flag reference is
 on [`ohara index`](../cli/index.md):
 
 - **`--embed-provider {auto,cpu,coreml,cuda}`.** Picks the ONNX
-  execution provider for the embedder. `auto` (default) chooses
-  CoreML on Apple silicon, CUDA when `CUDA_VISIBLE_DEVICES` is set,
-  and CPU otherwise. CoreML / CUDA require a feature-flagged
-  build — see [Install → hardware acceleration](../install.md#build-with-hardware-acceleration);
-  the published cargo-dist binaries are CPU-only.
+  execution provider for the embedder. `auto` (default) chooses CUDA
+  when `CUDA_VISIBLE_DEVICES` is set and CPU otherwise. `coreml`
+  (opt-in, v0.11) runs the fixed-shape fp32 BGE-small on the Apple
+  GPU+Neural Engine at ~3× CPU throughput — built into the released
+  macOS binary; see [Install → hardware acceleration](../install.md#build-with-hardware-acceleration).
+  CUDA requires a feature-flagged source build.
 - **`--resources {auto,conservative,aggressive}`.** A small lookup
   table that picks reasonable `--commit-batch` / `--threads` /
   `--embed-provider` defaults from the host's logical core count.
