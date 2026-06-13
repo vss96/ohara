@@ -25,12 +25,22 @@ CoreML path:
 
 ### `apply_pragmas` (ohara-storage)
 
-Add `PRAGMA busy_timeout=10000;` to the per-connection pragma batch in
-`crates/ohara-storage/src/codec/pool.rs`. A blocked writer then waits up to 10s
-on SQLite's built-in busy handler (sleep+retry) instead of failing instantly.
-Index write transactions are short (DELETE+INSERT of one commit's rows), so 10s
-is far more than enough for ~12 workers to serialize; the timeout only fires on
-a genuine stall, where surfacing an error is correct.
+**Investigation correction:** rusqlite already sets `sqlite3_busy_timeout(db,
+5000)` on every connection (`inner_connection.rs`), and both indexer write paths
+(`commit::put`, `hunk::put_many`) are write-first (`DELETE` then `INSERT`), so
+this is *not* a read→write-upgrade deadlock. The drops come from **tail-worker
+starvation**: under CoreML-fast embedding the ~`num_cpus` workers finish
+embedding in a tight cluster and queue on the single WAL writer; each commit's
+write transaction (including vec0 inserts) takes hundreds of ms, so workers at
+the back of a clustered wave exceed the 5s default and drop their commit.
+
+Fix: raise the timeout above the worst-case queue wait by adding
+`PRAGMA busy_timeout=30000;` to the per-connection pragma batch in
+`crates/ohara-storage/src/codec/pool.rs` (overriding rusqlite's 5000ms). With
+~12 workers each holding the lock <1s, the deepest queue wait is ~11s, well
+under 30s. The pragma's busy handler then serializes writers instead of dropping
+commits; if 30s is ever exceeded, the failure is now visible (below), not
+silent.
 
 ### Surface dropped commits (ohara-core)
 

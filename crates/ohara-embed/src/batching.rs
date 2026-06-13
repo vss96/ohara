@@ -184,7 +184,7 @@ async fn dispatch(
 
     match inner.embed_batch(&texts).await {
         Ok(vectors) => {
-            for ((id, idx), vector) in owners.into_iter().zip(vectors.into_iter()) {
+            for ((id, idx), vector) in owners.into_iter().zip(vectors) {
                 let Some(state) = reqs.get_mut(&id) else {
                     continue;
                 };
