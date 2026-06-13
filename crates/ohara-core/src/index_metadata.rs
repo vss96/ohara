@@ -390,6 +390,37 @@ mod tests {
     }
 
     #[test]
+    fn quantized_and_fp32_bge_small_are_equivalent() {
+        // Plan 30: the CoreML fixed-shape path indexes with the fp32
+        // model ("bge-small-en-v1.5") while queries keep using the INT8
+        // default ("bge-small-en-v1.5-q"). Measured cross-model parity
+        // is min cosine 1.0000, so the two ids form an equivalence
+        // class — neither direction forces a rebuild.
+        let mut runtime = runtime_baseline();
+        runtime.embedding_model = "bge-small-en-v1.5-q".to_string();
+        let mut stored = stored_complete(&runtime);
+        stored
+            .components
+            .insert("embedding_model".into(), "bge-small-en-v1.5".into());
+        assert_eq!(
+            CompatibilityStatus::assess(&runtime, &stored),
+            CompatibilityStatus::Compatible,
+            "fp32-stamped index must stay queryable by the quantized binary"
+        );
+
+        runtime.embedding_model = "bge-small-en-v1.5".to_string();
+        let mut stored = stored_complete(&runtime);
+        stored
+            .components
+            .insert("embedding_model".into(), "bge-small-en-v1.5-q".into());
+        assert_eq!(
+            CompatibilityStatus::assess(&runtime, &stored),
+            CompatibilityStatus::Compatible,
+            "quantized-stamped index must accept the fp32 runtime"
+        );
+    }
+
+    #[test]
     fn chunker_version_mismatch_needs_refresh() {
         let runtime = runtime_baseline();
         let mut stored = stored_complete(&runtime);
