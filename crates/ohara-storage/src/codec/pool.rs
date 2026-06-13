@@ -80,7 +80,15 @@ fn install_sql_trace(conn: &mut Connection) {
 
 pub(crate) fn apply_pragmas(c: &Connection) -> Result<()> {
     c.execute_batch(
-        "PRAGMA journal_mode=WAL;
+        // busy_timeout=30000 overrides rusqlite's 5000ms default
+        // (inner_connection.rs sets sqlite3_busy_timeout(5000) at open).
+        // The parallel indexer runs ~num_cpus workers against one WAL
+        // writer; under CoreML-fast embedding they finish together and
+        // queue on the writer, and a clustered wave's tail can wait
+        // several seconds. 30s sits comfortably above the worst-case
+        // queue depth so writers serialize instead of dropping commits.
+        "PRAGMA busy_timeout=30000;
+         PRAGMA journal_mode=WAL;
          PRAGMA synchronous=NORMAL;
          PRAGMA mmap_size=268435456;
          PRAGMA cache_size=-64000;
@@ -333,7 +341,9 @@ mod tests {
             }));
         }
         for h in handles {
-            h.await.unwrap().expect("every concurrent write must commit");
+            h.await
+                .unwrap()
+                .expect("every concurrent write must commit");
         }
         let count: i64 = pool
             .get()
