@@ -70,7 +70,17 @@ async fn main() -> Result<()> {
     let no_daemon = cli.no_daemon;
     let outcome = match cli.command {
         Cmd::Init(a) => commands::init::run(a).await,
-        Cmd::Index(a) => commands::index::run(a).await.map(|_| ()),
+        // Plan 31: a run that dropped commits is a hard failure — exit
+        // non-zero so scripts and the post-commit hook notice the index
+        // is incomplete rather than trusting a silent partial pass.
+        Cmd::Index(a) => match commands::index::run(a).await {
+            Ok(report) if report.commits_failed > 0 => Err(anyhow::anyhow!(
+                "{} commit(s) failed to index; the index is incomplete",
+                report.commits_failed
+            )),
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        },
         Cmd::Plan(a) => commands::plan::run(a).await,
         Cmd::Query(a) => commands::query::run(a, no_daemon).await,
         Cmd::Status(a) => commands::status::run(a).await,

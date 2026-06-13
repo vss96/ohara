@@ -156,6 +156,25 @@ pub fn phase_timings_json(pt: &PhaseTimings) -> String {
 ///   symbols    1.2s  █                                   2%
 ///   fts       400ms                                     <1%
 /// ```
+/// Plan 31: a one-line warning when the parallel indexer could not
+/// persist some commits (e.g. a write that exhausted `busy_timeout`).
+/// Returns `None` for a clean run. The caller prints this to stderr and
+/// exits non-zero, so the index being incomplete is never silent.
+pub fn failed_commits_notice(commits_failed: u64) -> Option<String> {
+    if commits_failed == 0 {
+        return None;
+    }
+    let noun = if commits_failed == 1 {
+        "commit"
+    } else {
+        "commits"
+    };
+    Some(format!(
+        "⚠ {commits_failed} {noun} failed to index (see warnings above). \
+         The index is incomplete — re-run `ohara index` to fill the gaps."
+    ))
+}
+
 pub fn index_summary_human(
     pt: &PhaseTimings,
     total_ms: u64,
@@ -523,6 +542,9 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         // copy-paste into docs/perf/v0.6-baseline.md without
         // wrestling pretty-printed whitespace.
         println!("{}", phase_timings_json(&report.phase_timings));
+    }
+    if let Some(notice) = failed_commits_notice(report.commits_failed as u64) {
+        eprintln!("{notice}");
     }
     notify_daemons_of_invalidation(&canonical).await;
     Ok(report)
