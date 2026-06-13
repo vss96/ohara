@@ -12,7 +12,7 @@ Named after Ohara, the island in One Piece whose Tree of Knowledge held 5,000
 years of accumulated history — and whose archaeologists devoted their lives to
 reading it.
 
-**Status: v0.10.0.** Two MCP tools shipped (`find_pattern`, `explain_change`),
+**Status: v0.11.0.** Two MCP tools shipped (`find_pattern`, `explain_change`),
 served by a single shared daemon across all your editor sessions:
 
 - **`find_pattern`** — "how was X done before?" (semantic search over git
@@ -23,6 +23,9 @@ served by a single shared daemon across all your editor sessions:
 
 Recent highlights:
 
+- **v0.11.0** — fixed-shape CoreML embedder (plan-30): `ohara index
+  --embed-provider coreml` runs on the Apple GPU+Neural Engine at ~3×
+  CPU embed throughput; no rebuild needed when switching providers.
 - **v0.10.0** — daemon consolidation (plan-29): N MCP sessions share one
   engine process; `ohara-mcp` boots without loading models; the reranker
   unloads after idle; the plugin auto-tracks the released binary version.

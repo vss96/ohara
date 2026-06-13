@@ -8,6 +8,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-13
+
+Apple Silicon indexing gets an opt-in ~3× boost (#83):
+`ohara index --embed-provider coreml` runs a fixed-shape fp32 BGE-small
+on the GPU+Neural Engine — 118.5 rows/s vs 38.9 for the INT8-CPU
+default on an M4 Pro, with full vector parity (min cosine 1.0000) and
+a flat memory footprint. No index rebuild required: fp32 and quantized
+BGE-small share one vector space, so providers can be mixed across
+passes. Full investigation: `docs/perf/v0.11-coreml-fixed-shape.md`.
+
+### Added
+
+- **Fixed-shape CoreML embedder** behind `--embed-provider coreml`
+  (Apple Silicon; built into the released macOS binary). Bakes
+  `(32, 512)` dims into the ONNX graph in memory — onnxruntime's
+  unbounded-dim conversion is what made the ANE reject the model — and
+  pads every call to exactly that shape. First use downloads the fp32
+  model (~130MB); each run pays a one-time ~30s CoreML compile.
+- `tests/perf/coreml_matrix.rs` — Apple-Silicon embed benchmark + leak
+  harness behind the investigation numbers.
+
+### Changed
+
+- `--embed-provider auto` no longer silently picks CoreML on Apple
+  Silicon (the old dynamic CoreML path it would have used is broken for
+  BGE: NeuralNetwork-format OOM kills, BNNS segfaults, ANE rejection).
+  CoreML is opt-in while it bakes.
+- The plan-7 long-pass CoreML→CPU auto-downgrade is deleted. The
+  "~4 MB/batch CoreML leak" it guarded against was CoreML re-specializing
+  per tensor shape; one fixed shape eliminates it (footprint flat over
+  500 sustained batches).
+- `bge-small-en-v1.5` (fp32) and `bge-small-en-v1.5-q` (INT8) form one
+  embedding-model equivalence class in the index-compatibility check —
+  switching providers never forces `ohara index --rebuild`.
+- `ohara query --embed-provider coreml` maps to CPU: a single query row
+  doesn't justify the CoreML compile, and query vectors are equivalent.
+- `auto` now treats empty or `-1` `CUDA_VISIBLE_DEVICES` as no-CUDA.
+
 ## [0.10.0] - 2026-06-10
 
 The MCP server is now a thin client of a single shared `ohara serve`
@@ -538,7 +576,8 @@ the build-from-source path on older distros.
 - Pin rmcp to `=0.1.5` for stable API surface ([9935c7b](https://github.com/vss96/ohara/commit/9935c7bf369d6a7ecce5366d38ef43186b762599))
 - Drop dead `OharaServer::embedder` field ([0acf38a](https://github.com/vss96/ohara/commit/0acf38a97c5c2d9f35bec7f37009088647898512))
 
-[Unreleased]: https://github.com/vss96/ohara/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/vss96/ohara/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/vss96/ohara/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/vss96/ohara/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/vss96/ohara/compare/v0.8.4...v0.9.0
 [0.8.4]: https://github.com/vss96/ohara/compare/v0.8.3...v0.8.4

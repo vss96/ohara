@@ -57,5 +57,6 @@ perf tracing, memory-efficient indexing, `ohara serve` daemon + multi-repo)
 → v0.8.x (`ohara plan` + `.oharaignore`, contextual BM25 lane, parallel
 indexer) → v0.9.0 (quantized BGE-small default embedder) → v0.10.0
 (daemon consolidation: one shared engine across sessions, plugin
-auto-versioning).
-**Current: v0.10.0.** See the [Roadmap](./roadmap.md).
+auto-versioning) → v0.11.0 (fixed-shape CoreML embedder: ~3× indexing
+throughput on Apple Silicon, opt-in via `--embed-provider coreml`).
+**Current: v0.11.0.** See the [Roadmap](./roadmap.md).
