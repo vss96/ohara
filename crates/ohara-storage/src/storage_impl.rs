@@ -15,24 +15,40 @@ use std::path::Path;
 
 pub struct SqliteStorage {
     pool: Pool,
+    write_pool: Pool,
     pub(crate) counters: StorageCounters,
 }
 
 impl SqliteStorage {
     pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path = path.as_ref();
         let pool = SqlitePoolBuilder::new(path).build().await?;
-        let conn = pool.get().await?;
+        // Plan 32: a single dedicated write connection. SQLite (WAL) has
+        // exactly one writer; routing every index write through one
+        // connection makes the parallel workers queue FIFO on the app
+        // side instead of contending on SQLite's busy handler (which
+        // dropped commits under load). Reads stay concurrent on `pool`.
+        let write_pool = SqlitePoolBuilder::new(path).max_size(1).build().await?;
+        let conn = write_pool.get().await?;
         conn.interact(migrations::run)
             .await
             .map_err(|e| anyhow::anyhow!("interact: {e}"))??;
         Ok(Self {
             pool,
+            write_pool,
             counters: StorageCounters::default(),
         })
     }
 
     pub fn pool(&self) -> &Pool {
         &self.pool
+    }
+
+    /// The single-connection write pool (plan 32). Index writes route
+    /// here (via `&self.write_pool`) so concurrent workers serialize on
+    /// one connection; exposed so tests can assert the cap.
+    pub fn write_pool(&self) -> &Pool {
+        &self.write_pool
     }
 }
 
@@ -61,7 +77,7 @@ impl Storage for SqliteStorage {
         let id = repo_id.as_str().to_string();
         let path = path.to_string();
         let fcs = first_commit_sha.to_string();
-        with_conn(&self.pool, move |c| repo::upsert(c, &id, &path, &fcs)).await
+        with_conn(&self.write_pool, move |c| repo::upsert(c, &id, &path, &fcs)).await
     }
 
     async fn get_index_status(&self, repo_id: &RepoId) -> CoreResult<IndexStatus> {
@@ -78,12 +94,15 @@ impl Storage for SqliteStorage {
     async fn set_last_indexed_commit(&self, repo_id: &RepoId, sha: &str) -> CoreResult<()> {
         let id = repo_id.as_str().to_string();
         let sha = sha.to_string();
-        with_conn(&self.pool, move |c| repo::set_watermark(c, &id, &sha)).await
+        with_conn(&self.write_pool, move |c| repo::set_watermark(c, &id, &sha)).await
     }
 
     async fn put_commit(&self, _repo_id: &RepoId, record: &CommitRecord) -> CoreResult<()> {
         let rec = record.clone();
-        with_conn(&self.pool, move |c| crate::tables::commit::put(c, &rec)).await
+        with_conn(&self.write_pool, move |c| {
+            crate::tables::commit::put(c, &rec)
+        })
+        .await
     }
 
     async fn commit_exists(&self, sha: &str) -> CoreResult<bool> {
@@ -95,7 +114,10 @@ impl Storage for SqliteStorage {
     }
     async fn put_hunks(&self, _repo_id: &RepoId, records: &[HunkRecord]) -> CoreResult<()> {
         let recs = records.to_vec();
-        with_conn(&self.pool, move |c| crate::tables::hunk::put_many(c, &recs)).await
+        with_conn(&self.write_pool, move |c| {
+            crate::tables::hunk::put_many(c, &recs)
+        })
+        .await
     }
 
     async fn put_head_symbols(&self, _repo_id: &RepoId, symbols: &[Symbol]) -> CoreResult<()> {
@@ -103,7 +125,7 @@ impl Storage for SqliteStorage {
         // the BM25-by-symbol-name lane has rows to match against. Track C
         // wires `Symbol::sibling_names` through this path.
         let syms = symbols.to_vec();
-        with_conn(&self.pool, move |c| {
+        with_conn(&self.write_pool, move |c| {
             crate::tables::symbol::put_many(c, &syms)
         })
         .await
@@ -115,7 +137,7 @@ impl Storage for SqliteStorage {
         // doesn't double-count. The symbol table is HEAD-scoped — it holds
         // only the latest snapshot, never historical, so a blanket DELETE
         // is the right semantics.
-        with_conn(&self.pool, crate::tables::symbol::clear_all).await
+        with_conn(&self.write_pool, crate::tables::symbol::clear_all).await
     }
 
     async fn knn_hunks(
@@ -270,7 +292,7 @@ impl Storage for SqliteStorage {
     async fn record_blob_seen(&self, blob_sha: &str, model: &str) -> CoreResult<()> {
         let blob = blob_sha.to_string();
         let m = model.to_string();
-        with_conn(&self.pool, move |c| {
+        with_conn(&self.write_pool, move |c| {
             crate::tables::blob_cache::record(c, &blob, &m)
         })
         .await
@@ -303,7 +325,7 @@ impl Storage for SqliteStorage {
         }
         let entries = entries.to_vec();
         let model = embed_model.to_owned();
-        with_conn(&self.pool, move |c| {
+        with_conn(&self.write_pool, move |c| {
             crate::tables::embed_cache::put_many(c, &entries, &model)
         })
         .await
@@ -434,7 +456,7 @@ impl Storage for SqliteStorage {
     ) -> CoreResult<()> {
         let id = repo_id.as_str().to_string();
         let comps = components.to_vec();
-        with_conn(&self.pool, move |c| {
+        with_conn(&self.write_pool, move |c| {
             crate::tables::index_metadata::put_many(c, &id, &comps)
         })
         .await
