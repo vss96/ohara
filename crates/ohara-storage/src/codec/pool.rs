@@ -80,7 +80,15 @@ fn install_sql_trace(conn: &mut Connection) {
 
 pub(crate) fn apply_pragmas(c: &Connection) -> Result<()> {
     c.execute_batch(
-        "PRAGMA journal_mode=WAL;
+        // busy_timeout=30000 overrides rusqlite's 5000ms default
+        // (inner_connection.rs sets sqlite3_busy_timeout(5000) at open).
+        // The parallel indexer runs ~num_cpus workers against one WAL
+        // writer; under CoreML-fast embedding they finish together and
+        // queue on the writer, and a clustered wave's tail can wait
+        // several seconds. 30s sits comfortably above the worst-case
+        // queue depth so writers serialize instead of dropping commits.
+        "PRAGMA busy_timeout=30000;
+         PRAGMA journal_mode=WAL;
          PRAGMA synchronous=NORMAL;
          PRAGMA mmap_size=268435456;
          PRAGMA cache_size=-64000;
@@ -253,6 +261,102 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(mode.to_lowercase(), "wal");
+    }
+
+    #[tokio::test]
+    async fn busy_timeout_overrides_rusqlite_default() {
+        // Plan 31: rusqlite opens connections with a 5000ms busy_timeout
+        // by default. Under CoreML-fast indexing, ~num_cpus workers
+        // finish embedding together and queue on the single WAL writer;
+        // each commit's write transaction (incl. vec0 inserts) can take
+        // hundreds of ms, so the tail of a clustered wave exceeds 5s and
+        // drops the commit. apply_pragmas must raise the timeout well
+        // above the worst-case queue wait.
+        let dir = tempfile::tempdir().unwrap();
+        let pool = SqlitePoolBuilder::new(dir.path().join("idx.sqlite"))
+            .build()
+            .await
+            .unwrap();
+        let conn = pool.get().await.unwrap();
+        let timeout_ms: i64 = conn
+            .interact(|c| {
+                c.query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+                    .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            timeout_ms, 30_000,
+            "busy_timeout must be raised to 30s (was rusqlite's 5s default), got {timeout_ms}"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_writers_do_not_get_database_locked() {
+        // Plan 31 regression: K overlapping write transactions against
+        // one pooled DB must all commit. Pre-fix (busy_timeout=0) the
+        // losers returned SQLITE_BUSY ("database is locked"); with the
+        // pragma they serialize on SQLite's busy handler instead.
+        let dir = tempfile::tempdir().unwrap();
+        let pool = std::sync::Arc::new(
+            SqlitePoolBuilder::new(dir.path().join("idx.sqlite"))
+                .build()
+                .await
+                .unwrap(),
+        );
+        pool.get()
+            .await
+            .unwrap()
+            .interact(|c| {
+                c.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);")
+                    .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        let mut handles = Vec::new();
+        for i in 0..8i64 {
+            let pool = pool.clone();
+            handles.push(tokio::spawn(async move {
+                let conn = pool.get().await.unwrap();
+                conn.interact(move |c| {
+                    // BEGIN IMMEDIATE grabs the write lock up front, so
+                    // overlapping tasks contend exactly the way indexer
+                    // workers do.
+                    c.execute_batch("BEGIN IMMEDIATE;")
+                        .map_err(anyhow::Error::from)?;
+                    c.execute(
+                        "INSERT INTO t (id, v) VALUES (?, ?)",
+                        (i, format!("row-{i}")),
+                    )
+                    .map_err(anyhow::Error::from)?;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    c.execute_batch("COMMIT;").map_err(anyhow::Error::from)?;
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await
+                .unwrap()
+            }));
+        }
+        for h in handles {
+            h.await
+                .unwrap()
+                .expect("every concurrent write must commit");
+        }
+        let count: i64 = pool
+            .get()
+            .await
+            .unwrap()
+            .interact(|c| {
+                c.query_row("SELECT COUNT(*) FROM t", [], |r| r.get(0))
+                    .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, 8, "all 8 writers must persist, none dropped");
     }
 
     #[tokio::test]
