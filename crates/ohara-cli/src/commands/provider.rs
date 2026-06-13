@@ -163,14 +163,15 @@ mod tests {
     }
 
     #[test]
-    fn detect_provider_picks_coreml_on_apple_silicon() {
-        // The auto-detect heuristic is platform-specific, so the
-        // assertion here is conditional on the test runner's target.
-        // Together with the CUDA check below this gives us coverage
-        // on every common dev/CI host without flaking when run on
-        // a different one.
-        if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
-            assert_eq!(detect_provider(), EmbedProvider::CoreMl);
+    fn detect_provider_picks_cpu_on_apple_silicon() {
+        // Plan 30: `auto` never silently picks CoreML. The fixed-shape
+        // CoreML path is opt-in (`--embed-provider coreml`) while it
+        // bakes; auto on Apple Silicon means the INT8-CPU default.
+        if cfg!(target_os = "macos")
+            && cfg!(target_arch = "aarch64")
+            && std::env::var_os("CUDA_VISIBLE_DEVICES").is_none()
+        {
+            assert_eq!(detect_provider(), EmbedProvider::Cpu);
         }
     }
 
