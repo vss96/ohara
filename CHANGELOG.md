@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-06-13
+
+Completes the indexing fixes from v0.12.0 (#87). The parallel-writer
+commit drops are now fully eliminated, not just reduced: a questdb
+CoreML rebuild on v0.12.0 still lost 4 of 6,004 commits and spent 458%
+(7,020s) in storage. Both were the same root cause — the workers fought
+SQLite's single WAL writer through its busy handler.
+
+### Fixed
+
+- **All parallel-writer commit drops.** SQLite (WAL) allows exactly one
+  writer, so every index write now routes through a dedicated
+  single-connection write pool; the parallel workers queue FIFO on the
+  app side instead of contending on the busy handler (which dropped the
+  tail of each clustered write wave and inflated storage time with
+  poll-sleep waits). Reads stay concurrent on the main pool;
+  `busy_timeout` remains a cross-process backstop. Validated: a
+  2,045-commit fixture rebuilds via CoreML with zero drops and the
+  storage phase down from 458% to 39%.
+
 ## [0.12.0] - 2026-06-13
 
 Two indexing fixes found operating the v0.11 CoreML path on questdb
@@ -607,7 +627,8 @@ the build-from-source path on older distros.
 - Pin rmcp to `=0.1.5` for stable API surface ([9935c7b](https://github.com/vss96/ohara/commit/9935c7bf369d6a7ecce5366d38ef43186b762599))
 - Drop dead `OharaServer::embedder` field ([0acf38a](https://github.com/vss96/ohara/commit/0acf38a97c5c2d9f35bec7f37009088647898512))
 
-[Unreleased]: https://github.com/vss96/ohara/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/vss96/ohara/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/vss96/ohara/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/vss96/ohara/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/vss96/ohara/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/vss96/ohara/compare/v0.9.0...v0.10.0

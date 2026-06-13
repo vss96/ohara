@@ -2343,7 +2343,7 @@ checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 
 [[package]]
 name = "ohara-cli"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "axoupdater",
@@ -2368,7 +2368,7 @@ dependencies = [
 
 [[package]]
 name = "ohara-core"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2391,7 +2391,7 @@ dependencies = [
 
 [[package]]
 name = "ohara-embed"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2405,7 +2405,7 @@ dependencies = [
 
 [[package]]
 name = "ohara-engine"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2430,7 +2430,7 @@ dependencies = [
 
 [[package]]
 name = "ohara-git"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2443,7 +2443,7 @@ dependencies = [
 
 [[package]]
 name = "ohara-mcp"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2469,7 +2469,7 @@ dependencies = [
 
 [[package]]
 name = "ohara-parse"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2488,7 +2488,7 @@ dependencies = [
 
 [[package]]
 name = "ohara-perf-tests"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2510,7 +2510,7 @@ dependencies = [
 
 [[package]]
 name = "ohara-storage"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "async-trait",
