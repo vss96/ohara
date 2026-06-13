@@ -23,9 +23,180 @@ use anyhow::{bail, Result};
 /// in `dims`, and dims elsewhere in the graph (`value_info`, node
 /// attributes), are left untouched.
 pub fn fix_graph_io_dims(model: &[u8], dims: &[(&str, u64)]) -> Result<Vec<u8>> {
-    let _ = dims;
-    let _ = model;
-    bail!("unimplemented")
+    // ModelProto.graph = field 7.
+    rewrite_message(model, &|field, payload| {
+        (field == 7).then(|| rewrite_graph(payload, dims))
+    })
+}
+
+/// GraphProto.input = 11, .output = 12 (repeated ValueInfoProto).
+fn rewrite_graph(buf: &[u8], dims: &[(&str, u64)]) -> Result<Vec<u8>> {
+    rewrite_message(buf, &|field, payload| {
+        matches!(field, 11 | 12).then(|| rewrite_value_info(payload, dims))
+    })
+}
+
+/// ValueInfoProto.type = 2 (TypeProto).
+fn rewrite_value_info(buf: &[u8], dims: &[(&str, u64)]) -> Result<Vec<u8>> {
+    rewrite_message(buf, &|field, payload| {
+        (field == 2).then(|| rewrite_type(payload, dims))
+    })
+}
+
+/// TypeProto.tensor_type = 1 (TypeProto.Tensor).
+fn rewrite_type(buf: &[u8], dims: &[(&str, u64)]) -> Result<Vec<u8>> {
+    rewrite_message(buf, &|field, payload| {
+        (field == 1).then(|| rewrite_tensor(payload, dims))
+    })
+}
+
+/// TypeProto.Tensor.shape = 2 (TensorShapeProto).
+fn rewrite_tensor(buf: &[u8], dims: &[(&str, u64)]) -> Result<Vec<u8>> {
+    rewrite_message(buf, &|field, payload| {
+        (field == 2).then(|| rewrite_shape(payload, dims))
+    })
+}
+
+/// TensorShapeProto.dim = 1 (repeated Dimension).
+fn rewrite_shape(buf: &[u8], dims: &[(&str, u64)]) -> Result<Vec<u8>> {
+    rewrite_message(buf, &|field, payload| {
+        (field == 1).then(|| rewrite_dimension(payload, dims))
+    })
+}
+
+/// Dimension: dim_value = 1 (varint), dim_param = 2 (string). A
+/// dim_param matching one of `dims` is replaced by the corresponding
+/// dim_value; everything else copies through.
+fn rewrite_dimension(buf: &[u8], dims: &[(&str, u64)]) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(buf.len());
+    let mut pos = 0;
+    while pos < buf.len() {
+        let start = pos;
+        let key = read_varint(buf, &mut pos)?;
+        let (field, wire) = (key >> 3, key & 7);
+        if field == 2 && wire == 2 {
+            let end = read_len_payload_end(buf, &mut pos, field)?;
+            let payload = &buf[pos..end];
+            let replacement = dims.iter().find(|(name, _)| name.as_bytes() == payload);
+            match replacement {
+                Some((_, value)) => {
+                    write_varint(&mut out, 1 << 3); // dim_value, varint
+                    write_varint(&mut out, *value);
+                }
+                None => out.extend_from_slice(&buf[start..end]),
+            }
+            pos = end;
+            continue;
+        }
+        copy_field_body(buf, &mut pos, key)?;
+        out.extend_from_slice(&buf[start..pos]);
+    }
+    Ok(out)
+}
+
+/// Per-field payload rewriter: returns `Some(new_payload)` for
+/// length-delimited fields it wants to re-encode, `None` to copy the
+/// field through verbatim.
+type FieldRewriter<'a> = &'a dyn Fn(u64, &[u8]) -> Option<Result<Vec<u8>>>;
+
+/// Walk a protobuf message, re-encoding the length-delimited fields the
+/// rewriter claims and copying every other field byte-for-byte.
+fn rewrite_message(buf: &[u8], rewrite: FieldRewriter) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(buf.len() + 16);
+    let mut pos = 0;
+    while pos < buf.len() {
+        let start = pos;
+        let key = read_varint(buf, &mut pos)?;
+        let (field, wire) = (key >> 3, key & 7);
+        if wire == 2 {
+            let end = read_len_payload_end(buf, &mut pos, field)?;
+            let payload = &buf[pos..end];
+            match rewrite(field, payload) {
+                Some(new_payload) => {
+                    let new_payload = new_payload?;
+                    write_varint(&mut out, key);
+                    write_varint(&mut out, new_payload.len() as u64);
+                    out.extend_from_slice(&new_payload);
+                }
+                None => out.extend_from_slice(&buf[start..end]),
+            }
+            pos = end;
+            continue;
+        }
+        copy_field_body(buf, &mut pos, key)?;
+        out.extend_from_slice(&buf[start..pos]);
+    }
+    Ok(out)
+}
+
+/// Advance past a non-length-delimited field body (the tag at `key` has
+/// already been consumed; `pos` sits on the body).
+fn copy_field_body(buf: &[u8], pos: &mut usize, key: u64) -> Result<()> {
+    let (field, wire) = (key >> 3, key & 7);
+    match wire {
+        0 => {
+            let _ = read_varint(buf, pos)?;
+            Ok(())
+        }
+        1 => advance_fixed(buf, pos, 8, field),
+        5 => advance_fixed(buf, pos, 4, field),
+        2 => {
+            let end = read_len_payload_end(buf, pos, field)?;
+            *pos = end;
+            Ok(())
+        }
+        other => bail!("unsupported protobuf wire type {other} on field {field}"),
+    }
+}
+
+fn advance_fixed(buf: &[u8], pos: &mut usize, width: usize, field: u64) -> Result<()> {
+    let end = pos
+        .checked_add(width)
+        .filter(|e| *e <= buf.len())
+        .ok_or_else(|| anyhow::anyhow!("fixed-width field {field} overruns buffer"))?;
+    *pos = end;
+    Ok(())
+}
+
+/// Read a length prefix at `pos` and return the payload end offset,
+/// leaving `pos` at the payload start.
+fn read_len_payload_end(buf: &[u8], pos: &mut usize, field: u64) -> Result<usize> {
+    let len = read_varint(buf, pos)? as usize;
+    pos.checked_add(len)
+        .filter(|e| *e <= buf.len())
+        .ok_or_else(|| anyhow::anyhow!("length-delimited field {field} overruns buffer"))
+}
+
+fn read_varint(buf: &[u8], pos: &mut usize) -> Result<u64> {
+    let mut value: u64 = 0;
+    let mut shift = 0u32;
+    loop {
+        if *pos >= buf.len() {
+            bail!("varint overruns buffer at offset {pos}");
+        }
+        if shift >= 64 {
+            bail!("varint longer than 10 bytes at offset {pos}");
+        }
+        let byte = buf[*pos];
+        *pos += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+        shift += 7;
+    }
+}
+
+fn write_varint(out: &mut Vec<u8>, mut v: u64) {
+    loop {
+        let byte = (v & 0x7f) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(byte);
+            return;
+        }
+        out.push(byte | 0x80);
+    }
 }
 
 #[cfg(test)]
@@ -106,16 +277,28 @@ mod tests {
         let input = model(&[
             len_field(
                 11,
-                &value_info("input_ids", &[dim_param("batch_size"), dim_param("sequence_length")]),
+                &value_info(
+                    "input_ids",
+                    &[dim_param("batch_size"), dim_param("sequence_length")],
+                ),
             ),
             len_field(
                 12,
-                &value_info("last_hidden_state", &[dim_param("batch_size"), dim_value(384)]),
+                &value_info(
+                    "last_hidden_state",
+                    &[dim_param("batch_size"), dim_value(384)],
+                ),
             ),
         ]);
         let expected = model(&[
-            len_field(11, &value_info("input_ids", &[dim_value(32), dim_value(512)])),
-            len_field(12, &value_info("last_hidden_state", &[dim_value(32), dim_value(384)])),
+            len_field(
+                11,
+                &value_info("input_ids", &[dim_value(32), dim_value(512)]),
+            ),
+            len_field(
+                12,
+                &value_info("last_hidden_state", &[dim_value(32), dim_value(384)]),
+            ),
         ]);
         let fixed = fix_graph_io_dims(&input, FIX).expect("fix succeeds");
         assert_eq!(fixed, expected);
@@ -155,7 +338,10 @@ mod tests {
             &value_info("x", &[dim_param("other_dim"), dim_value(7)]),
         )]);
         let fixed = fix_graph_io_dims(&input, FIX).expect("fix succeeds");
-        assert_eq!(fixed, input, "unmatched dim_param must round-trip unchanged");
+        assert_eq!(
+            fixed, input,
+            "unmatched dim_param must round-trip unchanged"
+        );
     }
 
     #[test]
