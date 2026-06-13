@@ -183,6 +183,19 @@ async fn dispatch(
     }
 
     match inner.embed_batch(&texts).await {
+        // Defensive: an inner embedder that returns the wrong row count
+        // would leave slots unfilled and hang those callers forever.
+        // Fail the affected requests instead.
+        Ok(vectors) if vectors.len() != k => {
+            fail_owners(
+                reqs,
+                &owners,
+                &format!(
+                    "inner embed_batch returned {} vectors for {k} inputs",
+                    vectors.len()
+                ),
+            );
+        }
         Ok(vectors) => {
             for ((id, idx), vector) in owners.into_iter().zip(vectors) {
                 let Some(state) = reqs.get_mut(&id) else {
@@ -197,18 +210,20 @@ async fn dispatch(
                 }
             }
         }
-        Err(e) => {
-            // Fail every request that had a row in this batch (dedup so
-            // each one-shot is used once).
-            let mut seen: HashSet<u64> = HashSet::new();
-            for (id, _) in owners {
-                if !seen.insert(id) {
-                    continue;
-                }
-                if let Some(state) = reqs.remove(&id) {
-                    let _ = state.reply.send(Err(OhraError::Embedding(e.to_string())));
-                }
-            }
+        Err(e) => fail_owners(reqs, &owners, &e.to_string()),
+    }
+}
+
+/// Send the same error to every request that had a row in a failed
+/// batch (deduped, since a request owns at most one one-shot).
+fn fail_owners(reqs: &mut HashMap<u64, ReqState>, owners: &[(u64, usize)], msg: &str) {
+    let mut seen: HashSet<u64> = HashSet::new();
+    for (id, _) in owners {
+        if !seen.insert(*id) {
+            continue;
+        }
+        if let Some(state) = reqs.remove(id) {
+            let _ = state.reply.send(Err(OhraError::Embedding(msg.to_string())));
         }
     }
 }
@@ -389,5 +404,38 @@ mod tests {
         let be = BatchingEmbedder::new(Arc::new(FailingEmbedder), 32);
         let err = be.embed_batch(&nums(0..3)).await.unwrap_err();
         assert!(err.to_string().contains("boom"), "got {err}");
+    }
+
+    /// Inner embedder that returns one fewer vector than asked — a
+    /// contract violation that, unhandled, would leave a request slot
+    /// unfilled and hang the caller forever.
+    struct ShortEmbedder;
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for ShortEmbedder {
+        fn dimension(&self) -> usize {
+            1
+        }
+        fn model_id(&self) -> &str {
+            "short"
+        }
+        async fn embed_batch(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
+            Ok(texts.iter().skip(1).map(|_| vec![0.0]).collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn inner_length_violation_errors_instead_of_hanging() {
+        let be = BatchingEmbedder::new(Arc::new(ShortEmbedder), 32);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            be.embed_batch(&nums(0..3)),
+        )
+        .await
+        .expect("must not hang when the inner embedder returns too few vectors");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("vectors") && err.to_string().contains("inputs"),
+            "error must name the row-count mismatch: {err}"
+        );
     }
 }
