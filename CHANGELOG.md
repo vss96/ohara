@@ -8,6 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-06-13
+
+Two indexing fixes found operating the v0.11 CoreML path on questdb
+(#85). Together they restore full commit coverage and roughly halve the
+CoreML embed phase — closing the gap between the ~40 min observed and
+the throughput the embedder is actually capable of. No index rebuild
+required.
+
+### Fixed
+
+- **Parallel-writer commit drops (silent data loss).** Under
+  CoreML-fast embedding the ~`num_cpus` indexer workers finish together
+  and queue on the single WAL writer; the tail of a clustered wave
+  exceeded SQLite's 5s busy timeout and dropped commits (a questdb run
+  indexed 5,638 of 6,004). `busy_timeout` is now raised to 30s, above
+  the worst-case queue wait, so writers serialize instead of dropping.
+- **Failed commits are no longer silent.** `IndexerReport` carries
+  `commits_failed`; `ohara index` prints a warning and exits non-zero
+  when any commit could not be persisted, so a partial index is visible
+  to users, scripts, and the post-commit hook.
+
+### Changed
+
+- **CoreML embedding no longer pads per-commit.** Embedding ran once
+  per commit, padding each small commit's batch up to the fixed 32-row
+  CoreML shape — 55% of the GPU wasted on questdb (64% of commits have
+  ≤8 rows). A new `BatchingEmbedder` coalesces rows across the parallel
+  workers into full 32-row batches (flushing a partial only when
+  producers go idle), eliminating the padding waste. CPU/CUDA paths are
+  unchanged.
+
 ## [0.11.0] - 2026-06-13
 
 Apple Silicon indexing gets an opt-in ~3× boost (#83):
@@ -576,7 +607,8 @@ the build-from-source path on older distros.
 - Pin rmcp to `=0.1.5` for stable API surface ([9935c7b](https://github.com/vss96/ohara/commit/9935c7bf369d6a7ecce5366d38ef43186b762599))
 - Drop dead `OharaServer::embedder` field ([0acf38a](https://github.com/vss96/ohara/commit/0acf38a97c5c2d9f35bec7f37009088647898512))
 
-[Unreleased]: https://github.com/vss96/ohara/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/vss96/ohara/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/vss96/ohara/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/vss96/ohara/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/vss96/ohara/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/vss96/ohara/compare/v0.8.4...v0.9.0
