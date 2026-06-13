@@ -63,6 +63,10 @@ tokio-util = { version = "0.7", features = ["rt"] }
 ulid = "1"
 num_cpus = "1"
 fs2 = "0.4"
+# Pinned to fastembed 5.13's resolved tokenizers so PaddingParams stays
+# type-compatible with the embedder session (ohara-embed overrides the
+# padding strategy on the CoreML fixed-shape path).
+tokenizers = "=0.22.2"
 
 [profile.release]
 lto = "thin"

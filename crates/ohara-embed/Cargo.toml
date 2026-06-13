@@ -29,9 +29,16 @@ tracing.workspace = true
 # via the `cuda` feature below.
 [target.'cfg(target_os = "macos")'.dependencies]
 ort = { version = "=2.0.0-rc.12", optional = true, features = ["coreml"] }
+# Direct tokenizers dep for the CoreML fixed-shape path (plan-30):
+# fastembed hardcodes PaddingStrategy::BatchLongest, but the shape-fixed
+# model needs Fixed(512). We override via TextEmbedding's pub `tokenizer`
+# field, which requires our PaddingParams to be the same crate version
+# fastembed resolved (workspace pin =0.22.2).
+tokenizers = { workspace = true, optional = true }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 ort = { version = "=2.0.0-rc.12", optional = true }
+tokenizers = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -39,7 +46,7 @@ default = []
 # Requires CoreML.framework at build time — only does anything on macOS;
 # on Linux the target-conditional ort dep above strips the coreml feature
 # so the build is clean (and no extra ort weight is added).
-coreml = ["dep:ort"]
+coreml = ["dep:ort", "dep:tokenizers"]
 # Enable CUDA execution provider. Requires CUDA toolkit at build time —
 # Linux x86_64 (and Windows) hosts with NVIDIA GPUs only.
 cuda = ["dep:ort", "ort/cuda"]
