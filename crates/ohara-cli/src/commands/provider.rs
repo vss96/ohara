@@ -58,10 +58,23 @@ pub fn resolve_provider(arg: ProviderArg) -> EmbedProvider {
 /// harmful for BGE (ANE-rejected unbounded dims + per-shape
 /// specialization churn — `docs/perf/v0.11-coreml-fixed-shape.md`).
 pub(crate) fn detect_provider() -> EmbedProvider {
-    if std::env::var_os("CUDA_VISIBLE_DEVICES").is_some() {
+    if cuda_env_enabled() {
         return EmbedProvider::Cuda;
     }
     EmbedProvider::Cpu
+}
+
+/// `CUDA_VISIBLE_DEVICES` semantics: unset, empty, and `-1` all mean
+/// "no visible devices" — only a non-empty device list counts as a
+/// CUDA-enabled host.
+fn cuda_env_enabled() -> bool {
+    match std::env::var("CUDA_VISIBLE_DEVICES") {
+        Ok(v) => {
+            let v = v.trim();
+            !v.is_empty() && v != "-1"
+        }
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]

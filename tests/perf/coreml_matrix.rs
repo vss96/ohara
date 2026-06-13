@@ -358,6 +358,8 @@ fn coreml_matrix() {
     let batch: usize = env_parse("MATRIX_BATCH", 128);
     let iters: usize = env_parse("MATRIX_ITERS", 2);
     let sustain: usize = env_parse("MATRIX_SUSTAIN", 0);
+    assert!(batch > 0, "MATRIX_BATCH must be > 0");
+    assert!(iters > 0, "MATRIX_ITERS must be > 0");
     let configs = selected_configs();
 
     eprintln!(
@@ -416,6 +418,11 @@ fn coreml_matrix() {
         );
 
         let cand_vecs = embed_all(&mut model, &probe_owned, batch);
+        assert_eq!(
+            cand_vecs.len(),
+            ref_vecs.len(),
+            "parity probe row count mismatch — zip would silently truncate"
+        );
         let min_cos = ref_vecs
             .iter()
             .zip(&cand_vecs)
