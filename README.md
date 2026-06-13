@@ -12,7 +12,7 @@ Named after Ohara, the island in One Piece whose Tree of Knowledge held 5,000
 years of accumulated history — and whose archaeologists devoted their lives to
 reading it.
 
-**Status: v0.12.0.** Two MCP tools shipped (`find_pattern`, `explain_change`),
+**Status: v0.13.0.** Two MCP tools shipped (`find_pattern`, `explain_change`),
 served by a single shared daemon across all your editor sessions:
 
 - **`find_pattern`** — "how was X done before?" (semantic search over git
@@ -23,8 +23,12 @@ served by a single shared daemon across all your editor sessions:
 
 Recent highlights:
 
+- **v0.13.0** — single-writer storage pool (plan-32): all index writes
+  funnel through one connection, fully eliminating the parallel-writer
+  commit drops and the busy-handler contention (storage 458%→39% on a
+  CoreML rebuild).
 - **v0.12.0** — indexing fixes (plan-31): parallel-writer commit drops
-  fixed (raised `busy_timeout` + failures now surface and exit
+  reduced (raised `busy_timeout` + failures now surface and exit
   non-zero), and the CoreML embedder coalesces per-commit batches to
   end ~55% GPU padding waste.
 - **v0.11.0** — fixed-shape CoreML embedder (plan-30): `ohara index

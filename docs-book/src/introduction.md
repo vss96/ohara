@@ -60,5 +60,7 @@ indexer) → v0.9.0 (quantized BGE-small default embedder) → v0.10.0
 auto-versioning) → v0.11.0 (fixed-shape CoreML embedder: ~3× indexing
 throughput on Apple Silicon, opt-in via `--embed-provider coreml`) →
 v0.12.0 (indexing fixes: parallel-writer commit-drop fix +
-cross-commit CoreML batch coalescing).
-**Current: v0.12.0.** See the [Roadmap](./roadmap.md).
+cross-commit CoreML batch coalescing) → v0.13.0 (single-writer storage
+pool: fully eliminates parallel-writer commit drops + busy-handler
+contention).
+**Current: v0.13.0.** See the [Roadmap](./roadmap.md).
