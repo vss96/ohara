@@ -42,6 +42,9 @@ impl SqlitePoolBuilder {
         let manager = Manager::from_config(&cfg, Runtime::Tokio1);
         let mut pool_cfg = cfg.get_pool_config();
         if let Some(n) = self.max_size {
+            if n == 0 {
+                anyhow::bail!("pool max_size must be >= 1 (0 yields a pool that never hands out a connection)");
+            }
             pool_cfg.max_size = n;
         }
         // Apply pragmas via a `post_create` hook so they run on every connection
@@ -277,6 +280,18 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(mode.to_lowercase(), "wal");
+    }
+
+    #[tokio::test]
+    async fn max_size_zero_is_rejected() {
+        // A zero-sized pool can never hand out a connection — fail fast
+        // instead of deadlocking the first checkout.
+        let dir = tempfile::tempdir().unwrap();
+        let result = SqlitePoolBuilder::new(dir.path().join("idx.sqlite"))
+            .max_size(0)
+            .build()
+            .await;
+        assert!(result.is_err(), "max_size(0) must be rejected");
     }
 
     #[tokio::test]
