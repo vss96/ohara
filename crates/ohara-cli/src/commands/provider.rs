@@ -8,20 +8,6 @@
 use clap::ValueEnum;
 use ohara_embed::EmbedProvider;
 
-/// Long-pass commit threshold for auto-downgrading CoreML → CPU.
-///
-/// Plan 7 Phase 2B: an `index` run that will walk this many commits
-/// or more with `--embed-provider auto` resolves to CPU on Apple
-/// Silicon, because the CoreML embedder leaks ~4 MB/batch
-/// (`docs/perf/v0.6.1-leak-diagnosis.md`) and would OOM the host
-/// before completing. Short index passes (incremental, small repos,
-/// `query`) keep the auto-pick of CoreML.
-///
-/// Set conservatively against a typical 16–24 GB Apple Silicon host;
-/// users with larger memory who want CoreML for long passes can pass
-/// `--embed-provider coreml` explicitly to bypass the downgrade.
-pub(crate) const LONG_PASS_THRESHOLD: u64 = 1000;
-
 /// Clap-friendly mirror of [`EmbedProvider`] with an extra `Auto`
 /// variant for "pick the best available provider for this host".
 ///
@@ -30,11 +16,18 @@ pub(crate) const LONG_PASS_THRESHOLD: u64 = 1000;
 /// is intentionally stable across builds so `--embed-provider coreml`
 /// from a script keeps the same exit behavior — succeeding on a
 /// future build, failing fast today.
+///
+/// Plan 30: `coreml` routes `ohara index` to the fixed-shape CoreML
+/// embedder (`ohara_embed::CoreMlFixedProvider`, ~3× CPU on Apple
+/// Silicon) and is opt-in — `auto` never picks it. The plan-7
+/// long-pass downgrade machinery is gone with the leak that motivated
+/// it (shape-specialization churn, fixed by the static-shape model;
+/// see `docs/perf/v0.11-coreml-fixed-shape.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 #[clap(rename_all = "kebab-case")]
 pub enum ProviderArg {
-    /// Detect from the host (Apple silicon → CoreML, `CUDA_VISIBLE_DEVICES`
-    /// set → CUDA, otherwise CPU).
+    /// Detect from the host (`CUDA_VISIBLE_DEVICES` set → CUDA,
+    /// otherwise CPU; CoreML is opt-in via `coreml`).
     #[default]
     Auto,
     Cpu,
@@ -57,73 +50,18 @@ pub fn resolve_provider(arg: ProviderArg) -> EmbedProvider {
     }
 }
 
-/// Outcome of [`resolve_with_downgrade`] — concrete provider plus an
-/// optional note describing whether the resolution was downgraded
-/// from CoreML to CPU on a long index pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ProviderResolution {
-    /// Provider the caller should construct.
-    pub(crate) provider: EmbedProvider,
-    /// Set when an `Auto` resolution that would otherwise pick CoreML
-    /// was downgraded to CPU because `commits_to_walk` met or exceeded
-    /// [`LONG_PASS_THRESHOLD`]. Carries the count for logging.
-    pub(crate) downgraded_from_coreml: Option<u64>,
-}
-
-/// Resolve a `ProviderArg` to a concrete provider, applying the
-/// long-pass downgrade rule from Plan 7 Phase 2B.
-///
-/// Behaviour:
-/// - `Auto` + `commits_to_walk >= threshold` + auto-pick is CoreML →
-///   downgrade to CPU and record the count in
-///   [`ProviderResolution::downgraded_from_coreml`]. The boundary is
-///   inclusive because a repo at exactly the threshold is the most
-///   at-risk case, not the safest.
-/// - `Auto` + short pass, or auto-pick is not CoreML → pass through
-///   to [`detect_provider`].
-/// - Explicit `Cpu` / `Coreml` / `Cuda` → honour the user's choice
-///   regardless of pass length. The leak warning for explicit CoreML
-///   is the caller's responsibility (it depends on host
-///   architecture, not on this function's output).
-pub(crate) fn resolve_with_downgrade(
-    arg: ProviderArg,
-    commits_to_walk: u64,
-    threshold: u64,
-) -> ProviderResolution {
-    if !matches!(arg, ProviderArg::Auto) {
-        return ProviderResolution {
-            provider: resolve_provider(arg),
-            downgraded_from_coreml: None,
-        };
-    }
-    let auto_pick = detect_provider();
-    if matches!(auto_pick, EmbedProvider::CoreMl) && commits_to_walk >= threshold {
-        return ProviderResolution {
-            provider: EmbedProvider::Cpu,
-            downgraded_from_coreml: Some(commits_to_walk),
-        };
-    }
-    ProviderResolution {
-        provider: auto_pick,
-        downgraded_from_coreml: None,
-    }
-}
-
 /// Heuristic auto-detect for `--embed-provider auto`.
 ///
-/// Order matters: a developer with a CUDA box is unlikely to be on
-/// macOS, but if both signals fire we pick CoreML first because the
-/// macOS-on-Apple-silicon check is exact (compile-time `cfg!`) while
-/// the CUDA check is just "an env var is set", which travels with
-/// shell sessions and isn't a reliable hardware signal.
+/// CUDA when `CUDA_VISIBLE_DEVICES` is set, CPU otherwise. CoreML is
+/// never auto-picked (plan 30): the fixed-shape path is opt-in while
+/// it bakes, and the old dynamic CoreML path it replaced was actively
+/// harmful for BGE (ANE-rejected unbounded dims + per-shape
+/// specialization churn — `docs/perf/v0.11-coreml-fixed-shape.md`).
 pub(crate) fn detect_provider() -> EmbedProvider {
-    if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
-        EmbedProvider::CoreMl
-    } else if std::env::var_os("CUDA_VISIBLE_DEVICES").is_some() {
-        EmbedProvider::Cuda
-    } else {
-        EmbedProvider::Cpu
+    if std::env::var_os("CUDA_VISIBLE_DEVICES").is_some() {
+        return EmbedProvider::Cuda;
     }
+    EmbedProvider::Cpu
 }
 
 #[cfg(test)]
@@ -188,76 +126,11 @@ mod tests {
     }
 
     #[test]
-    fn explicit_provider_arg_is_never_downgraded() {
-        // Plan 7 Phase 2B contract: `--embed-provider coreml` (or cpu,
-        // or cuda) must be honoured even when the index pass is long.
-        // The caller is responsible for the user-visible warning when
-        // explicit CoreML lands on Apple Silicon.
-        let huge = LONG_PASS_THRESHOLD * 10;
-        for arg in [ProviderArg::Cpu, ProviderArg::Coreml, ProviderArg::Cuda] {
-            let r = resolve_with_downgrade(arg, huge, LONG_PASS_THRESHOLD);
-            assert_eq!(r.provider, resolve_provider(arg));
-            assert!(
-                r.downgraded_from_coreml.is_none(),
-                "{arg:?} must not be auto-downgraded"
-            );
-        }
-    }
-
-    #[test]
-    fn auto_below_threshold_passes_through_to_detect() {
-        // Short index passes get the auto-picked provider unchanged —
-        // CoreML on Apple Silicon stays CoreML, etc. This is the
-        // `query` and `index --incremental` short-circuit path.
-        let r = resolve_with_downgrade(ProviderArg::Auto, 100, LONG_PASS_THRESHOLD);
-        assert_eq!(r.provider, detect_provider());
-        assert!(r.downgraded_from_coreml.is_none());
-    }
-
-    #[test]
-    fn auto_just_below_threshold_does_not_downgrade() {
-        // Boundary: strictly less than threshold is short-pass.
-        // The cutoff is `>=` in the implementation so a repo at
-        // exactly `LONG_PASS_THRESHOLD` already gets the safety net.
-        let r = resolve_with_downgrade(
-            ProviderArg::Auto,
-            LONG_PASS_THRESHOLD - 1,
-            LONG_PASS_THRESHOLD,
-        );
-        assert_eq!(r.provider, detect_provider());
-        assert!(r.downgraded_from_coreml.is_none());
-    }
-
-    #[test]
-    fn auto_at_threshold_downgrades_when_auto_picks_coreml() {
-        // Boundary: a repo at exactly the threshold is the most at-risk
-        // case (right on the edge of OOM territory) so it must trip the
-        // downgrade rather than being treated as a short pass. This
-        // matches the `>=` in the implementation.
-        let r = resolve_with_downgrade(ProviderArg::Auto, LONG_PASS_THRESHOLD, LONG_PASS_THRESHOLD);
-        if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
-            assert_eq!(r.provider, EmbedProvider::Cpu);
-            assert_eq!(r.downgraded_from_coreml, Some(LONG_PASS_THRESHOLD));
-        } else {
-            assert_eq!(r.provider, detect_provider());
-            assert!(r.downgraded_from_coreml.is_none());
-        }
-    }
-
-    #[test]
-    fn auto_long_pass_downgrades_only_when_auto_picks_coreml() {
-        // The downgrade fires iff the auto-pick would have been CoreML
-        // — i.e. on Apple Silicon. CPU and CUDA auto-picks are not
-        // affected (no leak observed on those paths per the v0.6.1
-        // diagnosis).
-        let commits = LONG_PASS_THRESHOLD + 1;
-        let r = resolve_with_downgrade(ProviderArg::Auto, commits, LONG_PASS_THRESHOLD);
-        if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
-            assert_eq!(r.provider, EmbedProvider::Cpu);
-            assert_eq!(r.downgraded_from_coreml, Some(commits));
-        } else {
-            assert_eq!(r.provider, detect_provider());
-            assert!(r.downgraded_from_coreml.is_none());
-        }
+    fn auto_never_resolves_to_coreml() {
+        // Plan 30: CoreML is opt-in only. Whatever the host, `auto`
+        // must come back CPU or CUDA — never CoreML — so a plain
+        // `ohara index` can't wander into a 30s CoreML compile (or a
+        // ~130MB model download) the user didn't ask for.
+        assert_ne!(resolve_provider(ProviderArg::Auto), EmbedProvider::CoreMl);
     }
 }

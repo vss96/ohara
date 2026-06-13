@@ -39,9 +39,9 @@ pub struct Args {
     #[arg(long)]
     pub no_rerank: bool,
     /// ONNX execution provider for the embedder + reranker. `auto`
-    /// (default) follows the same heuristic as `ohara index`. See
-    /// `commands::index::Args::embed_provider` for the current
-    /// CoreML / CUDA support story.
+    /// (default) follows the same heuristic as `ohara index`. `coreml`
+    /// is an indexing-only knob (plan 30) — queries embed on CPU
+    /// regardless. See `commands::index::Args::embed_provider`.
     #[arg(long, value_enum, default_value_t = ProviderArg::Auto)]
     pub embed_provider: ProviderArg,
 }
@@ -60,7 +60,20 @@ async fn run_standalone(
     let db_path = super::index_db_path(&repo_id)?;
     let storage: Arc<dyn ohara_core::Storage> =
         Arc::new(timed_phase("storage_open", ohara_storage::SqliteStorage::open(&db_path)).await?);
-    let chosen_provider = resolve_provider(args.embed_provider);
+    // Plan 30: the CoreML fixed-shape provider is an indexing tool — a
+    // single query row doesn't justify its one-time ~30s compile, and
+    // the old dynamic CoreML path it replaced is unstable for BGE. The
+    // INT8-CPU embedder produces equivalent query vectors (same model
+    // class), so queries always embed on CPU/CUDA.
+    let chosen_provider = match resolve_provider(args.embed_provider) {
+        ohara_embed::EmbedProvider::CoreMl => {
+            tracing::info!(
+                "--embed-provider coreml applies to `ohara index`; queries embed on CPU"
+            );
+            ohara_embed::EmbedProvider::Cpu
+        }
+        other => other,
+    };
     tracing::info!(provider = ?chosen_provider, "embedder");
     let embedder = Arc::new(
         timed_phase(
