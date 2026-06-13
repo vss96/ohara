@@ -366,14 +366,39 @@ mod tests {
         }
     }
 
+    /// Like `StubEmbedder` but sleeps on each inner call so the test
+    /// below is deterministic: while the coalescer is busy on its first
+    /// (small) dispatch, every other caller has time to enqueue, so the
+    /// remaining dispatches are guaranteed to coalesce into full
+    /// batches regardless of scheduler timing.
+    struct SlowStubEmbedder {
+        batch_sizes: Arc<Mutex<Vec<usize>>>,
+    }
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for SlowStubEmbedder {
+        fn dimension(&self) -> usize {
+            1
+        }
+        fn model_id(&self) -> &str {
+            "slow-stub"
+        }
+        async fn embed_batch(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            self.batch_sizes.lock().unwrap().push(texts.len());
+            Ok(texts.iter().map(|_| vec![0.0]).collect())
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn fills_full_batches_under_load() {
         // The padding-elimination property: when many callers are in
         // flight, the inner embedder sees full batch_rows batches, not
-        // tiny per-caller ones.
+        // tiny per-caller ones. The slow inner makes pile-up
+        // deterministic — without the delay this races on the scheduler
+        // (the coalescer can drain caller 1 before callers 2..8 enqueue).
         let sizes = Arc::new(Mutex::new(Vec::new()));
         let be = Arc::new(BatchingEmbedder::new(
-            Arc::new(StubEmbedder {
+            Arc::new(SlowStubEmbedder {
                 batch_sizes: sizes.clone(),
             }),
             8,
