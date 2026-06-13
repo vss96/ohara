@@ -313,6 +313,7 @@ impl Indexer {
             new_commits: total_commits,
             new_hunks: total_hunks,
             head_symbols: symbols.len(),
+            commits_failed: result.commits_failed,
             phase_timings: timings,
         })
     }
@@ -388,6 +389,11 @@ pub struct IndexerReport {
     pub new_commits: usize,
     pub new_hunks: usize,
     pub head_symbols: usize,
+    /// Plan 31: commits the parallel workers could not persist (e.g. a
+    /// storage write that exhausted `busy_timeout`). Non-zero means the
+    /// index is incomplete; the CLI surfaces this and exits non-zero so
+    /// the loss is never silent.
+    pub commits_failed: usize,
     /// Per-phase wall-time + input-size breakdown for the run, captured
     /// when the `--profile` flag (or any caller plumbing
     /// `Indexer::run`) wants the same numbers used for throughput

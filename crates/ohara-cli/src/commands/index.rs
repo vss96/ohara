@@ -396,6 +396,7 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
                 new_commits: 0,
                 new_hunks: 0,
                 head_symbols: 0,
+                commits_failed: 0,
                 phase_timings: PhaseTimings::default(),
             });
         }
@@ -719,6 +720,37 @@ mod profile_json_tests {
         assert!(
             fts_line.ends_with("<1%"),
             "fts (~0.8% of total) should show `<1%`; got: `{fts_line}`"
+        );
+    }
+
+    #[test]
+    fn failed_commits_notice_warns_when_any_failed() {
+        let n = failed_commits_notice(3).expect("3 failures must produce a notice");
+        assert!(n.contains('3'), "notice must name the count: {n}");
+        assert!(
+            n.to_lowercase().contains("fail"),
+            "notice must say commits failed: {n}"
+        );
+        assert!(
+            n.contains("ohara index"),
+            "notice must point at the recovery command: {n}"
+        );
+    }
+
+    #[test]
+    fn failed_commits_notice_singular_for_one() {
+        let n = failed_commits_notice(1).expect("1 failure must produce a notice");
+        assert!(
+            n.contains("1 commit ") && !n.contains("commits"),
+            "one failure must read singular: {n}"
+        );
+    }
+
+    #[test]
+    fn failed_commits_notice_silent_when_none() {
+        assert!(
+            failed_commits_notice(0).is_none(),
+            "a clean run must not emit a failure notice"
         );
     }
 
