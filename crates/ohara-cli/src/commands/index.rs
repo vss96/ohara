@@ -139,23 +139,6 @@ pub fn phase_timings_json(pt: &PhaseTimings) -> String {
     serde_json::to_string(pt).expect("PhaseTimings serializes via derive(Serialize)")
 }
 
-/// Render a multi-line cosmetic summary printed at the end of
-/// `ohara index`. Includes commit/hunk/symbol counts, wall-clock total,
-/// and a per-phase bar chart sorted by descending cost so the dominant
-/// stage leads. Phases with zero recorded ms are omitted.
-///
-/// Example output:
-///
-/// ```text
-/// indexed in 47.3s — 1670 commits, 5951 hunks, 36976 HEAD symbols
-///
-///   embed     38.1s  ████████████████████████████████   80%
-///   storage    4.2s  ███                                 9%
-///   diff       2.6s  ██                                  5%
-///   parse      1.8s  █                                   4%
-///   symbols    1.2s  █                                   2%
-///   fts       400ms                                     <1%
-/// ```
 /// Plan 31: a one-line warning when the parallel indexer could not
 /// persist some commits (e.g. a write that exhausted `busy_timeout`).
 /// Returns `None` for a clean run. The caller prints this to stderr and
@@ -175,6 +158,23 @@ pub fn failed_commits_notice(commits_failed: u64) -> Option<String> {
     ))
 }
 
+/// Render a multi-line cosmetic summary printed at the end of
+/// `ohara index`. Includes commit/hunk/symbol counts, wall-clock total,
+/// and a per-phase bar chart sorted by descending cost so the dominant
+/// stage leads. Phases with zero recorded ms are omitted.
+///
+/// Example output:
+///
+/// ```text
+/// indexed in 47.3s — 1670 commits, 5951 hunks, 36976 HEAD symbols
+///
+///   embed     38.1s  ████████████████████████████████   80%
+///   storage    4.2s  ███                                 9%
+///   diff       2.6s  ██                                  5%
+///   parse      1.8s  █                                   4%
+///   symbols    1.2s  █                                   2%
+///   fts       400ms                                     <1%
+/// ```
 pub fn index_summary_human(
     pt: &PhaseTimings,
     total_ms: u64,
@@ -459,7 +459,17 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
                 model = ohara_embed::coreml_fixed::FP32_MODEL_ID,
                 "loading embedder"
             );
-            Arc::new(tokio::task::spawn_blocking(ohara_embed::CoreMlFixedProvider::new).await??)
+            let inner: Arc<dyn ohara_core::EmbeddingProvider> = Arc::new(
+                tokio::task::spawn_blocking(ohara_embed::CoreMlFixedProvider::new).await??,
+            );
+            // Plan 31: coalesce per-commit embed calls into full
+            // CoreML batches across the parallel workers — without this
+            // most commits (≤8 rows) pad the 32-row model and waste
+            // ~55% of the GPU. CPU/CUDA don't pad, so they skip this.
+            Arc::new(ohara_embed::BatchingEmbedder::new(
+                inner,
+                ohara_embed::coreml_fixed::FIXED_BATCH,
+            ))
         }
         other => {
             tracing::info!(model = ohara_embed::DEFAULT_MODEL_ID, "loading embedder");
