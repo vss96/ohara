@@ -8,8 +8,9 @@ use std::sync::Arc;
 use super::provider::{resolve_provider, ProviderArg};
 use crate::resources::{apply_intensity, detect_host, pick_resources, ResourcePlan, ResourcesArg};
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, clap::ValueEnum)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
 pub enum EmbedCacheArg {
+    #[default]
     Off,
     Semantic,
     Diff,
