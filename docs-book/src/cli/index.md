@@ -8,15 +8,17 @@ for the full state machine.
 ## Usage
 
 ```
-ohara index [PATH] [--incremental] [--force] [--rebuild --yes] \
-            [--commit-batch N] [--threads N] [--no-progress] \
-            [--profile] [--embed-provider {auto,cpu,coreml,cuda}] \
+ohara index [PATH] [-i | --interactive] [--incremental] [--force] \
+            [--rebuild --yes] [--commit-batch N] [--threads N] \
+            [--no-progress] [--profile] \
+            [--embed-provider {auto,cpu,coreml,cuda}] \
             [--resources {auto,conservative,aggressive}]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `PATH` (positional) | `.` | Path to the repo. |
+| `-i`, `--interactive` | off | Launch a guided wizard that prompts for embedding provider, resource intensity, index mode, and (opt-in) advanced knobs, previews the equivalent command, then runs it. Requires a TTY. Other tuning flags are ignored when `-i` is set — the wizard owns the tuning. |
 | `--incremental` | off | Skip the indexer (and embedder init) when the storage watermark already points at HEAD. Used by the post-commit hook to make no-op re-indexes nearly free. |
 | `--force` | off | Clear existing HEAD symbol rows and re-extract from scratch. Used after upgrades that change the AST chunker. Wins over `--incremental` if both are set; commit/hunk history is untouched. |
 | `--rebuild` | off | **Destructive.** Delete the entire index for this repo and rebuild from scratch. Stronger than `--force` (which only refreshes HEAD-symbol rows). Used when `ohara status` reports `compatibility: needs rebuild` (the binary's embedder dimension or model differs from what the index was built with). Requires `--yes` to confirm; conflicts with `--incremental` and `--force`. |
@@ -35,6 +37,16 @@ First-time index of the current repo:
 ```sh
 ohara index
 ```
+
+Not sure which provider or knobs to use? Launch the interactive wizard:
+
+```sh
+ohara index -i
+```
+
+It walks you through provider (CoreML/CPU/CUDA — only the ones this
+build supports), resource intensity, and index mode, shows the
+equivalent `ohara index …` command, and runs it on confirm.
 
 Hook-style re-index — fast no-op when HEAD is already indexed:
 
