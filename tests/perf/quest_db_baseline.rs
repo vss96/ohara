@@ -72,6 +72,7 @@ async fn quest_db_baseline_under_threshold() {
 
     let args = ohara_cli::commands::index::Args {
         path: fixture,
+        interactive: false,
         incremental: false,
         force: false,
         rebuild: false,

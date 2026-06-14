@@ -319,6 +319,7 @@ async fn rerank_pool_sweep() -> Result<()> {
     // Step 2: index the fixture through the same path the binary uses.
     let index_args = ohara_cli::commands::index::Args {
         path: fixture.clone(),
+        interactive: false,
         incremental: false,
         force: false,
         rebuild: false,
