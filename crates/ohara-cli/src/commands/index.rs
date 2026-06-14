@@ -30,6 +30,13 @@ pub struct Args {
     /// Path to the repo (defaults to current directory)
     #[arg(default_value = ".")]
     pub path: PathBuf,
+    /// Launch the interactive index wizard: choose embedding provider,
+    /// resource intensity, index mode, and advanced knobs through
+    /// guided prompts, preview the equivalent command, then run.
+    /// Requires a TTY. Other tuning flags are ignored when `-i` is set
+    /// — the wizard owns the tuning surface.
+    #[arg(long, short = 'i')]
+    pub interactive: bool,
     /// Skip indexing (and embedder init) when HEAD is already indexed.
     /// Used by the post-commit hook so empty re-indexes are nearly free.
     #[arg(long)]
@@ -914,5 +921,37 @@ mod provider_resolution_tests {
             resolve_and_note(ProviderArg::Auto),
             resolve_provider(ProviderArg::Auto)
         );
+    }
+}
+
+#[cfg(test)]
+mod interactive_flag_tests {
+    use super::*;
+    use clap::Parser;
+
+    // Args is `#[derive(ClapArgs)]`, not a top-level `Parser`. Wrap it
+    // so we can drive clap parsing in a unit test.
+    #[derive(Parser)]
+    struct Wrapper {
+        #[command(flatten)]
+        args: Args,
+    }
+
+    #[test]
+    fn interactive_defaults_off() {
+        let w = Wrapper::parse_from(["ohara"]);
+        assert!(!w.args.interactive);
+    }
+
+    #[test]
+    fn long_flag_sets_interactive() {
+        let w = Wrapper::parse_from(["ohara", "--interactive"]);
+        assert!(w.args.interactive);
+    }
+
+    #[test]
+    fn short_flag_sets_interactive() {
+        let w = Wrapper::parse_from(["ohara", "-i"]);
+        assert!(w.args.interactive);
     }
 }
