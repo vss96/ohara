@@ -109,6 +109,9 @@ pub fn host_capabilities() -> ProviderAvailability {
     let auto_label = match resolve_provider(ProviderArg::Auto) {
         EmbedProvider::Cpu => "CPU",
         EmbedProvider::Cuda => "CUDA",
+        // Unreachable today — `auto` never picks CoreML (plan-30) — but
+        // kept so the match stays exhaustive over `EmbedProvider` without
+        // a `_` arm that would silently mislabel a future variant.
         EmbedProvider::CoreMl => "CoreML",
     };
     ProviderAvailability {
