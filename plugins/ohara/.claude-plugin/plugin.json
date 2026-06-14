@@ -1,6 +1,6 @@
 {
   "name": "ohara",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Local-first git-history lineage engine for Claude Code. Surfaces 'how was X done before?' / 'why does this code look this way?' answers via the ohara MCP server (find_pattern + explain_change).",
   "author": {
     "name": "Vikas"
