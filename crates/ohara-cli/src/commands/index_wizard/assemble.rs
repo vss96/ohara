@@ -3,8 +3,8 @@
 
 use crate::commands::index::{Args, EmbedCacheArg};
 use crate::commands::provider::{resolve_provider, ProviderArg};
-use ohara_embed::EmbedProvider;
 use crate::resources::ResourcesArg;
+use ohara_embed::EmbedProvider;
 
 /// Which embedding provider the user picked. `Auto` maps to *no*
 /// `--embed-provider` flag (defer to the resource plan); the others
@@ -128,7 +128,10 @@ pub fn provider_choices(
 ) -> (Vec<ProviderChoice>, Vec<String>, Vec<String>) {
     let mut choices = vec![ProviderChoice::Auto, ProviderChoice::Cpu];
     let mut labels = vec![
-        format!("Auto (recommended) — resolves to {} on this host", a.auto_label),
+        format!(
+            "Auto (recommended) — resolves to {} on this host",
+            a.auto_label
+        ),
         "CPU".to_string(),
     ];
     let mut footnotes = Vec::new();
@@ -142,9 +145,8 @@ pub fn provider_choices(
                     .to_string(),
             );
         }
-        (false, true) => footnotes.push(
-            "CoreML hidden: this binary was built without `--features coreml`.".to_string(),
-        ),
+        (false, true) => footnotes
+            .push("CoreML hidden: this binary was built without `--features coreml`.".to_string()),
         (false, false) => {}
     }
 
@@ -153,9 +155,8 @@ pub fn provider_choices(
             choices.push(ProviderChoice::Cuda);
             labels.push("CUDA — NVIDIA GPU".to_string());
         }
-        (false, false) => footnotes.push(
-            "CUDA hidden: this binary was built without `--features cuda`.".to_string(),
-        ),
+        (false, false) => footnotes
+            .push("CUDA hidden: this binary was built without `--features cuda`.".to_string()),
         (false, true) => {}
     }
 
@@ -167,7 +168,12 @@ mod provider_choice_tests {
     use super::*;
 
     fn avail(macos: bool, coreml_build: bool, cuda_build: bool) -> ProviderAvailability {
-        ProviderAvailability { macos, coreml_build, cuda_build, auto_label: "CPU" }
+        ProviderAvailability {
+            macos,
+            coreml_build,
+            cuda_build,
+            auto_label: "CPU",
+        }
     }
 
     #[test]
@@ -341,7 +347,10 @@ mod command_render_tests {
 
     #[test]
     fn rebuild_renders_rebuild_yes() {
-        let ans = WizardAnswers { mode: ModeChoice::Rebuild, ..Default::default() };
+        let ans = WizardAnswers {
+            mode: ModeChoice::Rebuild,
+            ..Default::default()
+        };
         let a = assemble_args(ans, base_args());
         assert_eq!(args_to_command(&a), "ohara index --rebuild --yes");
     }
@@ -401,21 +410,30 @@ mod assemble_tests {
 
     #[test]
     fn incremental_mode_sets_incremental_only() {
-        let ans = WizardAnswers { mode: ModeChoice::Incremental, ..Default::default() };
+        let ans = WizardAnswers {
+            mode: ModeChoice::Incremental,
+            ..Default::default()
+        };
         let a = assemble_args(ans, base_args());
         assert!(a.incremental && !a.force && !a.rebuild);
     }
 
     #[test]
     fn force_mode_sets_force_only() {
-        let ans = WizardAnswers { mode: ModeChoice::Force, ..Default::default() };
+        let ans = WizardAnswers {
+            mode: ModeChoice::Force,
+            ..Default::default()
+        };
         let a = assemble_args(ans, base_args());
         assert!(a.force && !a.incremental && !a.rebuild);
     }
 
     #[test]
     fn rebuild_mode_sets_rebuild_and_yes() {
-        let ans = WizardAnswers { mode: ModeChoice::Rebuild, ..Default::default() };
+        let ans = WizardAnswers {
+            mode: ModeChoice::Rebuild,
+            ..Default::default()
+        };
         let a = assemble_args(ans, base_args());
         assert!(a.rebuild && a.yes);
         assert!(!a.incremental && !a.force);
@@ -423,19 +441,31 @@ mod assemble_tests {
 
     #[test]
     fn provider_auto_maps_to_none() {
-        let ans = WizardAnswers { provider: ProviderChoice::Auto, ..Default::default() };
+        let ans = WizardAnswers {
+            provider: ProviderChoice::Auto,
+            ..Default::default()
+        };
         let a = assemble_args(ans, base_args());
         assert_eq!(a.embed_provider, None);
     }
 
     #[test]
     fn provider_explicit_maps_to_some() {
-        let ans = WizardAnswers { provider: ProviderChoice::Coreml, ..Default::default() };
+        let ans = WizardAnswers {
+            provider: ProviderChoice::Coreml,
+            ..Default::default()
+        };
         let a = assemble_args(ans, base_args());
         assert_eq!(a.embed_provider, Some(ProviderArg::Coreml));
 
-        assert_eq!(ProviderChoice::Cpu.to_provider_arg(), Some(ProviderArg::Cpu));
-        assert_eq!(ProviderChoice::Cuda.to_provider_arg(), Some(ProviderArg::Cuda));
+        assert_eq!(
+            ProviderChoice::Cpu.to_provider_arg(),
+            Some(ProviderArg::Cpu)
+        );
+        assert_eq!(
+            ProviderChoice::Cuda.to_provider_arg(),
+            Some(ProviderArg::Cuda)
+        );
         assert_eq!(ProviderChoice::Auto.to_provider_arg(), None);
     }
 

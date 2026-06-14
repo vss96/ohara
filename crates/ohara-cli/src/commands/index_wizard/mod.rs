@@ -137,9 +137,13 @@ pub fn run_wizard_with(p: &mut dyn WizardPrompter, base: Args) -> Result<WizardF
             "diff".to_string(),
         ];
         let ci = p.select("Embed cache mode", &cache_opts, 0)?;
-        ans.embed_cache = *[EmbedCacheArg::Off, EmbedCacheArg::Semantic, EmbedCacheArg::Diff]
-            .get(ci)
-            .expect("invariant: WizardPrompter::select returns an in-range index");
+        ans.embed_cache = *[
+            EmbedCacheArg::Off,
+            EmbedCacheArg::Semantic,
+            EmbedCacheArg::Diff,
+        ]
+        .get(ci)
+        .expect("invariant: WizardPrompter::select returns an in-range index");
         ans.no_progress = p.confirm("Disable the progress bar?", false)?;
         ans.profile = p.confirm("Emit per-phase --profile JSON?", false)?;
     }
@@ -246,7 +250,10 @@ mod tty_tests {
         let err = require_tty(false).expect_err("non-tty must error");
         let s = err.to_string();
         assert!(s.contains("TTY"), "message should name the constraint: {s}");
-        assert!(s.contains("--interactive"), "message should name the flag: {s}");
+        assert!(
+            s.contains("--interactive"),
+            "message should name the flag: {s}"
+        );
     }
 }
 
