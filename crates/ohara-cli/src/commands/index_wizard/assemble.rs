@@ -221,6 +221,162 @@ mod provider_choice_tests {
     }
 }
 
+fn provider_arg_str(p: ProviderArg) -> &'static str {
+    match p {
+        ProviderArg::Auto => "auto",
+        ProviderArg::Cpu => "cpu",
+        ProviderArg::Coreml => "coreml",
+        ProviderArg::Cuda => "cuda",
+    }
+}
+
+fn resources_str(r: ResourcesArg) -> &'static str {
+    match r {
+        ResourcesArg::Auto => "auto",
+        ResourcesArg::Conservative => "conservative",
+        ResourcesArg::Aggressive => "aggressive",
+    }
+}
+
+fn embed_cache_str(c: EmbedCacheArg) -> &'static str {
+    match c {
+        EmbedCacheArg::Off => "off",
+        EmbedCacheArg::Semantic => "semantic",
+        EmbedCacheArg::Diff => "diff",
+    }
+}
+
+/// Render the equivalent `ohara index …` command for an assembled
+/// `Args`, omitting every flag left at its default so the line shows
+/// only what the wizard chose. Used in the summary the user confirms.
+pub fn args_to_command(a: &Args) -> String {
+    let mut parts: Vec<String> = vec!["ohara".to_string(), "index".to_string()];
+
+    if let Some(p) = a.embed_provider {
+        parts.push("--embed-provider".to_string());
+        parts.push(provider_arg_str(p).to_string());
+    }
+    if a.resources != ResourcesArg::Auto {
+        parts.push("--resources".to_string());
+        parts.push(resources_str(a.resources).to_string());
+    }
+    if a.incremental {
+        parts.push("--incremental".to_string());
+    }
+    if a.force {
+        parts.push("--force".to_string());
+    }
+    if a.rebuild {
+        parts.push("--rebuild".to_string());
+        parts.push("--yes".to_string());
+    }
+    if let Some(n) = a.commit_batch {
+        parts.push("--commit-batch".to_string());
+        parts.push(n.to_string());
+    }
+    if let Some(n) = a.embed_batch {
+        parts.push("--embed-batch".to_string());
+        parts.push(n.to_string());
+    }
+    if let Some(n) = a.threads {
+        parts.push("--threads".to_string());
+        parts.push(n.to_string());
+    }
+    if let Some(n) = a.workers {
+        parts.push("--workers".to_string());
+        parts.push(n.to_string());
+    }
+    if a.embed_cache != EmbedCacheArg::Off {
+        parts.push("--embed-cache".to_string());
+        parts.push(embed_cache_str(a.embed_cache).to_string());
+    }
+    if a.no_progress {
+        parts.push("--no-progress".to_string());
+    }
+    if a.profile {
+        parts.push("--profile".to_string());
+    }
+
+    let path = a.path.to_string_lossy();
+    if path != "." {
+        parts.push(path.into_owned());
+    }
+
+    parts.join(" ")
+}
+
+#[cfg(test)]
+mod command_render_tests {
+    use super::*;
+    use clap::Parser;
+
+    fn base_args() -> Args {
+        #[derive(Parser)]
+        struct Wrapper {
+            #[command(flatten)]
+            args: Args,
+        }
+        Wrapper::parse_from(["ohara"]).args
+    }
+
+    #[test]
+    fn defaults_render_bare_command() {
+        let a = assemble_args(WizardAnswers::default(), base_args());
+        assert_eq!(args_to_command(&a), "ohara index");
+    }
+
+    #[test]
+    fn cpu_aggressive_renders_both_flags() {
+        let ans = WizardAnswers {
+            provider: ProviderChoice::Cpu,
+            intensity: ResourcesArg::Aggressive,
+            ..Default::default()
+        };
+        let a = assemble_args(ans, base_args());
+        assert_eq!(
+            args_to_command(&a),
+            "ohara index --embed-provider cpu --resources aggressive"
+        );
+    }
+
+    #[test]
+    fn rebuild_renders_rebuild_yes() {
+        let ans = WizardAnswers { mode: ModeChoice::Rebuild, ..Default::default() };
+        let a = assemble_args(ans, base_args());
+        assert_eq!(args_to_command(&a), "ohara index --rebuild --yes");
+    }
+
+    #[test]
+    fn advanced_knobs_render_in_order() {
+        let ans = WizardAnswers {
+            provider: ProviderChoice::Coreml,
+            mode: ModeChoice::Force,
+            threads: Some(4),
+            workers: Some(2),
+            commit_batch: Some(512),
+            embed_batch: Some(256),
+            embed_cache: EmbedCacheArg::Diff,
+            no_progress: true,
+            profile: true,
+            ..Default::default()
+        };
+        let a = assemble_args(ans, base_args());
+        assert_eq!(
+            args_to_command(&a),
+            "ohara index --embed-provider coreml --force \
+             --commit-batch 512 --embed-batch 256 --threads 4 --workers 2 \
+             --embed-cache diff --no-progress --profile"
+        );
+    }
+
+    #[test]
+    fn non_dot_path_is_appended() {
+        let mut a = assemble_args(WizardAnswers::default(), base_args());
+        a.path = std::path::PathBuf::from("/repo/x");
+        assert_eq!(args_to_command(&a), "ohara index /repo/x");
+    }
+}
+
 #[cfg(test)]
 mod assemble_tests {
     use super::*;
