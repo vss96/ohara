@@ -101,10 +101,6 @@ impl ProviderAvailability {
     fn coreml_offerable(&self) -> bool {
         self.macos && self.coreml_build
     }
-
-    fn cuda_offerable(&self) -> bool {
-        self.cuda_build
-    }
 }
 
 /// Detect provider availability from build features + the same
@@ -137,25 +133,30 @@ pub fn provider_choices(
     ];
     let mut footnotes = Vec::new();
 
-    if a.coreml_offerable() {
-        choices.push(ProviderChoice::Coreml);
-        labels.push(
-            "CoreML — ~3x faster on Apple Silicon; first run downloads \
-             ~130MB and pays a one-time ~30s compile"
-                .to_string(),
-        );
-    } else if a.macos {
-        footnotes.push(
+    match (a.coreml_offerable(), a.macos) {
+        (true, _) => {
+            choices.push(ProviderChoice::Coreml);
+            labels.push(
+                "CoreML — ~3x faster on Apple Silicon; first run downloads \
+                 ~130MB and pays a one-time ~30s compile"
+                    .to_string(),
+            );
+        }
+        (false, true) => footnotes.push(
             "CoreML hidden: this binary was built without `--features coreml`.".to_string(),
-        );
+        ),
+        (false, false) => {}
     }
 
-    if a.cuda_offerable() {
-        choices.push(ProviderChoice::Cuda);
-        labels.push("CUDA — NVIDIA GPU".to_string());
-    } else if !a.macos {
-        footnotes
-            .push("CUDA hidden: this binary was built without `--features cuda`.".to_string());
+    match (a.cuda_build, a.macos) {
+        (true, _) => {
+            choices.push(ProviderChoice::Cuda);
+            labels.push("CUDA — NVIDIA GPU".to_string());
+        }
+        (false, false) => footnotes.push(
+            "CUDA hidden: this binary was built without `--features cuda`.".to_string(),
+        ),
+        (false, true) => {}
     }
 
     (choices, labels, footnotes)
@@ -175,6 +176,7 @@ mod provider_choice_tests {
         assert_eq!(choices[0], ProviderChoice::Auto);
         assert_eq!(choices[1], ProviderChoice::Cpu);
         assert!(labels[0].contains("Auto"));
+        assert!(labels[0].contains("CPU")); // avail() sets auto_label = "CPU"
     }
 
     #[test]
@@ -209,6 +211,13 @@ mod provider_choice_tests {
         assert!(matches!(a.auto_label, "CPU" | "CUDA" | "CoreML"));
         assert_eq!(a.coreml_build, cfg!(feature = "coreml"));
         assert_eq!(a.cuda_build, cfg!(feature = "cuda"));
+    }
+
+    #[test]
+    fn cuda_not_footnoted_on_macos_without_feature() {
+        let (choices, _, foot) = provider_choices(&avail(true, false, false));
+        assert!(!choices.contains(&ProviderChoice::Cuda));
+        assert!(!foot.iter().any(|f| f.contains("CUDA")));
     }
 }
 
