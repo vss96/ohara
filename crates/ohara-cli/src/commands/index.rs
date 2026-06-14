@@ -35,7 +35,7 @@ pub struct Args {
     /// guided prompts, preview the equivalent command, then run.
     /// Requires a TTY. Other tuning flags are ignored when `-i` is set
     /// — the wizard owns the tuning surface.
-    #[arg(long, short = 'i')]
+    #[arg(short, long)]
     pub interactive: bool,
     /// Skip indexing (and embedder init) when HEAD is already indexed.
     /// Used by the post-commit hook so empty re-indexes are nearly free.
