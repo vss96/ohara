@@ -316,7 +316,38 @@ fn resolve_and_note(arg: ProviderArg) -> ohara_embed::EmbedProvider {
     provider
 }
 
+/// An all-zero `IndexerReport` for paths that intentionally do no work
+/// (wizard print-only / cancel, and the incremental up-to-date skip).
+fn noop_report() -> IndexerReport {
+    IndexerReport {
+        new_commits: 0,
+        new_hunks: 0,
+        head_symbols: 0,
+        commits_failed: 0,
+        phase_timings: PhaseTimings::default(),
+    }
+}
+
 pub async fn run(args: Args) -> Result<IndexerReport> {
+    // Interactive front-end: when `-i` is set, the wizard owns the
+    // tuning surface. It returns a fully-assembled `Args` to run, an
+    // equivalent command to print (user declined to run), or a cancel.
+    let args = if args.interactive {
+        match super::index_wizard::run_wizard_tty(args).await? {
+            super::index_wizard::WizardFlow::Run(a) => a,
+            super::index_wizard::WizardFlow::PrintOnly(cmd) => {
+                println!("{cmd}");
+                return Ok(noop_report());
+            }
+            super::index_wizard::WizardFlow::Cancelled => {
+                eprintln!("cancelled — nothing indexed");
+                return Ok(noop_report());
+            }
+        }
+    } else {
+        args
+    };
+
     // Wall-clock starts at the very top so the summary's `total_ms`
     // covers the whole command — embedder load (which can be 15-25s
     // on first run) is part of "how long did `ohara index` take".
@@ -419,13 +450,7 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         if st.last_indexed_commit.as_deref() == Some(head.as_str()) {
             tracing::info!(sha = %head, "incremental: index up-to-date, skipping embedder init");
             println!("index up-to-date at {head}");
-            return Ok(IndexerReport {
-                new_commits: 0,
-                new_hunks: 0,
-                head_symbols: 0,
-                commits_failed: 0,
-                phase_timings: PhaseTimings::default(),
-            });
+            return Ok(noop_report());
         }
     }
 

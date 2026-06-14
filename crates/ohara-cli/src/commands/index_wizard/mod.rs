@@ -7,6 +7,7 @@
 //! TTY-free / unit-tested.
 
 use anyhow::Result;
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 
 use crate::commands::index::{Args, EmbedCacheArg};
 use crate::resources::ResourcesArg;
@@ -151,6 +152,102 @@ pub fn run_wizard_with(p: &mut dyn WizardPrompter, base: Args) -> Result<WizardF
         return Ok(WizardFlow::Run(args));
     }
     Ok(WizardFlow::PrintOnly(command))
+}
+
+/// The real terminal prompter, backed by `dialoguer`.
+pub struct DialoguerPrompter {
+    theme: ColorfulTheme,
+}
+
+impl DialoguerPrompter {
+    pub fn new() -> Self {
+        Self {
+            theme: ColorfulTheme::default(),
+        }
+    }
+}
+
+impl Default for DialoguerPrompter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WizardPrompter for DialoguerPrompter {
+    fn note(&mut self, msg: &str) {
+        // Wizard chrome goes to stderr so a piped stdout stays clean.
+        eprintln!("{msg}");
+    }
+    fn select(&mut self, prompt: &str, options: &[String], default: usize) -> Result<usize> {
+        Select::with_theme(&self.theme)
+            .with_prompt(prompt)
+            .items(options)
+            .default(default)
+            .interact()
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+    fn confirm(&mut self, prompt: &str, default: bool) -> Result<bool> {
+        Confirm::with_theme(&self.theme)
+            .with_prompt(prompt)
+            .default(default)
+            .interact()
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+    fn input(&mut self, prompt: &str) -> Result<String> {
+        Input::<String>::with_theme(&self.theme)
+            .with_prompt(prompt)
+            .allow_empty(true)
+            .interact_text()
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+}
+
+/// Guard: the wizard needs an attended terminal. Split out so the
+/// branch is unit-testable without a real TTY.
+fn require_tty(is_tty: bool) -> Result<()> {
+    if is_tty {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "--interactive requires a TTY; pass explicit flags \
+         (e.g. --embed-provider cpu) instead"
+    )
+}
+
+/// Run the wizard against the real terminal. Checks for a TTY, then
+/// runs the (blocking) `dialoguer` prompts on a blocking thread so the
+/// async runtime is not stalled. Any error from the prompts (ESC /
+/// Ctrl-C) is treated as a clean cancel.
+pub async fn run_wizard_tty(base: Args) -> Result<WizardFlow> {
+    use std::io::IsTerminal;
+    require_tty(std::io::stdin().is_terminal())?;
+    let joined = tokio::task::spawn_blocking(move || {
+        let mut prompter = DialoguerPrompter::new();
+        run_wizard_with(&mut prompter, base)
+    })
+    .await?;
+    match joined {
+        Ok(flow) => Ok(flow),
+        Err(_) => Ok(WizardFlow::Cancelled),
+    }
+}
+
+#[cfg(test)]
+mod tty_tests {
+    use super::*;
+
+    #[test]
+    fn tty_present_is_ok() {
+        assert!(require_tty(true).is_ok());
+    }
+
+    #[test]
+    fn non_tty_errors_with_actionable_message() {
+        let err = require_tty(false).expect_err("non-tty must error");
+        let s = err.to_string();
+        assert!(s.contains("TTY"), "message should name the constraint: {s}");
+        assert!(s.contains("--interactive"), "message should name the flag: {s}");
+    }
 }
 
 #[cfg(test)]
