@@ -102,6 +102,103 @@ ohara index --resources conservative
 ohara index --resources aggressive --commit-batch 1024   # explicit flag still wins
 ```
 
+## Interactive walkthrough
+
+Prefer to be guided? `ohara index -i` (or `--interactive`) launches a
+short wizard instead of asking you to remember the flags above. It
+needs an attended terminal — piping or redirecting stdin makes it exit
+with an error rather than hang. Move with ↑/↓ and choose with Enter;
+Esc or Ctrl-C cancels without indexing.
+
+The screens below are illustrative (your terminal renders colour and a
+highlighted row). The wizard only lists providers your binary can
+actually run, so the exact options vary by build and host — the example
+is a CoreML-enabled macOS build.
+
+**1. Embedding provider**
+
+```text
+? Embedding provider ›
+❯ Auto (recommended) — resolves to CPU on this host
+  CPU
+  CoreML — ~3x faster on Apple Silicon; first run downloads ~130MB and pays a one-time ~30s compile
+```
+
+When a provider is unavailable — a build without `--features coreml`,
+or CUDA off a non-NVIDIA host — it is omitted and a one-line note
+explains why (printed just above the menu):
+
+```text
+CoreML hidden: this binary was built without `--features coreml`.
+```
+
+**2. Resource intensity**
+
+```text
+? Resource intensity ›
+❯ Auto (recommended)
+  Conservative — halve batch + threads, yield to other work
+  Aggressive — double batch + threads, maximize throughput
+```
+
+**3. Index mode**
+
+```text
+? Index mode ›
+❯ Standard — index new commits
+  Incremental — skip entirely if HEAD already indexed
+  Force — re-extract HEAD symbols (after a chunker change)
+  Rebuild — delete & rebuild the whole index from scratch
+```
+
+**Rebuild** is destructive, so it asks once more before arming
+`--rebuild --yes`; declining drops you back to a Standard run:
+
+```text
+? Rebuild deletes and recreates the entire index for /path/to/repo. Continue? (y/N)
+```
+
+**4. Advanced knobs (optional)**
+
+The common path stops here — answer **no** to run with sensible
+defaults. Answer **yes** to tune threads, workers, batch sizes, the
+embed-cache mode, and the progress/profile switches:
+
+```text
+? Configure advanced knobs? (y/N)
+```
+
+If you opt in, the numeric prompts accept a number, or blank / `auto`
+to leave them unset (so `--resources` still picks them):
+
+```text
+? threads (blank or 'auto' for default): 4
+? workers (blank or 'auto' for default): auto
+? commit-batch (blank or 'auto' for default):
+? embed-batch (blank or 'auto' for default): 256
+? Embed cache mode ›
+❯ off
+  semantic
+  diff
+? Disable the progress bar? (y/N)
+? Emit per-phase --profile JSON? (y/N)
+```
+
+**5. Preview & run**
+
+Before anything runs, the wizard prints the exact command your answers
+map to and asks for a final confirmation:
+
+```text
+Equivalent command:
+  ohara index --embed-provider coreml --resources aggressive
+? Run now? (Y/n)
+```
+
+Answer **yes** to index right away — the same run you'd get by typing
+that command. Answer **no** and the wizard simply prints the command
+(useful to copy into a script or a hook) and exits without indexing.
+
 ## Output
 
 A summary block on stdout — header line plus a per-phase bar chart
