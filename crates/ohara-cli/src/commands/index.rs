@@ -95,11 +95,12 @@ pub struct Args {
     pub profile: bool,
     /// ONNX execution provider for the embedder. When unset, defers to
     /// the value picked by `--resources` (which itself defaults to
-    /// `auto`: CUDA when `CUDA_VISIBLE_DEVICES` is set, else CPU).
-    /// `coreml` (opt-in, Apple Silicon) indexes with the fixed-shape
-    /// fp32 BGE-small on the GPU+ANE — ~3x CPU throughput; first use
-    /// downloads ~130MB and each run pays a one-time ~30s CoreML
-    /// compile. Existing indexes stay compatible (same vector space).
+    /// `auto`: CUDA when `CUDA_VISIBLE_DEVICES` is set, else CoreML on a
+    /// CoreML-capable macOS build, else CPU). `coreml` (Apple Silicon)
+    /// indexes with the fixed-shape fp32 BGE-small on the GPU+ANE — ~3x
+    /// CPU throughput; first use downloads ~130MB and each run pays a
+    /// one-time ~30s CoreML compile. Existing indexes stay compatible
+    /// (same vector space).
     #[arg(long, value_enum)]
     pub embed_provider: Option<ProviderArg>,
     /// Resource intensity. `auto` (default) picks reasonable

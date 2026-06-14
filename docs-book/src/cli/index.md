@@ -27,7 +27,7 @@ ohara index [PATH] [-i | --interactive] [--incremental] [--force] \
 | `--threads` | from `--resources` | Cap the embedder's ONNX runtime to this many threads (`0` = let `ort` decide, typically CPU count). When unset, `--resources` picks a value from host core count. |
 | `--no-progress` | off | Disable the progress bar even when stderr is a TTY. Structured `tracing::info!` events still fire every 100 commits. |
 | `--profile` | off | Emit a single-line JSON `PhaseTimings` blob on stdout after the run finishes (per-phase wall time + hunk-text inflation). Used by the v0.6 throughput baseline. |
-| `--embed-provider` | from `--resources` | ONNX execution provider for the embedder: `auto` (default — CUDA when `CUDA_VISIBLE_DEVICES` is set, else CPU), `cpu`, `coreml`, or `cuda`. `coreml` (opt-in, Apple Silicon) runs the fixed-shape fp32 BGE-small on the GPU+Neural Engine — ~3× CPU throughput; released macOS binaries ship with it enabled. First use downloads the fp32 model (~130MB) and each run pays a one-time ~30s CoreML compile. Existing indexes stay compatible. CUDA requires a feature-flagged build; see [Install → hardware acceleration](../install.md#build-with-hardware-acceleration). |
+| `--embed-provider` | from `--resources` | ONNX execution provider for the embedder: `auto` (default — CUDA when `CUDA_VISIBLE_DEVICES` is set, else CoreML on a CoreML-capable macOS build, else CPU), `cpu`, `coreml`, or `cuda`. `coreml` (Apple Silicon) runs the fixed-shape fp32 BGE-small on the GPU+Neural Engine — ~3× CPU throughput; released macOS binaries ship with it enabled, so `auto` prefers it there for indexing. First use downloads the fp32 model (~130MB) and each indexing run pays a one-time ~30s CoreML compile (queries always embed on CPU). Existing indexes stay compatible. CUDA requires a feature-flagged build; see [Install → hardware acceleration](../install.md#build-with-hardware-acceleration). |
 | `--resources` | `auto` | Resource intensity policy. `auto` picks `--commit-batch` / `--threads` / `--embed-provider` from host core count. `conservative` halves the picked batch + thread count; `aggressive` doubles them. Explicit flags always override the picked plan. |
 
 ## Examples
@@ -119,7 +119,7 @@ is a CoreML-enabled macOS build.
 
 ```text
 ? Embedding provider ›
-❯ Auto (recommended) — resolves to CPU on this host
+❯ Auto (recommended) — resolves to CoreML on this host
   CPU
   CoreML — ~3x faster on Apple Silicon; first run downloads ~130MB and pays a one-time ~30s compile
 ```

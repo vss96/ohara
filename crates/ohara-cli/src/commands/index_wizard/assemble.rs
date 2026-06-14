@@ -92,8 +92,8 @@ pub struct ProviderAvailability {
     pub coreml_build: bool,
     /// `cfg!(feature = "cuda")` — CUDA compiled into this build.
     pub cuda_build: bool,
-    /// What `--embed-provider auto` resolves to here: "CPU" / "CUDA"
-    /// (never "CoreML" — auto is opt-out of CoreML, plan-30).
+    /// What `--embed-provider auto` resolves to here: "CPU", "CUDA", or
+    /// "CoreML" on a CoreML-capable macOS build (see `detect_provider`).
     pub auto_label: &'static str,
 }
 
@@ -109,9 +109,8 @@ pub fn host_capabilities() -> ProviderAvailability {
     let auto_label = match resolve_provider(ProviderArg::Auto) {
         EmbedProvider::Cpu => "CPU",
         EmbedProvider::Cuda => "CUDA",
-        // Unreachable today — `auto` never picks CoreML (plan-30) — but
-        // kept so the match stays exhaustive over `EmbedProvider` without
-        // a `_` arm that would silently mislabel a future variant.
+        // Reached on a CoreML-capable macOS build, where `auto` now
+        // prefers CoreML for indexing (see `detect_provider`).
         EmbedProvider::CoreMl => "CoreML",
     };
     ProviderAvailability {
