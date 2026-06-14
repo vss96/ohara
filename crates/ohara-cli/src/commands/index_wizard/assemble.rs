@@ -2,7 +2,8 @@
 //! assembly, host/build provider availability, and command rendering.
 
 use crate::commands::index::{Args, EmbedCacheArg};
-use crate::commands::provider::ProviderArg;
+use crate::commands::provider::{resolve_provider, ProviderArg};
+use ohara_embed::EmbedProvider;
 use crate::resources::ResourcesArg;
 
 /// Which embedding provider the user picked. `Auto` maps to *no*
@@ -80,6 +81,137 @@ pub fn assemble_args(ans: WizardAnswers, base: Args) -> Args {
     }
 }
 
+/// What this binary + host can offer for `--embed-provider`. Computed
+/// once by [`host_capabilities`]; `provider_choices` is a pure function
+/// of it so the list logic is unit-testable without cfg gymnastics.
+#[derive(Debug, Clone, Copy)]
+pub struct ProviderAvailability {
+    /// `cfg!(target_os = "macos")`.
+    pub macos: bool,
+    /// `cfg!(feature = "coreml")` — CoreML compiled into this build.
+    pub coreml_build: bool,
+    /// `cfg!(feature = "cuda")` — CUDA compiled into this build.
+    pub cuda_build: bool,
+    /// What `--embed-provider auto` resolves to here: "CPU" / "CUDA"
+    /// (never "CoreML" — auto is opt-out of CoreML, plan-30).
+    pub auto_label: &'static str,
+}
+
+impl ProviderAvailability {
+    fn coreml_offerable(&self) -> bool {
+        self.macos && self.coreml_build
+    }
+
+    fn cuda_offerable(&self) -> bool {
+        self.cuda_build
+    }
+}
+
+/// Detect provider availability from build features + the same
+/// auto-resolution the index path uses.
+pub fn host_capabilities() -> ProviderAvailability {
+    let auto_label = match resolve_provider(ProviderArg::Auto) {
+        EmbedProvider::Cpu => "CPU",
+        EmbedProvider::Cuda => "CUDA",
+        EmbedProvider::CoreMl => "CoreML",
+    };
+    ProviderAvailability {
+        macos: cfg!(target_os = "macos"),
+        coreml_build: cfg!(feature = "coreml"),
+        cuda_build: cfg!(feature = "cuda"),
+        auto_label,
+    }
+}
+
+/// Build the provider `Select` list for the wizard. Returns
+/// `(choices, labels, footnotes)`: `choices[i]` is what selecting
+/// `labels[i]` means; `footnotes` explain any provider hidden because
+/// this build can't run it. `Auto` is always index 0, `Cpu` index 1.
+pub fn provider_choices(
+    a: &ProviderAvailability,
+) -> (Vec<ProviderChoice>, Vec<String>, Vec<String>) {
+    let mut choices = vec![ProviderChoice::Auto, ProviderChoice::Cpu];
+    let mut labels = vec![
+        format!("Auto (recommended) — resolves to {} on this host", a.auto_label),
+        "CPU".to_string(),
+    ];
+    let mut footnotes = Vec::new();
+
+    if a.coreml_offerable() {
+        choices.push(ProviderChoice::Coreml);
+        labels.push(
+            "CoreML — ~3x faster on Apple Silicon; first run downloads \
+             ~130MB and pays a one-time ~30s compile"
+                .to_string(),
+        );
+    } else if a.macos {
+        footnotes.push(
+            "CoreML hidden: this binary was built without `--features coreml`.".to_string(),
+        );
+    }
+
+    if a.cuda_offerable() {
+        choices.push(ProviderChoice::Cuda);
+        labels.push("CUDA — NVIDIA GPU".to_string());
+    } else if !a.macos {
+        footnotes
+            .push("CUDA hidden: this binary was built without `--features cuda`.".to_string());
+    }
+
+    (choices, labels, footnotes)
+}
+
+#[cfg(test)]
+mod provider_choice_tests {
+    use super::*;
+
+    fn avail(macos: bool, coreml_build: bool, cuda_build: bool) -> ProviderAvailability {
+        ProviderAvailability { macos, coreml_build, cuda_build, auto_label: "CPU" }
+    }
+
+    #[test]
+    fn auto_and_cpu_are_always_offered_first() {
+        let (choices, labels, _) = provider_choices(&avail(false, false, false));
+        assert_eq!(choices[0], ProviderChoice::Auto);
+        assert_eq!(choices[1], ProviderChoice::Cpu);
+        assert!(labels[0].contains("Auto"));
+    }
+
+    #[test]
+    fn coreml_offered_only_on_macos_with_feature() {
+        let (with, _, _) = provider_choices(&avail(true, true, false));
+        assert!(with.contains(&ProviderChoice::Coreml));
+
+        let (without_feat, _, foot) = provider_choices(&avail(true, false, false));
+        assert!(!without_feat.contains(&ProviderChoice::Coreml));
+        assert!(foot.iter().any(|f| f.contains("CoreML")));
+    }
+
+    #[test]
+    fn coreml_not_footnoted_off_macos() {
+        let (_, _, foot) = provider_choices(&avail(false, false, false));
+        assert!(!foot.iter().any(|f| f.contains("CoreML")));
+    }
+
+    #[test]
+    fn cuda_offered_only_with_feature() {
+        let (with, _, _) = provider_choices(&avail(false, false, true));
+        assert!(with.contains(&ProviderChoice::Cuda));
+
+        let (without, _, foot) = provider_choices(&avail(false, false, false));
+        assert!(!without.contains(&ProviderChoice::Cuda));
+        assert!(foot.iter().any(|f| f.contains("CUDA")));
+    }
+
+    #[test]
+    fn host_capabilities_reports_known_auto_label() {
+        let a = host_capabilities();
+        assert!(matches!(a.auto_label, "CPU" | "CUDA" | "CoreML"));
+        assert_eq!(a.coreml_build, cfg!(feature = "coreml"));
+        assert_eq!(a.cuda_build, cfg!(feature = "cuda"));
+    }
+}
+
 #[cfg(test)]
 mod assemble_tests {
     use super::*;
@@ -136,6 +268,10 @@ mod assemble_tests {
         let ans = WizardAnswers { provider: ProviderChoice::Coreml, ..Default::default() };
         let a = assemble_args(ans, base_args());
         assert_eq!(a.embed_provider, Some(ProviderArg::Coreml));
+
+        assert_eq!(ProviderChoice::Cpu.to_provider_arg(), Some(ProviderArg::Cpu));
+        assert_eq!(ProviderChoice::Cuda.to_provider_arg(), Some(ProviderArg::Cuda));
+        assert_eq!(ProviderChoice::Auto.to_provider_arg(), None);
     }
 
     #[test]
