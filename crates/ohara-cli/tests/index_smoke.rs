@@ -43,6 +43,7 @@ async fn smoke_index_then_status() {
         embed_batch: None,
         embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
         workers: None,
+        interactive: false,
     };
     ohara_cli::commands::index::run(args).await.unwrap();
 

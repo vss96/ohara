@@ -8,6 +8,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-06-14
+
+### Added
+
+- **Interactive index wizard — `ohara index -i`.** A guided, TTY prompt
+  flow for `ohara index`: pick the embedding provider (only the ones
+  this build can run are offered), resource intensity, and index mode,
+  optionally tune the advanced knobs (threads/workers/batch
+  sizes/embed-cache/progress/profile), preview the exact equivalent
+  `ohara index …` command, then run it. Answer "no" at the end and it
+  just prints the command for you to copy. `ohara index` with no `-i`
+  is unchanged. Requires a terminal; `-i` over a pipe errors cleanly.
+
+### Changed
+
+- **`--embed-provider auto` now prefers CoreML for indexing on
+  CoreML-capable macOS builds** (released macOS binary, or a source
+  build with `--features coreml`), reversing the previous opt-in
+  default. On Apple Silicon a plain `ohara index` now uses the
+  fixed-shape CoreML embedder (~3× CPU). Order is CUDA → CoreML → CPU;
+  a build without CoreML support still resolves to CPU. Existing
+  indexes stay compatible (CoreML and CPU share one vector space).
+- **Queries are unaffected** — `ohara query` still embeds on CPU (a
+  single query row can't amortize CoreML's one-time ~30s compile).
+- **The `ohara init` post-commit hook now pins `--embed-provider cpu`.**
+  A per-commit incremental index is a tiny batch, so CPU keeps
+  `git commit` instant instead of paying CoreML's ~30s compile each
+  time. Re-run `ohara init --force` to update an existing hook.
+
 ## [0.13.0] - 2026-06-13
 
 Completes the indexing fixes from v0.12.0 (#87). The parallel-writer

@@ -19,8 +19,12 @@ pub(crate) const CLAUDE_MARKER_END: &str = "<!-- ohara:end -->";
 /// Body of the managed post-commit hook. Wrapped in markers when written.
 pub(crate) const HOOK_BODY: &str =
     "# Re-index this repo on every commit. Silently skipped if `ohara` is not on PATH.
+# Pinned to the CPU embedder on purpose: a per-commit incremental index is a
+# tiny batch (a handful of hunks), so it can't amortize CoreML's one-time ~30s
+# compile — CPU keeps `git commit` fast. `auto` still picks CoreML for larger
+# manual `ohara index` runs.
 if command -v ohara >/dev/null 2>&1; then
-  ( cd \"$(git rev-parse --show-toplevel)\" && ohara index --incremental >/dev/null 2>&1 ) || true
+  ( cd \"$(git rev-parse --show-toplevel)\" && ohara index --incremental --embed-provider cpu >/dev/null 2>&1 ) || true
 fi";
 
 /// Body of the CLAUDE.md stanza. Wrapped in markers when written.

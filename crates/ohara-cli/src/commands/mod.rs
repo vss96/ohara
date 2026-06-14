@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 pub mod daemon;
 pub mod explain;
 pub mod index;
+pub mod index_wizard;
 pub mod init;
 pub mod plan;
 pub mod plan_summary;

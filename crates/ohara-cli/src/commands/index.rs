@@ -8,8 +8,9 @@ use std::sync::Arc;
 use super::provider::{resolve_provider, ProviderArg};
 use crate::resources::{apply_intensity, detect_host, pick_resources, ResourcePlan, ResourcesArg};
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, clap::ValueEnum)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
 pub enum EmbedCacheArg {
+    #[default]
     Off,
     Semantic,
     Diff,
@@ -30,6 +31,13 @@ pub struct Args {
     /// Path to the repo (defaults to current directory)
     #[arg(default_value = ".")]
     pub path: PathBuf,
+    /// Launch the interactive index wizard: choose embedding provider,
+    /// resource intensity, index mode, and advanced knobs through
+    /// guided prompts, preview the equivalent command, then run.
+    /// Requires a TTY. Other tuning flags are ignored when `-i` is set
+    /// — the wizard owns the tuning surface.
+    #[arg(short, long)]
+    pub interactive: bool,
     /// Skip indexing (and embedder init) when HEAD is already indexed.
     /// Used by the post-commit hook so empty re-indexes are nearly free.
     #[arg(long)]
@@ -87,11 +95,12 @@ pub struct Args {
     pub profile: bool,
     /// ONNX execution provider for the embedder. When unset, defers to
     /// the value picked by `--resources` (which itself defaults to
-    /// `auto`: CUDA when `CUDA_VISIBLE_DEVICES` is set, else CPU).
-    /// `coreml` (opt-in, Apple Silicon) indexes with the fixed-shape
-    /// fp32 BGE-small on the GPU+ANE — ~3x CPU throughput; first use
-    /// downloads ~130MB and each run pays a one-time ~30s CoreML
-    /// compile. Existing indexes stay compatible (same vector space).
+    /// `auto`: CUDA when `CUDA_VISIBLE_DEVICES` is set, else CoreML on a
+    /// CoreML-capable macOS build, else CPU). `coreml` (Apple Silicon)
+    /// indexes with the fixed-shape fp32 BGE-small on the GPU+ANE — ~3x
+    /// CPU throughput; first use downloads ~130MB and each run pays a
+    /// one-time ~30s CoreML compile. Existing indexes stay compatible
+    /// (same vector space).
     #[arg(long, value_enum)]
     pub embed_provider: Option<ProviderArg>,
     /// Resource intensity. `auto` (default) picks reasonable
@@ -308,7 +317,38 @@ fn resolve_and_note(arg: ProviderArg) -> ohara_embed::EmbedProvider {
     provider
 }
 
+/// An all-zero `IndexerReport` for paths that intentionally do no work
+/// (wizard print-only / cancel, and the incremental up-to-date skip).
+fn noop_report() -> IndexerReport {
+    IndexerReport {
+        new_commits: 0,
+        new_hunks: 0,
+        head_symbols: 0,
+        commits_failed: 0,
+        phase_timings: PhaseTimings::default(),
+    }
+}
+
 pub async fn run(args: Args) -> Result<IndexerReport> {
+    // Interactive front-end: when `-i` is set, the wizard owns the
+    // tuning surface. It returns a fully-assembled `Args` to run, an
+    // equivalent command to print (user declined to run), or a cancel.
+    let args = if args.interactive {
+        match super::index_wizard::run_wizard_tty(args).await? {
+            super::index_wizard::WizardFlow::Run(a) => a,
+            super::index_wizard::WizardFlow::PrintOnly(cmd) => {
+                println!("{cmd}");
+                return Ok(noop_report());
+            }
+            super::index_wizard::WizardFlow::Cancelled => {
+                eprintln!("cancelled — nothing indexed");
+                return Ok(noop_report());
+            }
+        }
+    } else {
+        args
+    };
+
     // Wall-clock starts at the very top so the summary's `total_ms`
     // covers the whole command — embedder load (which can be 15-25s
     // on first run) is part of "how long did `ohara index` take".
@@ -411,13 +451,7 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         if st.last_indexed_commit.as_deref() == Some(head.as_str()) {
             tracing::info!(sha = %head, "incremental: index up-to-date, skipping embedder init");
             println!("index up-to-date at {head}");
-            return Ok(IndexerReport {
-                new_commits: 0,
-                new_hunks: 0,
-                head_symbols: 0,
-                commits_failed: 0,
-                phase_timings: PhaseTimings::default(),
-            });
+            return Ok(noop_report());
         }
     }
 
@@ -914,5 +948,37 @@ mod provider_resolution_tests {
             resolve_and_note(ProviderArg::Auto),
             resolve_provider(ProviderArg::Auto)
         );
+    }
+}
+
+#[cfg(test)]
+mod interactive_flag_tests {
+    use super::*;
+    use clap::Parser;
+
+    // Args is `#[derive(ClapArgs)]`, not a top-level `Parser`. Wrap it
+    // so we can drive clap parsing in a unit test.
+    #[derive(Parser)]
+    struct Wrapper {
+        #[command(flatten)]
+        args: Args,
+    }
+
+    #[test]
+    fn interactive_defaults_off() {
+        let w = Wrapper::parse_from(["ohara"]);
+        assert!(!w.args.interactive);
+    }
+
+    #[test]
+    fn long_flag_sets_interactive() {
+        let w = Wrapper::parse_from(["ohara", "--interactive"]);
+        assert!(w.args.interactive);
+    }
+
+    #[test]
+    fn short_flag_sets_interactive() {
+        let w = Wrapper::parse_from(["ohara", "-i"]);
+        assert!(w.args.interactive);
     }
 }

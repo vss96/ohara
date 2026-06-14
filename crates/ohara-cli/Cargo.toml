@@ -24,6 +24,7 @@ ohara-parse = { path = "../ohara-parse" }
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
+dialoguer.workspace = true
 axoupdater.workspace = true
 git2.workspace = true
 indicatif.workspace = true

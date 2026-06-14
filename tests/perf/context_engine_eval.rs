@@ -312,6 +312,7 @@ async fn context_engine_eval_passes_thresholds() -> Result<()> {
     // chunker / hunk-text / FTS / vector wiring matches production.
     let index_args = ohara_cli::commands::index::Args {
         path: fixture.clone(),
+        interactive: false,
         incremental: false,
         force: false,
         rebuild: false,

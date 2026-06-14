@@ -53,6 +53,7 @@ async fn explain_e2e_returns_retry_commit_for_retry_lines() {
         embed_batch: None,
         embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
         workers: None,
+        interactive: false,
     };
     ohara_cli::commands::index::run(index_args).await.unwrap();
 

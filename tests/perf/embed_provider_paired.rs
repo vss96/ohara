@@ -71,6 +71,7 @@ async fn run_retry_pattern(arg: ProviderArg) -> RetryResult {
 
     let args = ohara_cli::commands::index::Args {
         path: repo.clone(),
+        interactive: false,
         incremental: false,
         force: false,
         rebuild: false,

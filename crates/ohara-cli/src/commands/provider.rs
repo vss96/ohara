@@ -17,17 +17,18 @@ use ohara_embed::EmbedProvider;
 /// from a script keeps the same exit behavior — succeeding on a
 /// future build, failing fast today.
 ///
-/// Plan 30: `coreml` routes `ohara index` to the fixed-shape CoreML
-/// embedder (`ohara_embed::CoreMlFixedProvider`, ~3× CPU on Apple
-/// Silicon) and is opt-in — `auto` never picks it. The plan-7
-/// long-pass downgrade machinery is gone with the leak that motivated
-/// it (shape-specialization churn, fixed by the static-shape model;
-/// see `docs/perf/v0.11-coreml-fixed-shape.md`).
+/// `coreml` routes `ohara index` to the fixed-shape CoreML embedder
+/// (`ohara_embed::CoreMlFixedProvider`, ~3× CPU on Apple Silicon). On a
+/// CoreML-capable build `auto` now prefers it for indexing (see
+/// `detect_provider`); `--embed-provider coreml` pins it explicitly.
+/// The plan-7 long-pass downgrade machinery is gone with the leak that
+/// motivated it (shape-specialization churn, fixed by the static-shape
+/// model; see `docs/perf/v0.11-coreml-fixed-shape.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 #[clap(rename_all = "kebab-case")]
 pub enum ProviderArg {
-    /// Detect from the host (`CUDA_VISIBLE_DEVICES` set → CUDA,
-    /// otherwise CPU; CoreML is opt-in via `coreml`).
+    /// Detect from the host: `CUDA_VISIBLE_DEVICES` set → CUDA, else
+    /// CoreML on a CoreML-capable macOS build, else CPU.
     #[default]
     Auto,
     Cpu,
@@ -52,16 +53,36 @@ pub fn resolve_provider(arg: ProviderArg) -> EmbedProvider {
 
 /// Heuristic auto-detect for `--embed-provider auto`.
 ///
-/// CUDA when `CUDA_VISIBLE_DEVICES` is set, CPU otherwise. CoreML is
-/// never auto-picked (plan 30): the fixed-shape path is opt-in while
-/// it bakes, and the old dynamic CoreML path it replaced was actively
-/// harmful for BGE (ANE-rejected unbounded dims + per-shape
-/// specialization churn — `docs/perf/v0.11-coreml-fixed-shape.md`).
+/// Order of preference: CUDA when `CUDA_VISIBLE_DEVICES` is set, then
+/// CoreML when the binary can actually run it
+/// (`cfg!(all(feature = "coreml", target_os = "macos"))`), then CPU.
+///
+/// This reverses the original plan-30 default (which kept CoreML
+/// opt-in): the fixed-shape path is now the steady-state indexer on
+/// Apple Silicon (~3× CPU — `docs/perf/v0.11-coreml-fixed-shape.md`),
+/// so `auto` prefers it on a CoreML-capable build. The trade-off is a
+/// one-time ~30s CoreML compile + ~130MB first-run model download per
+/// indexing process — `resolve_and_note` surfaces that to the user.
+/// Two paths are deliberately insulated and never inherit this pick:
+/// `ohara query` downgrades CoreML→CPU (a single query row can't
+/// amortize the compile — see `commands::query`), and the CUDA branch
+/// still wins when a device is visible.
 pub(crate) fn detect_provider() -> EmbedProvider {
     if cuda_env_enabled() {
         return EmbedProvider::Cuda;
     }
+    if coreml_available() {
+        return EmbedProvider::CoreMl;
+    }
     EmbedProvider::Cpu
+}
+
+/// Whether this binary can run the CoreML execution provider at all —
+/// the same gate `ohara_embed::execution_providers_for` enforces. Asking
+/// for CoreML without the `coreml` feature is a hard error, so `auto`
+/// must only pick it when this is true.
+const fn coreml_available() -> bool {
+    cfg!(all(feature = "coreml", target_os = "macos"))
 }
 
 /// `CUDA_VISIBLE_DEVICES` semantics: unset, empty, and `-1` all mean
@@ -114,15 +135,17 @@ mod tests {
     }
 
     #[test]
-    fn detect_provider_picks_cpu_on_apple_silicon() {
-        // Plan 30: `auto` never silently picks CoreML. The fixed-shape
-        // CoreML path is opt-in (`--embed-provider coreml`) while it
-        // bakes; auto on Apple Silicon means the INT8-CPU default.
-        if cfg!(target_os = "macos")
-            && cfg!(target_arch = "aarch64")
-            && std::env::var_os("CUDA_VISIBLE_DEVICES").is_none()
-        {
-            assert_eq!(detect_provider(), EmbedProvider::Cpu);
+    fn detect_provider_on_macos_prefers_coreml_when_built_in() {
+        // `auto` now prefers CoreML on a macOS build that compiled the
+        // `coreml` feature (reversing the old plan-30 opt-in); without
+        // the feature it still falls back to the INT8-CPU default.
+        if cfg!(target_os = "macos") && std::env::var_os("CUDA_VISIBLE_DEVICES").is_none() {
+            let expected = if cfg!(feature = "coreml") {
+                EmbedProvider::CoreMl
+            } else {
+                EmbedProvider::Cpu
+            };
+            assert_eq!(detect_provider(), expected);
         }
     }
 
@@ -139,11 +162,14 @@ mod tests {
     }
 
     #[test]
-    fn auto_never_resolves_to_coreml() {
-        // Plan 30: CoreML is opt-in only. Whatever the host, `auto`
-        // must come back CPU or CUDA — never CoreML — so a plain
-        // `ohara index` can't wander into a 30s CoreML compile (or a
-        // ~130MB model download) the user didn't ask for.
-        assert_ne!(resolve_provider(ProviderArg::Auto), EmbedProvider::CoreMl);
+    fn auto_resolves_to_coreml_only_on_coreml_capable_builds() {
+        // `auto` resolves to CoreML exactly when the binary can run it
+        // (built with `coreml`, on macOS) and CUDA isn't visible —
+        // otherwise it must never be CoreML, so a build without the
+        // feature can't wander into the "not enabled" runtime error.
+        let resolved = resolve_provider(ProviderArg::Auto);
+        let coreml_expected = cfg!(all(feature = "coreml", target_os = "macos"))
+            && std::env::var_os("CUDA_VISIBLE_DEVICES").is_none();
+        assert_eq!(resolved == EmbedProvider::CoreMl, coreml_expected);
     }
 }

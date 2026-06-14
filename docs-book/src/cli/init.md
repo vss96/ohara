@@ -46,13 +46,16 @@ ohara init ~/code/some-repo --force
 ## What gets written
 
 The managed `post-commit` block runs an incremental re-index in the
-repo root and silently no-ops if `ohara` is missing:
+repo root and silently no-ops if `ohara` is missing. It pins the CPU
+embedder so each commit stays fast: a per-commit index is a tiny batch
+that can't amortize CoreML's one-time ~30s compile (`auto` still picks
+CoreML for larger manual `ohara index` runs).
 
 ```sh
 # >>> ohara managed (do not edit) >>>
 # Re-index this repo on every commit. Silently skipped if `ohara` is not on PATH.
 if command -v ohara >/dev/null 2>&1; then
-  ( cd "$(git rev-parse --show-toplevel)" && ohara index --incremental >/dev/null 2>&1 ) || true
+  ( cd "$(git rev-parse --show-toplevel)" && ohara index --incremental --embed-provider cpu >/dev/null 2>&1 ) || true
 fi
 # <<< ohara managed <<<
 ```

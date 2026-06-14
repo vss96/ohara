@@ -852,6 +852,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialoguer"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "658bce805d770f407bc62102fca7c2c64ceef2fbcb2b8bd19d2765ce093980de"
+dependencies = [
+ "console 0.15.11",
+ "shell-words",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2343,12 +2354,13 @@ checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 
 [[package]]
 name = "ohara-cli"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "axoupdater",
  "chrono",
  "clap",
+ "dialoguer",
  "git2",
  "indicatif 0.17.11",
  "ohara-core",
@@ -2368,7 +2380,7 @@ dependencies = [
 
 [[package]]
 name = "ohara-core"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2391,7 +2403,7 @@ dependencies = [
 
 [[package]]
 name = "ohara-embed"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2405,7 +2417,7 @@ dependencies = [
 
 [[package]]
 name = "ohara-engine"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2430,7 +2442,7 @@ dependencies = [
 
 [[package]]
 name = "ohara-git"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2443,7 +2455,7 @@ dependencies = [
 
 [[package]]
 name = "ohara-mcp"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2469,7 +2481,7 @@ dependencies = [
 
 [[package]]
 name = "ohara-parse"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2488,7 +2500,7 @@ dependencies = [
 
 [[package]]
 name = "ohara-perf-tests"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2510,7 +2522,7 @@ dependencies = [
 
 [[package]]
 name = "ohara-storage"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3515,6 +3527,12 @@ checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
 ]
+
+[[package]]
+name = "shell-words"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 
 [[package]]
 name = "shlex"
