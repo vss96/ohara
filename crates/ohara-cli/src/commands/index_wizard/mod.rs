@@ -31,6 +31,9 @@ pub trait WizardPrompter {
     /// Print an informational line (footnotes, the equivalent command).
     fn note(&mut self, msg: &str);
     /// Single-choice select; returns the chosen index into `options`.
+    ///
+    /// Implementations MUST return an index in `0..options.len()` — the
+    /// caller dispatches on it by direct indexing.
     fn select(&mut self, prompt: &str, options: &[String], default: usize) -> Result<usize>;
     /// Yes/no confirm.
     fn confirm(&mut self, prompt: &str, default: bool) -> Result<bool>;
@@ -66,7 +69,9 @@ pub fn run_wizard_with(p: &mut dyn WizardPrompter, base: Args) -> Result<WizardF
         p.note(f);
     }
     let pi = p.select("Embedding provider", &labels, 0)?;
-    let provider = choices[pi];
+    let provider = *choices
+        .get(pi)
+        .expect("invariant: WizardPrompter::select returns an in-range index");
 
     // 2. Resource intensity.
     let intensity_opts = vec![
@@ -75,11 +80,13 @@ pub fn run_wizard_with(p: &mut dyn WizardPrompter, base: Args) -> Result<WizardF
         "Aggressive — double batch + threads, maximize throughput".to_string(),
     ];
     let ii = p.select("Resource intensity", &intensity_opts, 0)?;
-    let intensity = [
+    let intensity = *[
         ResourcesArg::Auto,
         ResourcesArg::Conservative,
         ResourcesArg::Aggressive,
-    ][ii];
+    ]
+    .get(ii)
+    .expect("invariant: WizardPrompter::select returns an in-range index");
 
     // 3. Index mode. Rebuild gets a destructive confirm; declining it
     // falls back to Standard.
@@ -90,12 +97,14 @@ pub fn run_wizard_with(p: &mut dyn WizardPrompter, base: Args) -> Result<WizardF
         "Rebuild — delete & rebuild the whole index from scratch".to_string(),
     ];
     let mi = p.select("Index mode", &mode_opts, 0)?;
-    let mut mode = [
+    let mut mode = *[
         ModeChoice::Standard,
         ModeChoice::Incremental,
         ModeChoice::Force,
         ModeChoice::Rebuild,
-    ][mi];
+    ]
+    .get(mi)
+    .expect("invariant: WizardPrompter::select returns an in-range index");
     if matches!(mode, ModeChoice::Rebuild) {
         let confirmed = p.confirm(
             &format!(
@@ -127,7 +136,9 @@ pub fn run_wizard_with(p: &mut dyn WizardPrompter, base: Args) -> Result<WizardF
             "diff".to_string(),
         ];
         let ci = p.select("Embed cache mode", &cache_opts, 0)?;
-        ans.embed_cache = [EmbedCacheArg::Off, EmbedCacheArg::Semantic, EmbedCacheArg::Diff][ci];
+        ans.embed_cache = *[EmbedCacheArg::Off, EmbedCacheArg::Semantic, EmbedCacheArg::Diff]
+            .get(ci)
+            .expect("invariant: WizardPrompter::select returns an in-range index");
         ans.no_progress = p.confirm("Disable the progress bar?", false)?;
         ans.profile = p.confirm("Emit per-phase --profile JSON?", false)?;
     }
