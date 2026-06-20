@@ -16,7 +16,7 @@ use ohara_core::perf_trace::timed_phase;
 use ohara_core::query::PatternQuery;
 use ohara_core::Retriever;
 use ohara_engine::client::{find_or_spawn_daemon, registry_path, try_daemon_call};
-use ohara_engine::ipc::{Request, RequestMethod};
+use ohara_engine::ipc::{ErrorCode, ErrorPayload, Request, RequestMethod};
 use ohara_engine::FindPatternResult;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -115,6 +115,23 @@ async fn run_standalone(
     Ok(FindPatternResult { hits, meta })
 }
 
+/// What `ohara query` should do with a daemon error response.
+#[derive(Debug, PartialEq, Eq)]
+enum ErrorAction {
+    /// Surface this message to the user; do NOT fall back. The index is
+    /// definitively unusable, so the standalone path can't do better.
+    Surface(String),
+    /// Fall back to the (guarded) standalone path.
+    Fallback,
+}
+
+/// Map a daemon [`ErrorPayload`] to the CLI's next action (issue #78).
+fn classify_daemon_error(_err: &ErrorPayload) -> ErrorAction {
+    // STUB (red): always fall back. Replaced by the real implementation
+    // in the green step.
+    ErrorAction::Fallback
+}
+
 pub async fn run(args: Args, no_daemon: bool) -> Result<()> {
     let canonical = std::fs::canonicalize(&args.path)
         .map_err(|e| anyhow::anyhow!("canonicalize {}: {e}", args.path.display()))?;
@@ -163,4 +180,46 @@ pub async fn run(args: Args, no_daemon: bool) -> Result<()> {
 
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn needs_rebuild_is_surfaced_with_rebuild_command() {
+        let err = ErrorPayload {
+            code: ErrorCode::NeedsRebuild,
+            message: "index needs rebuild: embedding_model mismatch".into(),
+        };
+        match classify_daemon_error(&err) {
+            ErrorAction::Surface(msg) => {
+                assert!(msg.contains("ohara index --rebuild"), "got: {msg}");
+                assert!(msg.contains("embedding_model mismatch"), "got: {msg}");
+            }
+            ErrorAction::Fallback => {
+                panic!("NeedsRebuild must be surfaced, not silently fall back to a stale index")
+            }
+        }
+    }
+
+    #[test]
+    fn other_daemon_errors_fall_back_to_standalone() {
+        for code in [
+            ErrorCode::Internal,
+            ErrorCode::NotImplemented,
+            ErrorCode::NotIndexed,
+            ErrorCode::InvalidRequest,
+        ] {
+            let err = ErrorPayload {
+                code,
+                message: "x".into(),
+            };
+            assert_eq!(
+                classify_daemon_error(&err),
+                ErrorAction::Fallback,
+                "{code:?} should fall back to the (guarded) standalone path"
+            );
+        }
+    }
 }
