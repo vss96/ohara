@@ -12,12 +12,10 @@
 
 use anyhow::Result;
 use clap::Args as ClapArgs;
-use ohara_core::perf_trace::timed_phase;
 use ohara_core::query::PatternQuery;
-use ohara_core::Retriever;
 use ohara_engine::client::{find_or_spawn_daemon, registry_path, try_daemon_call};
-use ohara_engine::ipc::{ErrorCode, ErrorPayload, Request, RequestMethod};
-use ohara_engine::FindPatternResult;
+use ohara_engine::ipc::{ErrorCode, ErrorPayload, Request, RequestMethod, Response};
+use ohara_engine::{EngineError, FindPatternResult, RetrievalEngine};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -46,20 +44,22 @@ pub struct Args {
     pub embed_provider: ProviderArg,
 }
 
-/// Run the retrieval engine in-process (standalone path).
+/// Run the retrieval engine in-process (standalone path) — the fallback
+/// when no compatible daemon is available or the daemon is disabled
+/// (`--no-daemon`).
 ///
-/// Constructs storage, embedder, and optionally a reranker, then calls
-/// [`Retriever::find_pattern_with_profile`]. Used both as the direct standalone
-/// path and as the fallback when the daemon is unavailable or disabled.
+/// Routes through [`RetrievalEngine`] so the plan-29 `NeedsRebuild` guard
+/// covers this path too (issue #78). Previously this constructed a
+/// `Retriever` directly, bypassing the guard and silently querying a stale
+/// index. Providers are lazy, so a `NeedsRebuild` index is refused *before*
+/// any embedder/reranker load — the guard runs before the retriever touches
+/// the embedder. `q.no_rerank` is honored by the retriever regardless of the
+/// attached reranker, so a lazy reranker is never loaded in that case.
 async fn run_standalone(
     canonical: &Path,
     q: PatternQuery,
     args: &Args,
 ) -> Result<FindPatternResult> {
-    let (repo_id, _, _) = super::resolve_repo_id(canonical)?;
-    let db_path = super::index_db_path(&repo_id)?;
-    let storage: Arc<dyn ohara_core::Storage> =
-        Arc::new(timed_phase("storage_open", ohara_storage::SqliteStorage::open(&db_path)).await?);
     // Plan 30: the CoreML fixed-shape provider is an indexing tool — a
     // single query row doesn't justify its one-time ~30s compile, and
     // the old dynamic CoreML path it replaced is unstable for BGE. The
@@ -75,44 +75,35 @@ async fn run_standalone(
         other => other,
     };
     tracing::info!(provider = ?chosen_provider, "embedder");
-    let embedder = Arc::new(
-        timed_phase(
-            "embed_load",
-            tokio::task::spawn_blocking(move || {
-                ohara_embed::FastEmbedProvider::with_provider(chosen_provider)
-            }),
-        )
-        .await??,
+    let embedder: Arc<dyn ohara_core::EmbeddingProvider> = Arc::new(
+        ohara_embed::LazyFastEmbedProvider::with_provider(chosen_provider),
     );
-    let retriever = if q.no_rerank {
-        Retriever::new(storage.clone(), embedder)
-    } else {
-        let reranker = Arc::new(
-            timed_phase(
-                "rerank_load",
-                tokio::task::spawn_blocking(move || {
-                    ohara_embed::FastEmbedReranker::with_provider(chosen_provider)
-                }),
-            )
-            .await??,
-        );
-        Retriever::new(storage.clone(), embedder).with_reranker(reranker)
-    };
-    let now = chrono::Utc::now().timestamp();
-    let (hits, _profile) = retriever
-        .find_pattern_with_profile(&repo_id, &q, now)
-        .await?;
-    let behind = ohara_git::GitCommitsBehind::open(canonical)
-        .map_err(|e| anyhow::anyhow!("commits_behind: {e}"))?;
-    let index_status = ohara_core::query::compute_index_status(storage.as_ref(), &repo_id, &behind)
+    let reranker: Arc<dyn ohara_core::embed::RerankProvider> = Arc::new(
+        ohara_embed::LazyFastEmbedReranker::with_provider(chosen_provider),
+    );
+    let engine = RetrievalEngine::new(embedder, reranker);
+    engine
+        .find_pattern(canonical, q)
         .await
-        .map_err(|e| anyhow::anyhow!("index_status: {e}"))?;
-    let meta = ohara_core::query::ResponseMeta {
-        index_status,
-        hint: None,
-        compatibility: None,
-    };
-    Ok(FindPatternResult { hits, meta })
+        .map_err(rebuild_aware)
+}
+
+/// Build the user-facing rebuild refusal: the daemon/engine
+/// "index needs rebuild: <reason>" message plus the command that fixes it.
+/// Mirrors the MCP `find_pattern` refusal so the CLI and agent surfaces
+/// stay consistent.
+fn rebuild_refusal(message: &str) -> String {
+    format!("{message}\nRun `ohara index --rebuild` in this repo first.")
+}
+
+/// Convert an [`EngineError`] into an `anyhow` error, surfacing the rebuild
+/// command for `NeedsRebuild` so a stale standalone query refuses loudly
+/// instead of returning wrong results (issue #78).
+fn rebuild_aware(e: EngineError) -> anyhow::Error {
+    if let EngineError::NeedsRebuild { .. } = e {
+        return anyhow::anyhow!(rebuild_refusal(&e.to_string()));
+    }
+    anyhow::anyhow!(e.to_string())
 }
 
 /// What `ohara query` should do with a daemon error response.
@@ -126,10 +117,37 @@ enum ErrorAction {
 }
 
 /// Map a daemon [`ErrorPayload`] to the CLI's next action (issue #78).
-fn classify_daemon_error(_err: &ErrorPayload) -> ErrorAction {
-    // STUB (red): always fall back. Replaced by the real implementation
-    // in the green step.
-    ErrorAction::Fallback
+///
+/// `NeedsRebuild` is surfaced verbatim — previously the CLI treated every
+/// daemon error as "fall back to standalone", and the standalone path
+/// bypassed the engine's rebuild guard, silently querying a stale index.
+/// Every other code falls back: the standalone path is now guarded, so it
+/// either refuses for the same reason or succeeds in-process.
+fn classify_daemon_error(err: &ErrorPayload) -> ErrorAction {
+    match err.code {
+        ErrorCode::NeedsRebuild => ErrorAction::Surface(rebuild_refusal(&err.message)),
+        _ => ErrorAction::Fallback,
+    }
+}
+
+/// Turn a daemon [`Response`] into a result, surfacing a rebuild refusal or
+/// falling back to the guarded standalone path as appropriate (issue #78).
+async fn handle_daemon_response(
+    resp: Response,
+    canonical: &Path,
+    q: PatternQuery,
+    args: &Args,
+) -> Result<FindPatternResult> {
+    if let Some(err) = resp.error {
+        return match classify_daemon_error(&err) {
+            ErrorAction::Surface(msg) => Err(anyhow::anyhow!(msg)),
+            ErrorAction::Fallback => run_standalone(canonical, q, args).await,
+        };
+    }
+    let value = resp
+        .result
+        .ok_or_else(|| anyhow::anyhow!("daemon response missing result"))?;
+    serde_json::from_value(value).map_err(|e| anyhow::anyhow!("decode FindPatternResult: {e}"))
 }
 
 pub async fn run(args: Args, no_daemon: bool) -> Result<()> {
@@ -168,14 +186,8 @@ pub async fn run(args: Args, no_daemon: bool) -> Result<()> {
     .await;
 
     let result: FindPatternResult = match daemon_resp {
-        Some(resp) if resp.error.is_none() => {
-            let value = resp
-                .result
-                .ok_or_else(|| anyhow::anyhow!("daemon response missing result"))?;
-            serde_json::from_value(value)
-                .map_err(|e| anyhow::anyhow!("decode FindPatternResult: {e}"))?
-        }
-        _ => run_standalone(&canonical, pattern_query, &args).await?,
+        Some(resp) => handle_daemon_response(resp, &canonical, pattern_query, &args).await?,
+        None => run_standalone(&canonical, pattern_query, &args).await?,
     };
 
     println!("{}", serde_json::to_string_pretty(&result)?);
