@@ -51,7 +51,8 @@ fn spawn_daemon_inner(
         .stderr(std::process::Stdio::null())
         .stdin(std::process::Stdio::null());
     detach_session(&mut cmd);
-    cmd.spawn()
+    let mut child = cmd
+        .spawn()
         .map_err(|e| EngineError::Internal(format!("spawn ohara serve: {e}")))?;
 
     let started = Instant::now();
@@ -69,6 +70,12 @@ fn spawn_daemon_inner(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    // Readiness timed out. Terminate the child so it can't finish booting
+    // unregistered (find_or_spawn_daemon only registers on success) and
+    // hold an undiscoverable socket until its own idle reap (issue #79).
+    // SIGTERM lets it clean up; wait() reaps it so we leave no zombie.
+    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    let _ = child.wait();
     Err(EngineError::Internal(format!(
         "daemon did not become ready in {readiness_timeout:?}"
     )))
