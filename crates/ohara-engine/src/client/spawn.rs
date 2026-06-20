@@ -14,6 +14,22 @@ pub fn spawn_daemon(
     ohara_version: &str,
     registry_path: &Path,
 ) -> crate::Result<SpawnedDaemon> {
+    spawn_daemon_inner(
+        ohara_binary,
+        runtime_dir,
+        ohara_version,
+        registry_path,
+        Duration::from_secs(10),
+    )
+}
+
+fn spawn_daemon_inner(
+    ohara_binary: &Path,
+    runtime_dir: &Path,
+    ohara_version: &str,
+    registry_path: &Path,
+    readiness_timeout: Duration,
+) -> crate::Result<SpawnedDaemon> {
     std::fs::create_dir_all(runtime_dir)
         .map_err(|e| EngineError::Internal(format!("mkdir runtime: {e}")))?;
     let token = random_8();
@@ -39,7 +55,7 @@ pub fn spawn_daemon(
         .map_err(|e| EngineError::Internal(format!("spawn ohara serve: {e}")))?;
 
     let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(10) {
+    while started.elapsed() < readiness_timeout {
         if ready_file.exists() && pid_file.exists() {
             let pid: u32 = std::fs::read_to_string(&pid_file)
                 .map_err(|e| EngineError::Internal(format!("read pid: {e}")))?
@@ -53,9 +69,9 @@ pub fn spawn_daemon(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    Err(EngineError::Internal(
-        "daemon did not become ready in 10s".into(),
-    ))
+    Err(EngineError::Internal(format!(
+        "daemon did not become ready in {readiness_timeout:?}"
+    )))
 }
 
 fn random_8() -> String {
@@ -118,5 +134,59 @@ mod tests {
         unsafe { libc::kill(result.pid as i32, libc::SIGTERM) };
         assert!(result.pid > 0);
         assert!(result.socket_path.starts_with(runtime.path()));
+    }
+
+    /// Issue #79: a child that never announces readiness (e.g. cold model
+    /// cache stalls past the timeout) must be terminated by the spawner —
+    /// otherwise it boots unregistered and holds an undiscoverable socket
+    /// until its own idle reap (up to 30 min).
+    #[test]
+    #[ignore = "spawns a child process; run with --ignored"]
+    fn spawn_daemon_kills_child_on_readiness_timeout() {
+        let runtime = tempfile::tempdir().unwrap();
+        let script = runtime.path().join("stuck_serve.sh");
+        // Writes the pid file (so we can find it) but NEVER the readiness
+        // file, then sleeps — modelling a daemon stuck before announcing.
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nshift  # serve\nwhile [ \"$#\" -gt 0 ]; do\n  case \"$1\" in\n    --pid-file) shift; echo $$ > \"$1\"; shift;;\n    *) shift;;\n  esac\ndone\nsleep 30\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let registry = runtime.path().join("registry.json");
+
+        let err = match spawn_daemon_inner(
+            &script,
+            runtime.path(),
+            "0.7.4",
+            &registry,
+            Duration::from_millis(500),
+        ) {
+            Ok(_) => panic!("readiness must time out"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("ready"), "got: {err}");
+
+        // The script wrote its pid; after the spawner returns, that process
+        // must no longer be alive (it was SIGTERM'd and reaped).
+        let pid_file = std::fs::read_dir(runtime.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|x| x == "pid"))
+            .expect("pid file written by the stuck child");
+        let child_pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let alive_after = unsafe { libc::kill(child_pid, 0) } == 0;
+        // Belt-and-suspenders cleanup in case the assertion below would fail.
+        unsafe { libc::kill(child_pid, libc::SIGKILL) };
+        assert!(
+            !alive_after,
+            "spawn_daemon must terminate the child on readiness timeout (#79); pid {child_pid} still alive"
+        );
     }
 }
