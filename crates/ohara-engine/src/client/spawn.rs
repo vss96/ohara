@@ -73,12 +73,40 @@ fn spawn_daemon_inner(
     // Readiness timed out. Terminate the child so it can't finish booting
     // unregistered (find_or_spawn_daemon only registers on success) and
     // hold an undiscoverable socket until its own idle reap (issue #79).
-    // SIGTERM lets it clean up; wait() reaps it so we leave no zombie.
-    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-    let _ = child.wait();
+    terminate_and_reap(&mut child);
+    // SIGTERM/SIGKILL bypasses the daemon's graceful socket cleanup
+    // (serve_unix only removes the socket on a clean shutdown), so
+    // best-effort remove anything the half-booted child left behind rather
+    // than leaking files in the runtime dir across repeated cold starts.
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(&pid_file);
+    let _ = std::fs::remove_file(&ready_file);
     Err(EngineError::Internal(format!(
         "daemon did not become ready in {readiness_timeout:?}"
     )))
+}
+
+/// Terminate a spawned daemon child that never became ready, then reap it
+/// within a bounded window. SIGTERM first (a daemon with no handler exits on
+/// its default disposition); if it hasn't exited after a short grace period,
+/// SIGKILL. The bound matters: `spawn_daemon` runs under the cross-process
+/// registry lock, so this must never be an open-ended `wait()`.
+fn terminate_and_reap(child: &mut std::process::Child) {
+    // SAFETY: `libc::kill` is an FFI call with no memory-safety obligations;
+    // `child.id()` is this process's own child pid.
+    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(2) {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => break,
+        }
+    }
+    // Still alive (or try_wait errored): force-kill and reap so the spawner
+    // never blocks indefinitely and we leave no zombie.
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn random_8() -> String {
@@ -152,11 +180,18 @@ mod tests {
     fn spawn_daemon_kills_child_on_readiness_timeout() {
         let runtime = tempfile::tempdir().unwrap();
         let script = runtime.path().join("stuck_serve.sh");
-        // Writes the pid file (so we can find it) but NEVER the readiness
-        // file, then sleeps — modelling a daemon stuck before announcing.
+        // `marker` lives outside the spawner-managed file names so the
+        // timeout-path cleanup doesn't remove it. The script records its
+        // own pid then `exec`s sleep, so the sleeping process IS the spawned
+        // pid (no orphaned grandchild). It never writes the readiness file,
+        // so the spawner must time out and terminate it.
+        let marker = runtime.path().join("child.marker");
         std::fs::write(
             &script,
-            "#!/bin/sh\nshift  # serve\nwhile [ \"$#\" -gt 0 ]; do\n  case \"$1\" in\n    --pid-file) shift; echo $$ > \"$1\"; shift;;\n    *) shift;;\n  esac\ndone\nsleep 30\n",
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\nexec sleep 30\n",
+                marker.display()
+            ),
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -175,22 +210,19 @@ mod tests {
         };
         assert!(err.to_string().contains("ready"), "got: {err}");
 
-        // The script wrote its pid; after the spawner returns, that process
-        // must no longer be alive (it was SIGTERM'd and reaped).
-        let pid_file = std::fs::read_dir(runtime.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .find(|p| p.extension().is_some_and(|x| x == "pid"))
-            .expect("pid file written by the stuck child");
-        let child_pid: i32 = std::fs::read_to_string(&pid_file)
-            .unwrap()
+        // The child recorded its pid before exec'ing sleep; after the
+        // spawner returns it must have been terminated and reaped.
+        let child_pid: i32 = std::fs::read_to_string(&marker)
+            .expect("child wrote its pid before exec")
             .trim()
             .parse()
             .unwrap();
         let alive_after = unsafe { libc::kill(child_pid, 0) } == 0;
-        // Belt-and-suspenders cleanup in case the assertion below would fail.
-        unsafe { libc::kill(child_pid, libc::SIGKILL) };
+        // Only signal if still alive — avoids hitting a reused pid once the
+        // child has been reaped.
+        if alive_after {
+            unsafe { libc::kill(child_pid, libc::SIGKILL) };
+        }
         assert!(
             !alive_after,
             "spawn_daemon must terminate the child on readiness timeout (#79); pid {child_pid} still alive"
