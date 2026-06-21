@@ -18,7 +18,8 @@
 
 use anyhow::{Context, Result};
 use fastembed::{
-    EmbeddingModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding, TextRerank,
+    EmbeddingModel, InitOptions, OnnxSource, RerankInitOptions, RerankInitOptionsUserDefined,
+    RerankerModel, TextEmbedding, TextRerank, TokenizerFiles, UserDefinedRerankingModel,
 };
 use ohara_core::embed::RerankProvider;
 use ohara_core::{EmbeddingProvider, Result as CoreResult};
@@ -50,6 +51,53 @@ pub const DEFAULT_DIM: usize = 384;
 /// Stable id of the default cross-encoder reranker model. Recorded in
 /// `index_metadata` so a reranker swap triggers a refresh prompt.
 pub const DEFAULT_RERANKER_ID: &str = "bge-reranker-base";
+/// Model id of the opt-in INT8 cross-encoder (issue #55). The reranker is
+/// a query-time component (no rerank artifacts are persisted), so swapping
+/// it does NOT invalidate an existing index — unlike the embedder id.
+pub const INT8_RERANKER_ID: &str = "bge-reranker-base-int8";
+/// Hugging Face repo + file for the INT8 reranker. A Transformers.js-style
+/// export of `BAAI/bge-reranker-base`; `model_int8.onnx` is ~280 MB vs the
+/// 1.1 GB full-precision model.
+const INT8_RERANKER_REPO: &str = "onnx-community/bge-reranker-base-ONNX";
+const INT8_RERANKER_ONNX_FILE: &str = "onnx/model_int8.onnx";
+
+/// Which cross-encoder reranker to load (issue #55).
+///
+/// `Base` is the full-precision built-in `bge-reranker-base` (default).
+/// `BaseInt8` is the opt-in INT8 variant, selected via the `OHARA_RERANKER`
+/// environment variable. The default flip stays gated on a recall eval
+/// (`tests/perf/context_engine_eval.rs`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RerankerChoice {
+    #[default]
+    Base,
+    BaseInt8,
+}
+
+impl RerankerChoice {
+    /// Resolve from the `OHARA_RERANKER` opt-in. Unset or any unrecognized
+    /// value falls back to the full-precision default.
+    pub fn from_env() -> Self {
+        Self::from_opt(std::env::var("OHARA_RERANKER").ok().as_deref())
+    }
+
+    /// Pure mapping from an optional flag value to a choice (testable
+    /// without touching the process environment).
+    fn from_opt(value: Option<&str>) -> Self {
+        match value {
+            Some("bge-reranker-base-int8") | Some("int8") => RerankerChoice::BaseInt8,
+            _ => RerankerChoice::Base,
+        }
+    }
+
+    /// Stable model id for this choice — answerable without loading.
+    pub fn model_id(self) -> &'static str {
+        match self {
+            RerankerChoice::Base => DEFAULT_RERANKER_ID,
+            RerankerChoice::BaseInt8 => INT8_RERANKER_ID,
+        }
+    }
+}
 
 /// ONNX execution provider selector for the embedder + reranker.
 ///
@@ -223,23 +271,87 @@ impl FastEmbedReranker {
         Self::with_provider(EmbedProvider::Cpu)
     }
 
-    /// Load BGE-reranker-base with the requested ONNX execution provider.
-    /// Mirrors [`FastEmbedProvider::with_provider`].
+    /// Load BGE-reranker-base with the requested ONNX execution provider,
+    /// honoring the `OHARA_RERANKER` opt-in. Mirrors
+    /// [`FastEmbedProvider::with_provider`].
     pub fn with_provider(provider: EmbedProvider) -> Result<Self> {
-        let opts = RerankInitOptions::new(RerankerModel::BGERerankerBase)
-            .with_show_download_progress(false);
-        let opts = apply_provider_to_rerank(opts, provider)?;
-        let model = TextRerank::try_new(opts)
-            .context("loading BGE-reranker-base (downloads ~110MB on first run)")?;
-        Ok(Self {
-            model: Arc::new(Mutex::new(model)),
-            model_id: DEFAULT_RERANKER_ID.into(),
-        })
+        Self::with_provider_and_choice(provider, RerankerChoice::from_env())
+    }
+
+    /// Load the reranker for an explicit [`RerankerChoice`] (issue #55).
+    ///
+    /// `Base` uses fastembed's built-in full-precision model. `BaseInt8`
+    /// downloads the INT8 export from `onnx-community/bge-reranker-base-ONNX`
+    /// and loads it via fastembed's user-defined-model path.
+    pub fn with_provider_and_choice(
+        provider: EmbedProvider,
+        choice: RerankerChoice,
+    ) -> Result<Self> {
+        match choice {
+            RerankerChoice::Base => {
+                let opts = RerankInitOptions::new(RerankerModel::BGERerankerBase)
+                    .with_show_download_progress(false);
+                let opts = apply_provider_to_rerank(opts, provider)?;
+                let model = TextRerank::try_new(opts)
+                    .context("loading BGE-reranker-base (downloads ~110MB on first run)")?;
+                Ok(Self {
+                    model: Arc::new(Mutex::new(model)),
+                    model_id: DEFAULT_RERANKER_ID.into(),
+                })
+            }
+            RerankerChoice::BaseInt8 => {
+                let user_model = download_int8_reranker()?;
+                // Seed max_length (512) from the built-in options, then
+                // attach the chosen execution providers. The model itself
+                // comes from the user-defined ONNX, not the enum.
+                let mut opts: RerankInitOptionsUserDefined =
+                    RerankInitOptions::new(RerankerModel::BGERerankerBase).into();
+                opts.execution_providers = execution_providers_for(provider)?;
+                let model = TextRerank::try_new_from_user_defined(user_model, opts)
+                    .context("loading INT8 bge-reranker-base (downloads ~280MB on first run)")?;
+                Ok(Self {
+                    model: Arc::new(Mutex::new(model)),
+                    model_id: INT8_RERANKER_ID.into(),
+                })
+            }
+        }
     }
 
     pub fn model_id(&self) -> &str {
         &self.model_id
     }
+}
+
+/// Download the INT8 `bge-reranker-base` ONNX + tokenizer files from the
+/// Hugging Face hub and assemble a [`UserDefinedRerankingModel`] (issue #55).
+/// Uses the same sync `hf-hub` API and on-disk cache fastembed uses for its
+/// built-in models, so a previously-fetched model is reused.
+fn download_int8_reranker() -> Result<UserDefinedRerankingModel> {
+    use hf_hub::api::sync::ApiBuilder;
+    let api = ApiBuilder::new()
+        .with_progress(false)
+        .build()
+        .context("init hf-hub api for the INT8 reranker")?;
+    let repo = api.model(INT8_RERANKER_REPO.to_string());
+    let onnx_path = repo
+        .get(INT8_RERANKER_ONNX_FILE)
+        .with_context(|| format!("download {INT8_RERANKER_ONNX_FILE} from {INT8_RERANKER_REPO}"))?;
+    let read = |name: &str| -> Result<Vec<u8>> {
+        let path = repo
+            .get(name)
+            .with_context(|| format!("download {name} from {INT8_RERANKER_REPO}"))?;
+        std::fs::read(&path).with_context(|| format!("read {}", path.display()))
+    };
+    let tokenizer_files = TokenizerFiles {
+        tokenizer_file: read("tokenizer.json")?,
+        config_file: read("config.json")?,
+        special_tokens_map_file: read("special_tokens_map.json")?,
+        tokenizer_config_file: read("tokenizer_config.json")?,
+    };
+    Ok(UserDefinedRerankingModel::new(
+        OnnxSource::File(onnx_path),
+        tokenizer_files,
+    ))
 }
 
 #[async_trait::async_trait]
@@ -390,6 +502,42 @@ mod tests {
         // resolution layer falls back to `EmbedProvider::default()` for
         // unrecognized hosts, so the default must stay CPU.
         assert_eq!(EmbedProvider::default(), EmbedProvider::Cpu);
+    }
+
+    #[test]
+    fn reranker_choice_defaults_to_full_precision() {
+        // Issue #55: the INT8 reranker is opt-in. Unset or unrecognized
+        // OHARA_RERANKER values MUST resolve to the full-precision default
+        // so existing behavior is unchanged.
+        assert_eq!(RerankerChoice::default(), RerankerChoice::Base);
+        assert_eq!(RerankerChoice::from_opt(None), RerankerChoice::Base);
+        assert_eq!(RerankerChoice::from_opt(Some("")), RerankerChoice::Base);
+        assert_eq!(
+            RerankerChoice::from_opt(Some("bogus")),
+            RerankerChoice::Base
+        );
+    }
+
+    #[test]
+    fn reranker_choice_int8_opt_in_values() {
+        assert_eq!(
+            RerankerChoice::from_opt(Some("int8")),
+            RerankerChoice::BaseInt8
+        );
+        assert_eq!(
+            RerankerChoice::from_opt(Some("bge-reranker-base-int8")),
+            RerankerChoice::BaseInt8
+        );
+    }
+
+    #[test]
+    fn reranker_choice_model_ids_are_distinct() {
+        assert_eq!(RerankerChoice::Base.model_id(), DEFAULT_RERANKER_ID);
+        assert_eq!(RerankerChoice::BaseInt8.model_id(), INT8_RERANKER_ID);
+        assert_ne!(
+            RerankerChoice::Base.model_id(),
+            RerankerChoice::BaseInt8.model_id()
+        );
     }
 
     #[test]
