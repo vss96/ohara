@@ -69,7 +69,7 @@ The following rules from Object Calisthenics apply. Rules not listed here are **
 
 - **No `else`.** Use early returns / guard clauses. `match` is not an `else` for this purpose and is encouraged.
 - **Wrap primitives that carry meaning in newtypes.** A path-to-a-repo, an embedding dimension, a commit SHA, a file content hash — these **MUST NOT** be passed as bare `String`/`PathBuf`/`usize`/`u64` across module boundaries. Define `RepoPath`, `EmbeddingDim`, `CommitSha`, `ContentHash` etc.
-- **Keep entities small.** Files **MUST** stay under 500 lines. Functions **SHOULD** stay under 50 lines. Types **SHOULD** have a single, namable responsibility.
+- **Keep entities small.** Files **MUST** stay under 500 lines of non-test code (§7). Functions **SHOULD** stay under 50 lines. Types **SHOULD** have a single, namable responsibility.
 - **Expose behaviour, not state.** Public getters/setters that simply mirror fields are a smell. Prefer methods named for the operation the caller wants to perform.
 - **No abbreviations in names.** `idx`, `cfg`, `req`, `res`, `mgr`, `svc` are forbidden. Use `index`, `config`, `request`, `response`, `manager`, `service`. Established Rust idioms are exempt: `i`/`j`/`k` for loop indices, `it` for iterators, `e` for the error in `match` arms, `f` for a formatter, `Self`/`self`.
 
@@ -140,7 +140,7 @@ Long `if` / `else if` ladders are a refactor signal.
 
 ## 7. File and Function Size
 
-- Files **MUST** stay under 500 lines. If a file approaches the limit, split by responsibility, not by line count.
+- Files **MUST** stay under 500 lines of **non-test code** — measured as the lines before the first `#[cfg(test)]` module. Inline `#[cfg(test)]` modules and dedicated test files (`*_tests.rs`, anything under a `tests/` directory) are exempt; a sprawling test module is a signal to split tests by scenario, not a hard error. If a production file approaches the limit, split by responsibility, not by line count.
 - Functions **SHOULD** stay under 50 lines. Long functions are a refactor signal, not a hard error.
 - Types with more than ~7 fields are a refactor signal — consider grouping related fields into a sub-struct.
 
