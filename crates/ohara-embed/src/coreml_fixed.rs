@@ -112,7 +112,7 @@ fn build_model() -> Result<fastembed::TextEmbedding> {
 }
 
 /// On-disk location for ORT's compiled-CoreML model cache, kept beside
-/// the downloaded model snapshots (under [`fastembed::get_cache_dir`]) so
+/// the downloaded model snapshots (under [`crate::cache::cache_dir`]) so
 /// it persists across processes. Handed to the CoreML EP via
 /// `with_model_cache_dir`, this lets the ~30s MLProgram compile be paid
 /// once and reused, instead of recompiled on every `ohara index` run.
@@ -214,7 +214,7 @@ mod imp {
     /// fastembed cache root, returning the path to hand to the CoreML EP's
     /// `with_model_cache_dir`. ORT requires the directory to exist.
     fn ensure_coreml_cache_dir() -> Result<PathBuf> {
-        let dir = super::coreml_cache_subdir(&PathBuf::from(fastembed::get_cache_dir()));
+        let dir = super::coreml_cache_subdir(&crate::cache::cache_dir());
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("creating CoreML compile cache at {}", dir.display()))?;
         Ok(dir)
@@ -229,8 +229,9 @@ mod imp {
             return Ok(dir);
         }
         tracing::info!("downloading fp32 bge-small-en-v1.5 (~130MB, one time)");
-        let opts =
-            InitOptions::new(EmbeddingModel::BGESmallENV15).with_show_download_progress(false);
+        let opts = InitOptions::new(EmbeddingModel::BGESmallENV15)
+            .with_show_download_progress(false)
+            .with_cache_dir(crate::cache::cache_dir());
         drop(
             TextEmbedding::try_new(opts)
                 .context("downloading fp32 BGE-small (~130MB on first use)")?,
@@ -244,7 +245,7 @@ mod imp {
     }
 
     fn snapshots_root() -> PathBuf {
-        PathBuf::from(fastembed::get_cache_dir())
+        crate::cache::cache_dir()
             .join(FP32_REPO_DIR)
             .join("snapshots")
     }
