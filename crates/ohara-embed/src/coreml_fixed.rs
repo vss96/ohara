@@ -172,12 +172,25 @@ mod imp {
         // structure; our graph is the same pinned model patched to the
         // same `(32, 512)` dims every run, so subsequent runs hit the
         // cache and load the precompiled model instead of recompiling.
-        let cache_dir = ensure_coreml_cache_dir()?;
-        let eps = vec![CoreML::default()
+        //
+        // Best-effort: caching is an optimization, so if the cache dir
+        // can't be created (read-only/shared cache root) we log and
+        // compile without it — the prior behavior — rather than failing
+        // the whole index pass.
+        let coreml = CoreML::default()
             .with_model_format(ModelFormat::MLProgram)
-            .with_compute_units(ComputeUnits::All)
-            .with_model_cache_dir(cache_dir.to_string_lossy())
-            .build()];
+            .with_compute_units(ComputeUnits::All);
+        let coreml = match ensure_coreml_cache_dir() {
+            Ok(cache_dir) => coreml.with_model_cache_dir(cache_dir.to_string_lossy()),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "CoreML compile cache unavailable; continuing without persistent cache"
+                );
+                coreml
+            }
+        };
+        let eps = vec![coreml.build()];
         let opts = InitOptionsUserDefined::new()
             .with_execution_providers(eps)
             .with_max_length(FIXED_SEQ);
