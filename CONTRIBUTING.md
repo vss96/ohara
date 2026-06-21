@@ -67,7 +67,7 @@ These are the rules that shape *how* code is written, not just how it's formatte
 
 The following rules from Object Calisthenics apply. Rules not listed here are **not** part of this standard.
 
-- **No `else`.** Use early returns / guard clauses. `match` is not an `else` for this purpose and is encouraged.
+- **Prefer to avoid `else`.** Early returns / guard clauses **SHOULD** be the default; `match` is the idiomatic replacement for branching and is encouraged (it does not count as an `else` here). A short, symmetric `if`/`else` is acceptable when it reads more clearly than the alternatives — this is a preference, not a hard prohibition.
 - **Wrap primitives that carry meaning in newtypes.** A path-to-a-repo, an embedding dimension, a commit SHA, a file content hash — these **MUST NOT** be passed as bare `String`/`PathBuf`/`usize`/`u64` across module boundaries. Define `RepoPath`, `EmbeddingDim`, `CommitSha`, `ContentHash` etc.
 - **Keep entities small.** Files **MUST** stay under 500 lines of non-test code (§7). Functions **SHOULD** stay under 50 lines. Types **SHOULD** have a single, namable responsibility.
 - **Expose behaviour, not state.** Public getters/setters that simply mirror fields are a smell. Prefer methods named for the operation the caller wants to perform.
