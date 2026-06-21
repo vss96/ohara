@@ -562,6 +562,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn within_batch_identical_inputs_embedded_once_and_share_vector() {
+        // Regression guard for the per-hunk hash dedup (issue #110): two
+        // hunks with identical embedder input in a single run, with NO
+        // cache, must be embedded only once (the second is deduped by
+        // content hash within the batch) and both output hunks must
+        // receive the same vector. This pins the within-batch dedup
+        // branch (`hash_to_batch_idx.contains_key`) that the cache-based
+        // tests do not exercise.
+        let dim = 5;
+        // Deterministic embedder: vector derived from input length so an
+        // accidental double-embed of distinct text would change the
+        // observed call count, and identical inputs map to equal vectors.
+        struct LenEmbedder {
+            calls: Arc<Mutex<Vec<Vec<String>>>>,
+            dim: usize,
+        }
+        #[async_trait]
+        impl EmbeddingProvider for LenEmbedder {
+            fn dimension(&self) -> usize {
+                self.dim
+            }
+            fn model_id(&self) -> &str {
+                "len"
+            }
+            async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+                self.calls.lock().unwrap().push(texts.to_vec());
+                Ok(texts
+                    .iter()
+                    .map(|t| vec![t.len() as f32; self.dim])
+                    .collect())
+            }
+        }
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let embedder = Arc::new(LenEmbedder {
+            calls: calls.clone(),
+            dim,
+        });
+        // Off mode, no cache: the only dedup path is the within-batch
+        // hash map. Two hunks with the same semantic_text.
+        let hunks = vec![attributed("same body"), attributed("same body")];
+        let stage = EmbedStage::new(embedder);
+        let out = stage.run("commit msg", &hunks).await.unwrap();
+
+        // Commit message + the deduped body = 2 distinct texts total.
+        let seen: Vec<String> = calls.lock().unwrap().iter().flatten().cloned().collect();
+        let body_count = seen.iter().filter(|s| s.as_str() == "same body").count();
+        assert_eq!(
+            body_count, 1,
+            "identical inputs in one batch must be embedded once, got {body_count}: {seen:?}"
+        );
+        assert_eq!(out.hunks.len(), 2);
+        assert_eq!(
+            out.hunks[0].embedding, out.hunks[1].embedding,
+            "both hunks sharing one input must resolve to the same vector"
+        );
+    }
+
+    #[tokio::test]
     async fn semantic_mode_second_run_reuses_cached_vectors_and_skips_embed() {
         // Plan 27 Task C.2: with EmbedMode::Semantic + a cache, the
         // first call embeds normally and writes to the cache; the
