@@ -37,6 +37,10 @@ rusqlite = { version = "0.31", features = ["bundled", "load_extension", "blob", 
 sqlite-vec = "0.1"
 refinery = { version = "0.8", features = ["rusqlite"] }
 fastembed = "~5.13"
+# Direct hf-hub for the opt-in INT8 reranker (issue #55): mirrors the
+# feature set fastembed already enables (sync `ureq` API + `native-tls`)
+# so no new TLS/HTTP backend is pulled — the crate is already in the graph.
+hf-hub = { version = "0.5", default-features = false, features = ["ureq", "native-tls"] }
 futures = "0.3"
 git2 = { version = "0.18", default-features = false }
 tree-sitter = "0.25"

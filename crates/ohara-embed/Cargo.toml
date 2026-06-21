@@ -9,6 +9,7 @@ license.workspace = true
 ohara-core = { path = "../ohara-core" }
 anyhow.workspace = true
 fastembed.workspace = true
+hf-hub.workspace = true
 async-trait = "0.1"
 tokio = { workspace = true }
 tracing.workspace = true

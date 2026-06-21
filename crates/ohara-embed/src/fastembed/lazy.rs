@@ -6,8 +6,8 @@
 //! [`super`]; load serialization lives in [`crate::idle_slot`].
 
 use super::{
-    EmbedProvider, FastEmbedProvider, FastEmbedReranker, DEFAULT_DIM, DEFAULT_MODEL_ID,
-    DEFAULT_RERANKER_ID,
+    EmbedProvider, FastEmbedProvider, FastEmbedReranker, RerankerChoice, DEFAULT_DIM,
+    DEFAULT_MODEL_ID,
 };
 use ohara_core::embed::RerankProvider;
 use ohara_core::{EmbeddingProvider, Result as CoreResult};
@@ -36,6 +36,7 @@ use std::sync::Arc;
 pub struct LazyFastEmbedReranker {
     slot: crate::idle_slot::IdleSlot<Arc<FastEmbedReranker>>,
     provider: EmbedProvider,
+    choice: RerankerChoice,
 }
 
 impl LazyFastEmbedReranker {
@@ -46,29 +47,35 @@ impl LazyFastEmbedReranker {
     }
 
     /// Create a lazy reranker that will load with the requested
-    /// execution provider on first use.
+    /// execution provider on first use. The reranker model (full-precision
+    /// vs the INT8 opt-in) is resolved once here from `OHARA_RERANKER`
+    /// (issue #55) so `model_id` reflects it before any load.
     pub fn with_provider(provider: EmbedProvider) -> Self {
         Self {
             slot: crate::idle_slot::IdleSlot::new(),
             provider,
+            choice: RerankerChoice::from_env(),
         }
     }
 
     /// Stable id of the model that will be loaded on first use. Safe
     /// to call before initialization — does not trigger a load.
     pub fn model_id(&self) -> &'static str {
-        DEFAULT_RERANKER_ID
+        self.choice.model_id()
     }
 
     async fn get_or_init(&self) -> CoreResult<Arc<FastEmbedReranker>> {
         let provider = self.provider;
+        let choice = self.choice;
         self.slot
             .get_or_try_init(async move {
-                tokio::task::spawn_blocking(move || FastEmbedReranker::with_provider(provider))
-                    .await
-                    .map_err(|e| ohara_core::OhraError::Embedding(format!("join: {e}")))?
-                    .map(Arc::new)
-                    .map_err(|e| ohara_core::OhraError::Embedding(e.to_string()))
+                tokio::task::spawn_blocking(move || {
+                    FastEmbedReranker::with_provider_and_choice(provider, choice)
+                })
+                .await
+                .map_err(|e| ohara_core::OhraError::Embedding(format!("join: {e}")))?
+                .map(Arc::new)
+                .map_err(|e| ohara_core::OhraError::Embedding(e.to_string()))
             })
             .await
     }

@@ -63,3 +63,9 @@ ohara query --query "auth middleware" --no-rerank
   document. The `meta` block carries `index_status`, an optional `hint`,
   and — when the index is incompatible — a `compatibility` object. The MCP
   `find_pattern` tool returns the same hits under a `_meta` envelope.
+- **Experimental (issue #55):** set `OHARA_RERANKER=int8` to load the INT8
+  quantized `bge-reranker-base` (~280 MB vs the 1.1 GB full-precision model)
+  instead of the default cross-encoder. Applies to every path that reranks
+  (`ohara query`, the `ohara serve` daemon, and `ohara-mcp`). The default is
+  unchanged — flipping it is gated on a recall eval. Unset or any other value
+  keeps full precision.
