@@ -14,6 +14,22 @@ pub fn spawn_daemon(
     ohara_version: &str,
     registry_path: &Path,
 ) -> crate::Result<SpawnedDaemon> {
+    spawn_daemon_inner(
+        ohara_binary,
+        runtime_dir,
+        ohara_version,
+        registry_path,
+        Duration::from_secs(10),
+    )
+}
+
+fn spawn_daemon_inner(
+    ohara_binary: &Path,
+    runtime_dir: &Path,
+    ohara_version: &str,
+    registry_path: &Path,
+    readiness_timeout: Duration,
+) -> crate::Result<SpawnedDaemon> {
     std::fs::create_dir_all(runtime_dir)
         .map_err(|e| EngineError::Internal(format!("mkdir runtime: {e}")))?;
     let token = random_8();
@@ -35,11 +51,12 @@ pub fn spawn_daemon(
         .stderr(std::process::Stdio::null())
         .stdin(std::process::Stdio::null());
     detach_session(&mut cmd);
-    cmd.spawn()
+    let mut child = cmd
+        .spawn()
         .map_err(|e| EngineError::Internal(format!("spawn ohara serve: {e}")))?;
 
     let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(10) {
+    while started.elapsed() < readiness_timeout {
         if ready_file.exists() && pid_file.exists() {
             let pid: u32 = std::fs::read_to_string(&pid_file)
                 .map_err(|e| EngineError::Internal(format!("read pid: {e}")))?
@@ -53,9 +70,43 @@ pub fn spawn_daemon(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    Err(EngineError::Internal(
-        "daemon did not become ready in 10s".into(),
-    ))
+    // Readiness timed out. Terminate the child so it can't finish booting
+    // unregistered (find_or_spawn_daemon only registers on success) and
+    // hold an undiscoverable socket until its own idle reap (issue #79).
+    terminate_and_reap(&mut child);
+    // SIGTERM/SIGKILL bypasses the daemon's graceful socket cleanup
+    // (serve_unix only removes the socket on a clean shutdown), so
+    // best-effort remove anything the half-booted child left behind rather
+    // than leaking files in the runtime dir across repeated cold starts.
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(&pid_file);
+    let _ = std::fs::remove_file(&ready_file);
+    Err(EngineError::Internal(format!(
+        "daemon did not become ready in {readiness_timeout:?}"
+    )))
+}
+
+/// Terminate a spawned daemon child that never became ready, then reap it
+/// within a bounded window. SIGTERM first (a daemon with no handler exits on
+/// its default disposition); if it hasn't exited after a short grace period,
+/// SIGKILL. The bound matters: `spawn_daemon` runs under the cross-process
+/// registry lock, so this must never be an open-ended `wait()`.
+fn terminate_and_reap(child: &mut std::process::Child) {
+    // SAFETY: `libc::kill` is an FFI call with no memory-safety obligations;
+    // `child.id()` is this process's own child pid.
+    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(2) {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => break,
+        }
+    }
+    // Still alive (or try_wait errored): force-kill and reap so the spawner
+    // never blocks indefinitely and we leave no zombie.
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn random_8() -> String {
@@ -118,5 +169,63 @@ mod tests {
         unsafe { libc::kill(result.pid as i32, libc::SIGTERM) };
         assert!(result.pid > 0);
         assert!(result.socket_path.starts_with(runtime.path()));
+    }
+
+    /// Issue #79: a child that never announces readiness (e.g. cold model
+    /// cache stalls past the timeout) must be terminated by the spawner —
+    /// otherwise it boots unregistered and holds an undiscoverable socket
+    /// until its own idle reap (up to 30 min).
+    #[test]
+    #[ignore = "spawns a child process; run with --ignored"]
+    fn spawn_daemon_kills_child_on_readiness_timeout() {
+        let runtime = tempfile::tempdir().unwrap();
+        let script = runtime.path().join("stuck_serve.sh");
+        // `marker` lives outside the spawner-managed file names so the
+        // timeout-path cleanup doesn't remove it. The script records its
+        // own pid then `exec`s sleep, so the sleeping process IS the spawned
+        // pid (no orphaned grandchild). It never writes the readiness file,
+        // so the spawner must time out and terminate it.
+        let marker = runtime.path().join("child.marker");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\nexec sleep 30\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let registry = runtime.path().join("registry.json");
+
+        let err = match spawn_daemon_inner(
+            &script,
+            runtime.path(),
+            "0.7.4",
+            &registry,
+            Duration::from_millis(500),
+        ) {
+            Ok(_) => panic!("readiness must time out"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("ready"), "got: {err}");
+
+        // The child recorded its pid before exec'ing sleep; after the
+        // spawner returns it must have been terminated and reaped.
+        let child_pid: i32 = std::fs::read_to_string(&marker)
+            .expect("child wrote its pid before exec")
+            .trim()
+            .parse()
+            .unwrap();
+        let alive_after = unsafe { libc::kill(child_pid, 0) } == 0;
+        // Only signal if still alive — avoids hitting a reused pid once the
+        // child has been reaped.
+        if alive_after {
+            unsafe { libc::kill(child_pid, libc::SIGKILL) };
+        }
+        assert!(
+            !alive_after,
+            "spawn_daemon must terminate the child on readiness timeout (#79); pid {child_pid} still alive"
+        );
     }
 }

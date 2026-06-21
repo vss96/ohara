@@ -26,14 +26,18 @@ pub struct DaemonOptions {
     pub reranker_idle_secs: u64,
 }
 
-/// Construct the default engine (CPU embedder, lazy reranker) and run.
+/// Construct the default engine (lazy CPU embedder + lazy reranker) and run.
+///
+/// Both providers are lazy so the daemon binds its socket and announces
+/// readiness *before* any ONNX model load. On a cold model cache the old
+/// eager embedder load (~80 MB download) could overrun the spawner's
+/// readiness window, leaving an unregistered orphan daemon holding an
+/// undiscoverable socket (issue #79). The first `find_pattern` triggers the
+/// embedder load inside the daemon; `explain_change` and clients that never
+/// query never pay for a model they don't use.
 pub async fn run_daemon(opts: DaemonOptions) -> crate::Result<()> {
-    let embedder: Arc<dyn ohara_core::EmbeddingProvider> = Arc::new(
-        tokio::task::spawn_blocking(ohara_embed::FastEmbedProvider::new)
-            .await
-            .map_err(|e| EngineError::Internal(format!("spawn_blocking embedder: {e}")))?
-            .map_err(|e| EngineError::Embed(e.to_string()))?,
-    );
+    let embedder: Arc<dyn ohara_core::EmbeddingProvider> =
+        Arc::new(ohara_embed::LazyFastEmbedProvider::new());
     let reranker: Arc<dyn ohara_core::embed::RerankProvider> =
         Arc::new(ohara_embed::LazyFastEmbedReranker::new());
     let engine = Arc::new(RetrievalEngine::new(embedder, reranker));

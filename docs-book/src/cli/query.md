@@ -46,7 +46,7 @@ ohara query --query "retry with backoff"
 Top-3 Rust-only matches, piped through `jq`:
 
 ```sh
-ohara query --query "exponential retry" --k 3 --language rust | jq '.[].commit_message'
+ohara query --query "exponential retry" --k 3 --language rust | jq '.hits[].commit_message'
 ```
 
 Skip the cross-encoder for a faster, deterministic ranking:
@@ -59,6 +59,7 @@ ohara query --query "auth middleware" --no-rerank
 
 - The `--since` filter exposed by the MCP tool (`since: "30d"`,
   `since: "2024-01-01"`) is not currently surfaced on the CLI.
-- The CLI prints the `hits` array directly (no `_meta` envelope) so
-  the output is a JSON array, not the `{ hits, _meta }` document the
-  MCP tool returns.
+- `ohara query` prints the full `{ "hits": [...], "meta": {...} }`
+  document. The `meta` block carries `index_status`, an optional `hint`,
+  and — when the index is incompatible — a `compatibility` object. The MCP
+  `find_pattern` tool returns the same hits under a `_meta` envelope.
