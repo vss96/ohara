@@ -98,12 +98,21 @@ impl EmbedStage {
         // Plan 27: compute embedder input per hunk based on mode.
         //   Off / Semantic → effective_semantic_text
         //   Diff           → record.diff_text  (drops commit message)
+        //
+        // Borrow the input `&str` into `attributed_hunks` (which outlives
+        // this whole block) and compute its content hash ONCE here. The
+        // (input, hash) pair is reused for the cache lookup, the dedup
+        // loop, and final assembly, so SHA256 is paid at most once per
+        // hunk and only cache misses are cloned (#110).
         let mode = self.embed_mode;
-        let hunk_inputs: Vec<String> = attributed_hunks
+        let hunk_inputs: Vec<(&str, crate::types::ContentHash)> = attributed_hunks
             .iter()
-            .map(|ah| match mode {
-                crate::EmbedMode::Diff => ah.record.diff_text.clone(),
-                _ => ah.effective_semantic_text().to_owned(),
+            .map(|ah| {
+                let input: &str = match mode {
+                    crate::EmbedMode::Diff => &ah.record.diff_text,
+                    _ => ah.effective_semantic_text(),
+                };
+                (input, crate::types::ContentHash::from_text(input))
             })
             .collect();
 
@@ -113,10 +122,8 @@ impl EmbedStage {
             match (mode, self.cache.as_ref()) {
                 (crate::EmbedMode::Off, _) | (_, None) => std::collections::HashMap::new(),
                 (_, Some(cache)) => {
-                    let hashes: Vec<crate::types::ContentHash> = hunk_inputs
-                        .iter()
-                        .map(|s| crate::types::ContentHash::from_text(s))
-                        .collect();
+                    let hashes: Vec<crate::types::ContentHash> =
+                        hunk_inputs.iter().map(|(_, hash)| hash.clone()).collect();
                     cache.embed_cache_get_many(&hashes, &model_id).await?
                 }
             };
@@ -124,20 +131,22 @@ impl EmbedStage {
         // Build the text batch: commit message at index 0, then only
         // the hunk inputs that missed the cache.  Deduplicate within
         // the batch by hash so identical inputs (e.g. same diff_text in
-        // Diff mode) are embedded only once per commit.
+        // Diff mode) are embedded only once per commit. Misses are the
+        // only inputs cloned into owned `String`s (the embedder takes
+        // owned texts); cache hits and within-batch duplicates clone
+        // nothing.
         let mut batch_texts: Vec<String> = Vec::with_capacity(hunk_inputs.len() + 1);
         batch_texts.push(commit_message.to_owned());
         // Maps content-hash → batch index (1-based, after commit msg).
         let mut hash_to_batch_idx: std::collections::HashMap<crate::types::ContentHash, usize> =
             std::collections::HashMap::new();
-        for input in &hunk_inputs {
-            let hash = crate::types::ContentHash::from_text(input);
-            if cached.contains_key(&hash) || hash_to_batch_idx.contains_key(&hash) {
+        for (input, hash) in &hunk_inputs {
+            if cached.contains_key(hash) || hash_to_batch_idx.contains_key(hash) {
                 continue;
             }
             let idx = batch_texts.len(); // position in batch_texts
-            hash_to_batch_idx.insert(hash, idx);
-            batch_texts.push(input.clone());
+            hash_to_batch_idx.insert(hash.clone(), idx);
+            batch_texts.push((*input).to_owned());
         }
 
         // Embed the batch (commit message + unique misses).
@@ -173,13 +182,12 @@ impl EmbedStage {
         let hunks: Vec<EmbeddedHunk> = attributed_hunks
             .iter()
             .zip(hunk_inputs.iter())
-            .map(|(ah, input)| {
-                let hash = crate::types::ContentHash::from_text(input);
-                let embedding = match cached.get(&hash) {
+            .map(|(ah, (_, hash))| {
+                let embedding = match cached.get(hash) {
                     Some(v) => v.clone(),
                     None => {
                         let batch_idx = hash_to_batch_idx
-                            .get(&hash)
+                            .get(hash)
                             .expect("invariant: every miss hash has a batch index");
                         miss_vecs[batch_idx - 1].clone()
                     }
