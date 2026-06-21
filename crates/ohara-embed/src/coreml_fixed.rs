@@ -250,6 +250,18 @@ mod tests {
         assert_eq!(padded, chunk);
     }
 
+    #[test]
+    fn coreml_cache_subdir_sits_beside_the_model_cache() {
+        // The compiled-CoreML cache MUST live at a stable, model-cache-
+        // relative location so a warm cache survives across `ohara index`
+        // runs (moving it would silently force the ~30s recompile again).
+        let root = std::path::Path::new("/tmp/fe-cache");
+        assert_eq!(
+            coreml_cache_subdir(root),
+            std::path::Path::new("/tmp/fe-cache/ohara-coreml-compiled"),
+        );
+    }
+
     #[cfg(not(all(feature = "coreml", target_os = "macos")))]
     #[test]
     fn constructor_names_the_build_flag_without_the_feature() {
