@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 pub mod daemon;
 pub mod explain;
+pub mod format;
 pub mod index;
 pub mod index_wizard;
 pub mod init;

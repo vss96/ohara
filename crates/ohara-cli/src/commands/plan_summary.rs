@@ -4,6 +4,7 @@
 //! in `commands::index`). Pure functions over `HotmapAggregator` and
 //! primitive inputs so they're unit-testable without a git repo.
 
+use crate::commands::format::fmt_duration_ms;
 use crate::commands::plan::HotmapAggregator;
 
 const BAR_WIDTH: usize = 32;
@@ -26,13 +27,6 @@ pub fn render_plan_banner(total_commits: u64, elapsed_ms: u64, suggestion_count:
         "surveyed {total_commits} {commits_word} in {elapsed} — {suggestion_count} {pattern_word}\n",
         elapsed = fmt_duration_ms(elapsed_ms),
     )
-}
-
-fn fmt_duration_ms(ms: u64) -> String {
-    match ms >= 1000 {
-        true => format!("{:.1}s", ms as f64 / 1000.0),
-        false => format!("{ms}ms"),
-    }
 }
 
 /// Render the section header plus a bar-chart of the `top_n` top-level
