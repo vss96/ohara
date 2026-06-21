@@ -12,10 +12,11 @@ use crate::Result;
 ///
 /// For each hunk, the stage:
 /// 1. Calls `CommitSource::file_at_commit` to obtain the post-image.
+///    Lookups are memoized by path within the run, so a commit that
+///    touches the same file in several hunks fetches the blob once.
 /// 2. If the source is present and `<= MAX_ATTRIBUTABLE_SOURCE_BYTES`,
 ///    calls `AtomicSymbolExtractor::extract` (ExactSpan path).
 /// 3. Otherwise sets `symbols = None` (header-only path, as in plan-15).
-/// 4. Stores the head symbols from `SymbolSource` for cross-reference.
 ///
 /// The stage is pure: it does not mutate its inputs and carries no
 /// state between calls.
@@ -31,17 +32,30 @@ impl AttributeStage {
         records: &[HunkRecord],
         commit_sha: &str,
         commit_source: &dyn CommitSource,
-        symbol_source: &dyn SymbolSource,
+        _symbol_source: &dyn SymbolSource,
         extractor: &dyn AtomicSymbolExtractor,
     ) -> Result<Vec<AttributedHunk>> {
         let mut out = Vec::with_capacity(records.len());
+        // Memoize post-image lookups by path within this run. All hunks
+        // share one `commit_sha`, so the path alone keys the blob; a
+        // commit touching the same file in several hunks fetches once.
+        let mut source_by_path: std::collections::HashMap<&str, Option<String>> =
+            std::collections::HashMap::new();
         for record in records {
-            let source_opt = commit_source
-                .file_at_commit(commit_sha, &record.file_path)
-                .await?;
+            let source_opt = match source_by_path.get(record.file_path.as_str()) {
+                Some(cached) => cached,
+                None => {
+                    let fetched = commit_source
+                        .file_at_commit(commit_sha, &record.file_path)
+                        .await?;
+                    source_by_path
+                        .entry(record.file_path.as_str())
+                        .or_insert(fetched)
+                }
+            };
 
             let symbols: Option<Vec<Symbol>> = match source_opt {
-                Some(ref source) if source.len() <= MAX_ATTRIBUTABLE_SOURCE_BYTES => {
+                Some(source) if source.len() <= MAX_ATTRIBUTABLE_SOURCE_BYTES => {
                     let atoms = extractor.extract(&record.file_path, source);
                     if atoms.is_empty() {
                         None
@@ -55,19 +69,10 @@ impl AttributeStage {
                         size = source.len(),
                         "plan-19 attribute: skipping ExactSpan for oversized source"
                     );
-                    drop(source);
                     None
                 }
                 None => None,
             };
-
-            // Head symbols are fetched separately — they describe the
-            // current HEAD state of the file, not the commit's diff.
-            // They are stored alongside the hunk for recall queries.
-            let _head_symbols = symbol_source
-                .head_symbols_for_path(&record.file_path)
-                .await
-                .unwrap_or_default();
 
             let attributed_semantic_text: Option<String> = symbols.as_ref().map(|syms| {
                 // Build a richer semantic text by prepending the first
@@ -157,7 +162,7 @@ mod stage_tests {
     use crate::indexer::stages::hunk_chunk::HunkRecord;
     use crate::indexer::{AtomicSymbolExtractor, MAX_ATTRIBUTABLE_SOURCE_BYTES};
     use crate::indexer::{CommitSource, SymbolSource};
-    use crate::types::{CommitMeta, Hunk, Symbol};
+    use crate::types::{CommitMeta, Hunk, Symbol, SymbolKind};
     use crate::Result;
     use async_trait::async_trait;
 
@@ -240,6 +245,92 @@ mod stage_tests {
             ah[0].symbols.is_none(),
             "deleted-file hunk must have symbols=None"
         );
+    }
+
+    #[tokio::test]
+    async fn dedups_file_at_commit_per_unique_path() {
+        use std::sync::Mutex;
+
+        // A CommitSource that records every (sha, path) lookup and
+        // returns a deterministic source derived from the path, so we
+        // can assert both call-count dedup and byte-identical output.
+        struct CountingSource {
+            calls: Mutex<Vec<(String, String)>>,
+        }
+        #[async_trait]
+        impl CommitSource for CountingSource {
+            async fn list_commits(&self, _: Option<&str>) -> Result<Vec<CommitMeta>> {
+                Ok(vec![])
+            }
+            async fn hunks_for_commit(&self, _: &str) -> Result<Vec<Hunk>> {
+                Ok(vec![])
+            }
+            async fn file_at_commit(&self, sha: &str, path: &str) -> Result<Option<String>> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((sha.to_string(), path.to_string()));
+                Ok(Some(format!("source-of-{path}")))
+            }
+        }
+
+        // An extractor that yields one symbol named after the source so
+        // attribution (symbols + attributed_semantic_text) is exercised.
+        struct NamingExtractor;
+        impl AtomicSymbolExtractor for NamingExtractor {
+            fn extract(&self, path: &str, source: &str) -> Vec<Symbol> {
+                vec![Symbol {
+                    file_path: path.to_string(),
+                    language: "rust".into(),
+                    kind: SymbolKind::Function,
+                    name: source.to_string(),
+                    qualified_name: None,
+                    sibling_names: Vec::new(),
+                    span_start: 0,
+                    span_end: 0,
+                    blob_sha: String::new(),
+                    source_text: String::new(),
+                }]
+            }
+        }
+
+        // Three hunks on "a.rs", two on "b.rs" — five hunks, two paths.
+        let records = vec![
+            record("c0", "a.rs"),
+            record("c0", "b.rs"),
+            record("c0", "a.rs"),
+            record("c0", "b.rs"),
+            record("c0", "a.rs"),
+        ];
+        let source = CountingSource {
+            calls: Mutex::new(Vec::new()),
+        };
+        let ah = AttributeStage::run(&records, "c0", &source, &NoSymbolSource, &NamingExtractor)
+            .await
+            .unwrap();
+
+        assert_eq!(ah.len(), 5);
+
+        // file_at_commit must be called exactly once per unique path.
+        let calls = source.calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            2,
+            "file_at_commit should be deduped to one call per unique path, got {calls:?}"
+        );
+
+        // Behaviour must be byte-identical: same-path hunks attribute
+        // the same way they would without dedup.
+        for idx in [0usize, 2, 4] {
+            assert_eq!(ah[idx].symbols.as_ref().unwrap()[0].name, "source-of-a.rs");
+            assert_eq!(
+                ah[idx].attributed_semantic_text.as_deref(),
+                Some("source-of-a.rs\nx")
+            );
+        }
+        for idx in [1usize, 3] {
+            assert_eq!(ah[idx].symbols.as_ref().unwrap()[0].name, "source-of-b.rs");
+        }
     }
 
     #[tokio::test]
