@@ -157,7 +157,7 @@ mod stage_tests {
     use crate::indexer::stages::hunk_chunk::HunkRecord;
     use crate::indexer::{AtomicSymbolExtractor, MAX_ATTRIBUTABLE_SOURCE_BYTES};
     use crate::indexer::{CommitSource, SymbolSource};
-    use crate::types::{CommitMeta, Hunk, Symbol};
+    use crate::types::{CommitMeta, Hunk, Symbol, SymbolKind};
     use crate::Result;
     use async_trait::async_trait;
 
@@ -240,6 +240,112 @@ mod stage_tests {
             ah[0].symbols.is_none(),
             "deleted-file hunk must have symbols=None"
         );
+    }
+
+    #[tokio::test]
+    async fn dedups_file_at_commit_per_unique_path() {
+        use std::sync::Mutex;
+
+        // A CommitSource that records every (sha, path) lookup and
+        // returns a deterministic source derived from the path, so we
+        // can assert both call-count dedup and byte-identical output.
+        struct CountingSource {
+            calls: Mutex<Vec<(String, String)>>,
+        }
+        #[async_trait]
+        impl CommitSource for CountingSource {
+            async fn list_commits(&self, _: Option<&str>) -> Result<Vec<CommitMeta>> {
+                Ok(vec![])
+            }
+            async fn hunks_for_commit(&self, _: &str) -> Result<Vec<Hunk>> {
+                Ok(vec![])
+            }
+            async fn file_at_commit(&self, sha: &str, path: &str) -> Result<Option<String>> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((sha.to_string(), path.to_string()));
+                Some(format!("source-of-{path}")).pipe_ok()
+            }
+        }
+
+        // Tiny helper so the closure above reads cleanly.
+        trait PipeOk: Sized {
+            fn pipe_ok(self) -> Result<Self> {
+                Ok(self)
+            }
+        }
+        impl<T> PipeOk for T {}
+
+        // An extractor that yields one symbol named after the source so
+        // attribution (symbols + attributed_semantic_text) is exercised.
+        struct NamingExtractor;
+        impl AtomicSymbolExtractor for NamingExtractor {
+            fn extract(&self, path: &str, source: &str) -> Vec<Symbol> {
+                vec![Symbol {
+                    file_path: path.to_string(),
+                    language: "rust".into(),
+                    kind: SymbolKind::Function,
+                    name: source.to_string(),
+                    qualified_name: None,
+                    sibling_names: Vec::new(),
+                    span_start: 0,
+                    span_end: 0,
+                    blob_sha: String::new(),
+                    source_text: String::new(),
+                }]
+            }
+        }
+
+        // Three hunks on "a.rs", two on "b.rs" — five hunks, two paths.
+        let records = vec![
+            record("c0", "a.rs"),
+            record("c0", "b.rs"),
+            record("c0", "a.rs"),
+            record("c0", "b.rs"),
+            record("c0", "a.rs"),
+        ];
+        let source = CountingSource {
+            calls: Mutex::new(Vec::new()),
+        };
+        let ah = AttributeStage::run(
+            &records,
+            "c0",
+            &source,
+            &NoSymbolSource,
+            &NamingExtractor,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(ah.len(), 5);
+
+        // file_at_commit must be called exactly once per unique path.
+        let calls = source.calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            2,
+            "file_at_commit should be deduped to one call per unique path, got {calls:?}"
+        );
+
+        // Behaviour must be byte-identical: same-path hunks attribute
+        // the same way they would without dedup.
+        for idx in [0usize, 2, 4] {
+            assert_eq!(
+                ah[idx].symbols.as_ref().unwrap()[0].name,
+                "source-of-a.rs"
+            );
+            assert_eq!(
+                ah[idx].attributed_semantic_text.as_deref(),
+                Some("source-of-a.rs\nx")
+            );
+        }
+        for idx in [1usize, 3] {
+            assert_eq!(
+                ah[idx].symbols.as_ref().unwrap()[0].name,
+                "source-of-b.rs"
+            );
+        }
     }
 
     #[tokio::test]
