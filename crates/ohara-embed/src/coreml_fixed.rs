@@ -111,6 +111,16 @@ fn build_model() -> Result<fastembed::TextEmbedding> {
     )
 }
 
+/// On-disk location for ORT's compiled-CoreML model cache, kept beside
+/// the downloaded model snapshots (under [`fastembed::get_cache_dir`]) so
+/// it persists across processes. Handed to the CoreML EP via
+/// `with_model_cache_dir`, this lets the ~30s MLProgram compile be paid
+/// once and reused, instead of recompiled on every `ohara index` run.
+#[cfg(any(all(feature = "coreml", target_os = "macos"), test))]
+fn coreml_cache_subdir(cache_root: &std::path::Path) -> std::path::PathBuf {
+    cache_root.join("ohara-coreml-compiled")
+}
+
 #[cfg(all(feature = "coreml", target_os = "macos"))]
 mod imp {
     use super::{FIXED_BATCH, FIXED_SEQ};
@@ -157,9 +167,16 @@ mod imp {
         };
         let udm =
             UserDefinedEmbeddingModel::new(patched, tokenizer_files).with_pooling(Pooling::Cls);
+        // Persist the compiled MLProgram so the ~30s compile is paid once
+        // per machine, not once per process. ORT keys the cache on graph
+        // structure; our graph is the same pinned model patched to the
+        // same `(32, 512)` dims every run, so subsequent runs hit the
+        // cache and load the precompiled model instead of recompiling.
+        let cache_dir = ensure_coreml_cache_dir()?;
         let eps = vec![CoreML::default()
             .with_model_format(ModelFormat::MLProgram)
             .with_compute_units(ComputeUnits::All)
+            .with_model_cache_dir(cache_dir.to_string_lossy())
             .build()];
         let opts = InitOptionsUserDefined::new()
             .with_execution_providers(eps)
@@ -178,6 +195,16 @@ mod imp {
                 ..Default::default()
             }));
         Ok(model)
+    }
+
+    /// Resolve and create the compiled-CoreML cache directory under the
+    /// fastembed cache root, returning the path to hand to the CoreML EP's
+    /// `with_model_cache_dir`. ORT requires the directory to exist.
+    fn ensure_coreml_cache_dir() -> Result<PathBuf> {
+        let dir = super::coreml_cache_subdir(&PathBuf::from(fastembed::get_cache_dir()));
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("creating CoreML compile cache at {}", dir.display()))?;
+        Ok(dir)
     }
 
     /// Locate the fp32 snapshot in the fastembed cache, downloading it
