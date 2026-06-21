@@ -421,6 +421,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn diff_mode_symbol_attributed_hunk_embeds_same_as_unattributed() {
+        // Issue #100 claim (a) regression guard. Two hunks share an
+        // identical `diff_text`; one carries symbol attribution
+        // (`attributed_semantic_text = Some(...)` — the prefix the
+        // attribute stage prepends), the other does not. In Diff mode
+        // the embedder input is `diff_text` only, so BOTH hunks MUST
+        // produce the same vector — the symbol signal is intentionally
+        // dropped from the Diff vector lane (see `EmbedMode::Diff`
+        // docs: "embedder input is `diff_text` only"). This documents
+        // the trade-off, not a bug: Diff mode is a distinct vector lane
+        // that requires `--rebuild` to switch into.
+        let dim = 6;
+        // Deterministic embedder: vector is derived from input length so
+        // identical inputs map to identical vectors and distinct inputs
+        // would differ — lets us assert "same vector" meaningfully.
+        struct LenEmbedder {
+            dim: usize,
+        }
+        #[async_trait]
+        impl EmbeddingProvider for LenEmbedder {
+            fn dimension(&self) -> usize {
+                self.dim
+            }
+            fn model_id(&self) -> &str {
+                "len"
+            }
+            async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+                Ok(texts
+                    .iter()
+                    .map(|t| vec![t.len() as f32; self.dim])
+                    .collect())
+            }
+        }
+
+        let attributed_hunk = AttributedHunk {
+            record: HunkRecord {
+                commit_sha: "abc".into(),
+                file_path: "f.rs".into(),
+                diff_text: "+    self.retry();\n".into(),
+                semantic_text: "+    self.retry();\n".into(),
+                source_hunk: Hunk::default(),
+            },
+            symbols: None,
+            // The symbol prefix the attribute stage would add. In
+            // Semantic/Off mode this changes the vector; in Diff mode
+            // it must NOT, because diff_text is the embedder input.
+            attributed_semantic_text: Some("retry_with_backoff\n+    self.retry();\n".into()),
+        };
+        let unattributed_hunk = AttributedHunk {
+            record: HunkRecord {
+                commit_sha: "abc".into(),
+                file_path: "g.rs".into(),
+                diff_text: "+    self.retry();\n".into(),
+                semantic_text: "+    self.retry();\n".into(),
+                source_hunk: Hunk::default(),
+            },
+            symbols: None,
+            attributed_semantic_text: None,
+        };
+
+        let embedder = Arc::new(LenEmbedder { dim });
+        let stage = EmbedStage::new(embedder).with_embed_mode(crate::EmbedMode::Diff);
+        let out = stage
+            .run("commit msg", &[attributed_hunk, unattributed_hunk])
+            .await
+            .unwrap();
+        assert_eq!(out.hunks.len(), 2);
+        assert_eq!(
+            out.hunks[0].embedding, out.hunks[1].embedding,
+            "Diff mode must embed identical diff_text identically regardless of symbol attribution"
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_mode_symbol_attribution_changes_the_vector() {
+        // Issue #100 claim (a) contrast guard. The same two hunks from
+        // `diff_mode_symbol_attributed_hunk_embeds_same_as_unattributed`
+        // (identical diff_text, one with a symbol prefix) must produce
+        // DIFFERENT vectors in Semantic/Off mode, because there the
+        // embedder input is `effective_semantic_text` — which includes
+        // the prepended symbol. Together the two tests show the symbol
+        // signal is dropped ONLY in Diff mode, by design.
+        let dim = 6;
+        struct LenEmbedder {
+            dim: usize,
+        }
+        #[async_trait]
+        impl EmbeddingProvider for LenEmbedder {
+            fn dimension(&self) -> usize {
+                self.dim
+            }
+            fn model_id(&self) -> &str {
+                "len"
+            }
+            async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+                Ok(texts
+                    .iter()
+                    .map(|t| vec![t.len() as f32; self.dim])
+                    .collect())
+            }
+        }
+
+        let attributed_hunk = AttributedHunk {
+            record: HunkRecord {
+                commit_sha: "abc".into(),
+                file_path: "f.rs".into(),
+                diff_text: "+    self.retry();\n".into(),
+                semantic_text: "+    self.retry();\n".into(),
+                source_hunk: Hunk::default(),
+            },
+            symbols: None,
+            attributed_semantic_text: Some("retry_with_backoff\n+    self.retry();\n".into()),
+        };
+        let unattributed_hunk = AttributedHunk {
+            record: HunkRecord {
+                commit_sha: "abc".into(),
+                file_path: "g.rs".into(),
+                diff_text: "+    self.retry();\n".into(),
+                semantic_text: "+    self.retry();\n".into(),
+                source_hunk: Hunk::default(),
+            },
+            symbols: None,
+            attributed_semantic_text: None,
+        };
+
+        let embedder = Arc::new(LenEmbedder { dim });
+        // Off mode (no cache) exercises the same effective_semantic_text
+        // path as Semantic without needing cache wiring.
+        let stage = EmbedStage::new(embedder);
+        let out = stage
+            .run("commit msg", &[attributed_hunk, unattributed_hunk])
+            .await
+            .unwrap();
+        assert_eq!(out.hunks.len(), 2);
+        assert_ne!(
+            out.hunks[0].embedding, out.hunks[1].embedding,
+            "Semantic/Off mode must reflect the symbol prefix in the vector"
+        );
+    }
+
+    #[tokio::test]
     async fn semantic_mode_second_run_reuses_cached_vectors_and_skips_embed() {
         // Plan 27 Task C.2: with EmbedMode::Semantic + a cache, the
         // first call embeds normally and writes to the cache; the
