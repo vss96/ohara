@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-06-21
+
+### Fixed
+
+- **A wedged daemon can no longer hang `ohara query` (or an MCP tool
+  call) indefinitely.** Each `ohara serve` IPC round-trip is now bounded
+  by a 30s timeout; on timeout the call transparently falls back to
+  in-process execution instead of blocking forever. The budget is
+  generous enough for a cold daemon servicing a heavy `find_pattern`
+  (embedding + cross-encoder rerank), but short enough that a stalled
+  daemon degrades within a bounded, noticeable window.
+
 ## [0.14.0] - 2026-06-14
 
 ### Added
@@ -656,7 +668,9 @@ the build-from-source path on older distros.
 - Pin rmcp to `=0.1.5` for stable API surface ([9935c7b](https://github.com/vss96/ohara/commit/9935c7bf369d6a7ecce5366d38ef43186b762599))
 - Drop dead `OharaServer::embedder` field ([0acf38a](https://github.com/vss96/ohara/commit/0acf38a97c5c2d9f35bec7f37009088647898512))
 
-[Unreleased]: https://github.com/vss96/ohara/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/vss96/ohara/compare/v0.14.1...HEAD
+[0.14.1]: https://github.com/vss96/ohara/compare/v0.14.0...v0.14.1
+[0.14.0]: https://github.com/vss96/ohara/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/vss96/ohara/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/vss96/ohara/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/vss96/ohara/compare/v0.10.0...v0.11.0
