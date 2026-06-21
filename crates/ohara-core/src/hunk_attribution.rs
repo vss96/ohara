@@ -375,6 +375,40 @@ mod tests {
     }
 
     #[test]
+    fn attribute_hunk_does_not_exact_span_a_symbol_outside_the_changed_range() {
+        // Issue #100 claim (b) regression guard. A method `alpha` is
+        // declared on line 1; the only changed line is line 3 (e.g. a
+        // whitespace-only edit to an unrelated trailing region). The
+        // symbol span (line 1) does NOT overlap the post-image range
+        // (line 3), so `attribute_hunk` MUST NOT emit `alpha` at
+        // ExactSpan. Confirms span/range overlap is validated in
+        // `hunk_attribution`, not blindly assigned 1.0 confidence.
+        let source = "fn alpha() {}\n\n\n";
+        // `alpha` occupies bytes 0..=12 → line 1 only.
+        let alpha_end = (source.find('\n').unwrap()) as u32;
+        let symbols = vec![fake_symbol("alpha", 0, alpha_end)];
+        // Diff touches only post-image line 3 (the blank tail), with no
+        // hunk-header context naming any symbol.
+        let diff = "@@ -3,1 +3,1 @@\n-\n+ \n";
+        let inputs = AttributionInputs {
+            diff_text: diff,
+            symbols: Some(&symbols),
+            source: Some(source),
+        };
+        let attrs = attribute_hunk(&inputs);
+        assert!(
+            attrs
+                .iter()
+                .all(|a| a.attribution != AttributionKind::ExactSpan),
+            "symbol declared outside the changed range must not be ExactSpan-attributed: {attrs:?}"
+        );
+        assert!(
+            attrs.iter().all(|a| a.name != "alpha"),
+            "alpha is outside the hunk range and must not be attributed at all: {attrs:?}"
+        );
+    }
+
+    #[test]
     fn attribute_hunk_prefers_exact_span_over_header_when_both_match_same_symbol() {
         let source = "fn fetch() { /*body*/ }\n";
         let end = (source.len() - 1) as u32; // exclude trailing newline
