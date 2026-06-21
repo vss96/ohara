@@ -37,14 +37,30 @@ pub fn cache_dir() -> PathBuf {
 /// Pure resolution, split out from environment access so it can be tested
 /// deterministically without mutating process-global env vars.
 fn resolve_cache_dir(
-    _fastembed_override: Option<OsString>,
-    _is_macos: bool,
-    _home: Option<OsString>,
-    _xdg_cache_home: Option<OsString>,
+    fastembed_override: Option<OsString>,
+    is_macos: bool,
+    home: Option<OsString>,
+    xdg_cache_home: Option<OsString>,
 ) -> PathBuf {
-    // RED stub: the legacy working-directory-relative behavior, to be
-    // replaced by the per-machine resolution.
-    PathBuf::from(".fastembed_cache")
+    // An explicit fastembed cache dir always wins (back-compat + opt-in
+    // per-project caches).
+    if let Some(dir) = fastembed_override {
+        return PathBuf::from(dir);
+    }
+    // Otherwise the OS cache root, matching `ohara-engine`'s daemon
+    // registry convention so every per-machine artifact lives under one
+    // `ohara` tree.
+    let root = if is_macos {
+        home.map(|h| PathBuf::from(h).join("Library/Caches/ohara"))
+    } else if let Some(xdg) = xdg_cache_home {
+        Some(PathBuf::from(xdg).join("ohara"))
+    } else {
+        home.map(|h| PathBuf::from(h).join(".cache").join("ohara"))
+    };
+    // If even HOME can't be resolved, fall back to fastembed's legacy
+    // working-directory cache — never worse than the prior behavior.
+    root.map(|r| r.join(MODELS_SUBDIR))
+        .unwrap_or_else(|| PathBuf::from(".fastembed_cache"))
 }
 
 #[cfg(test)]
