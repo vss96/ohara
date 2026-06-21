@@ -15,24 +15,32 @@
 use crate::query::reciprocal_rank_fusion;
 use crate::storage::{HunkHit, HunkId};
 use std::collections::HashMap;
+use std::sync::Arc;
 
-/// RRF-merge per-lane id rankings, truncate to `pool_k`, and materialize
-/// [`HunkHit`]s by looking each id up in `by_id`. Ids missing from the
-/// lookup (a programming error in the caller) are silently dropped —
-/// the same behavior the coordinator had before extraction.
+/// RRF-merge per-lane id rankings, truncate to `pool_k`, and gather the
+/// matching [`HunkHit`]s by looking each id up in `by_id`. Ids missing
+/// from the lookup (a programming error in the caller) are silently
+/// dropped — the same behavior the coordinator had before extraction.
+///
+/// Hits are shared via [`Arc::clone`] (a refcount bump), not deep-cloned:
+/// the returned `Arc`s point at the same allocations held in `by_id`.
+/// Owned [`HunkHit`]s are materialized only at the rerank/recency
+/// boundary, where the score is mutated (see [`coordinator`]).
 ///
 /// `rrf_k` is the smoothing constant; see [`reciprocal_rank_fusion`].
+///
+/// [`coordinator`]: crate::retriever::coordinator
 pub fn fuse_to_pool(
     rankings: &[Vec<HunkId>],
-    by_id: &HashMap<HunkId, HunkHit>,
+    by_id: &HashMap<HunkId, Arc<HunkHit>>,
     rrf_k: u32,
     pool_k: usize,
-) -> Vec<HunkHit> {
+) -> Vec<Arc<HunkHit>> {
     let fused = reciprocal_rank_fusion(rankings, rrf_k);
     fused
         .into_iter()
         .take(pool_k)
-        .filter_map(|id| by_id.get(&id).cloned())
+        .filter_map(|id| by_id.get(&id).map(Arc::clone))
         .collect()
 }
 
@@ -93,18 +101,22 @@ mod tests {
         }
     }
 
+    fn by_id_map(hits: impl IntoIterator<Item = HunkHit>) -> HashMap<HunkId, Arc<HunkHit>> {
+        hits.into_iter().map(|h| (h.hunk_id, Arc::new(h))).collect()
+    }
+
     #[test]
     fn fuse_to_pool_orders_two_lane_ids_above_single_lane() {
-        let h1 = make_hit(1, 0, 0.9);
-        let h2 = make_hit(2, 0, 0.5);
-        let h3 = make_hit(3, 0, 0.4);
         let rankings = vec![
             vec![1, 2], // lane A
             vec![2, 1], // lane B
             vec![3],    // lane C
         ];
-        let by_id: HashMap<HunkId, HunkHit> =
-            [h1, h2, h3].into_iter().map(|h| (h.hunk_id, h)).collect();
+        let by_id = by_id_map([
+            make_hit(1, 0, 0.9),
+            make_hit(2, 0, 0.5),
+            make_hit(3, 0, 0.4),
+        ]);
         let out = fuse_to_pool(&rankings, &by_id, 60, 10);
         assert_eq!(out.len(), 3, "all three unique ids survive rrf");
         assert!(
@@ -115,8 +127,7 @@ mod tests {
 
     #[test]
     fn fuse_to_pool_truncates_to_pool_k() {
-        let by_id: HashMap<HunkId, HunkHit> =
-            (1..=5).map(|id| (id, make_hit(id, 0, 0.5))).collect();
+        let by_id = by_id_map((1..=5).map(|id| make_hit(id, 0, 0.5)));
         let rankings = vec![vec![1, 2, 3, 4, 5]];
         let out = fuse_to_pool(&rankings, &by_id, 60, 2);
         assert_eq!(out.len(), 2);
@@ -126,9 +137,26 @@ mod tests {
 
     #[test]
     fn fuse_to_pool_empty_rankings_returns_empty() {
-        let by_id: HashMap<HunkId, HunkHit> = HashMap::new();
+        let by_id: HashMap<HunkId, Arc<HunkHit>> = HashMap::new();
         let out = fuse_to_pool(&[], &by_id, 60, 10);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn fuse_to_pool_shares_hits_via_arc_not_deep_clone() {
+        // The core of issue #112: the pool must reuse the `Arc`s held in
+        // `by_id` (a refcount bump) rather than deep-cloning each survivor.
+        // Pointer identity is the proof — a `.cloned()` deep clone would
+        // allocate a fresh `HunkHit` and fail `Arc::ptr_eq`.
+        let by_id = by_id_map([make_hit(1, 0, 0.9), make_hit(2, 0, 0.5)]);
+        let rankings = vec![vec![1, 2]];
+        let out = fuse_to_pool(&rankings, &by_id, 60, 10);
+        assert_eq!(out.len(), 2);
+        assert!(
+            Arc::ptr_eq(&out[0], &by_id[&1]),
+            "pooled hit must share the same allocation as the by_id entry"
+        );
+        assert!(Arc::ptr_eq(&out[1], &by_id[&2]));
     }
 
     #[test]
