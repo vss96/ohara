@@ -2,6 +2,7 @@
 //! `--profile` JSON dump and the human-readable summary + per-phase bar
 //! chart. Pure formatting — no I/O beyond returning strings.
 
+use crate::commands::format::fmt_duration_ms;
 use ohara_core::PhaseTimings;
 
 /// Render `PhaseTimings` as the JSON object emitted by `--profile`.
@@ -112,14 +113,6 @@ pub fn index_summary_human(
     }
 
     out
-}
-
-fn fmt_duration_ms(ms: u64) -> String {
-    if ms >= 1000 {
-        format!("{:.1}s", ms as f64 / 1000.0)
-    } else {
-        format!("{ms}ms")
-    }
 }
 
 #[cfg(test)]
