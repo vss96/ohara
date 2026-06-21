@@ -2,6 +2,7 @@
 //! and `ohara_core::RerankProvider`.
 
 pub mod batching;
+pub mod cache;
 pub mod coreml_fixed;
 pub mod fastembed;
 pub(crate) mod idle_slot;

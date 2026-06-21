@@ -139,8 +139,9 @@ impl FastEmbedProvider {
     /// downloaded on first run; size is comparable to the full-precision
     /// model since the optimized ONNX export is ~33MB.
     pub fn with_provider(provider: EmbedProvider) -> Result<Self> {
-        let opts =
-            InitOptions::new(EmbeddingModel::BGESmallENV15Q).with_show_download_progress(false);
+        let opts = InitOptions::new(EmbeddingModel::BGESmallENV15Q)
+            .with_show_download_progress(false)
+            .with_cache_dir(crate::cache::cache_dir());
         let opts = apply_provider_to_init(opts, provider)?;
         let model = TextEmbedding::try_new(opts)
             .context("loading BGE-small (quantized) model (downloads ~33MB on first run)")?;
@@ -290,7 +291,8 @@ impl FastEmbedReranker {
         match choice {
             RerankerChoice::Base => {
                 let opts = RerankInitOptions::new(RerankerModel::BGERerankerBase)
-                    .with_show_download_progress(false);
+                    .with_show_download_progress(false)
+                    .with_cache_dir(crate::cache::cache_dir());
                 let opts = apply_provider_to_rerank(opts, provider)?;
                 let model = TextRerank::try_new(opts)
                     .context("loading BGE-reranker-base (downloads ~110MB on first run)")?;
