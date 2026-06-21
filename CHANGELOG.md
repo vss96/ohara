@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-06-21
+
+### Changed
+
+- **CoreML indexing reuses the compiled model across runs.** On Apple
+  Silicon the fixed-shape CoreML embedder now persists its compiled
+  MLProgram (in `ohara-coreml-compiled/` under the model cache) and
+  reuses it, instead of recompiling on every `ohara index` invocation —
+  the ~30s CoreML compile is paid once per machine, then skipped. The
+  ~130MB model download was already one-time; this removes the
+  remaining per-run cost. Best-effort: if the cache directory can't be
+  created it falls back to compiling without a persistent cache.
+
 ## [0.14.1] - 2026-06-21
 
 ### Fixed
@@ -668,7 +681,8 @@ the build-from-source path on older distros.
 - Pin rmcp to `=0.1.5` for stable API surface ([9935c7b](https://github.com/vss96/ohara/commit/9935c7bf369d6a7ecce5366d38ef43186b762599))
 - Drop dead `OharaServer::embedder` field ([0acf38a](https://github.com/vss96/ohara/commit/0acf38a97c5c2d9f35bec7f37009088647898512))
 
-[Unreleased]: https://github.com/vss96/ohara/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/vss96/ohara/compare/v0.14.2...HEAD
+[0.14.2]: https://github.com/vss96/ohara/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/vss96/ohara/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/vss96/ohara/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/vss96/ohara/compare/v0.12.0...v0.13.0

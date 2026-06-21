@@ -1,6 +1,6 @@
 {
   "name": "ohara-plugin",
-  "version": "0.14.1",
+  "version": "0.14.2",
   "description": "Claude Code plugin for ohara — local-first git-history lineage engine",
   "private": true,
   "bin": {
