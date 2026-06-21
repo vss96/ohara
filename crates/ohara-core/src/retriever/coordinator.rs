@@ -48,32 +48,49 @@ pub async fn run(
     let lane_futures = lanes.iter().map(|l| l.search(query, repo_id, lane_k));
     let lane_results: Vec<crate::Result<Vec<HunkHit>>> = join_all(lane_futures).await;
 
-    // 2. Build per-lane ranked id lists + a HunkId -> HunkHit lookup.
+    // 2. Build per-lane ranked id lists + a HunkId -> Arc<HunkHit> lookup.
     //    The first lane to report an id wins for similarity; downstream
-    //    rerank/recency steps overwrite this anyway.
-    let mut by_id: HashMap<HunkId, HunkHit> = HashMap::new();
+    //    rerank/recency steps overwrite this anyway. Each hit is moved
+    //    into the map once (no clone) and shared by refcount thereafter.
+    let mut by_id: HashMap<HunkId, Arc<HunkHit>> = HashMap::new();
     let mut rankings: Vec<Vec<HunkId>> = Vec::with_capacity(lanes.len());
     for result in lane_results {
         let hits = result?;
         let ranking: Vec<HunkId> = hits
-            .iter()
+            .into_iter()
             .map(|h| {
-                by_id.entry(h.hunk_id).or_insert_with(|| h.clone());
-                h.hunk_id
+                let id = h.hunk_id;
+                // `or_insert_with` consumes `h` only on the first sighting
+                // of an id; later duplicates from other lanes drop it.
+                by_id.entry(id).or_insert_with(|| Arc::new(h));
+                id
             })
             .collect();
         rankings.push(ranking);
     }
 
-    // 3. RRF fuse + truncate to rerank pool.
-    let pool: Vec<HunkHit> = timed_phase("rrf", async {
+    // 3. RRF fuse + truncate to rerank pool. `fuse_to_pool` shares hits
+    //    via `Arc::clone` (refcount bumps), not deep clones.
+    let arc_pool: Vec<Arc<HunkHit>> = timed_phase("rrf", async {
         ranking::fuse_to_pool(&rankings, &by_id, weights.rrf_k, weights.rerank_top_k)
     })
     .await;
 
-    if pool.is_empty() {
+    if arc_pool.is_empty() {
         return Ok(vec![]);
     }
+
+    // Materialize owned hits for the rerank/recency boundary, which
+    // mutates `similarity`. RRF dedups ids, so each pooled `Arc` is
+    // unique; dropping `by_id` releases its refs so `try_unwrap`
+    // reclaims every survivor in place — no deep clone. (The fallback
+    // clone only fires if an `Arc` is unexpectedly still shared, which
+    // the legacy code did unconditionally for every hit, twice.)
+    drop(by_id);
+    let pool: Vec<HunkHit> = arc_pool
+        .into_iter()
+        .map(|h| Arc::try_unwrap(h).unwrap_or_else(|h| (*h).clone()))
+        .collect();
 
     // 4. Optional cross-encoder rerank.
     let mut hits = pool;
