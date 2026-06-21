@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Embedding models and the CoreML compile cache now live in a stable
+  per-machine location instead of per working directory.** They were
+  resolved through fastembed's default `.fastembed_cache`, which is
+  relative to the current directory — so indexing a second repo from a
+  different directory re-downloaded the ~130MB model *and* re-paid the
+  ~30s CoreML compile (#108), even though both artifacts are identical.
+  They now resolve to `~/Library/Caches/ohara/models` (macOS) or
+  `${XDG_CACHE_HOME:-~/.cache}/ohara/models` (Linux), matching the daemon
+  cache convention, so the download and compile are genuinely paid once
+  per machine (as 0.14.2 intended). Set `FASTEMBED_CACHE_DIR` to override
+  — e.g. to pin a per-project cache. On upgrade the model re-downloads
+  once into the new location; the old per-directory `.fastembed_cache`
+  folders can be deleted.
+
 ## [0.14.2] - 2026-06-21
 
 ### Changed
