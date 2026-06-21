@@ -111,6 +111,16 @@ fn build_model() -> Result<fastembed::TextEmbedding> {
     )
 }
 
+/// On-disk location for ORT's compiled-CoreML model cache, kept beside
+/// the downloaded model snapshots (under [`fastembed::get_cache_dir`]) so
+/// it persists across processes. Handed to the CoreML EP via
+/// `with_model_cache_dir`, this lets the ~30s MLProgram compile be paid
+/// once and reused, instead of recompiled on every `ohara index` run.
+#[cfg(any(all(feature = "coreml", target_os = "macos"), test))]
+fn coreml_cache_subdir(cache_root: &std::path::Path) -> std::path::PathBuf {
+    cache_root.join("ohara-coreml-compiled")
+}
+
 #[cfg(all(feature = "coreml", target_os = "macos"))]
 mod imp {
     use super::{FIXED_BATCH, FIXED_SEQ};
@@ -157,10 +167,30 @@ mod imp {
         };
         let udm =
             UserDefinedEmbeddingModel::new(patched, tokenizer_files).with_pooling(Pooling::Cls);
-        let eps = vec![CoreML::default()
+        // Persist the compiled MLProgram so the ~30s compile is paid once
+        // per machine, not once per process. ORT keys the cache on graph
+        // structure; our graph is the same pinned model patched to the
+        // same `(32, 512)` dims every run, so subsequent runs hit the
+        // cache and load the precompiled model instead of recompiling.
+        //
+        // Best-effort: caching is an optimization, so if the cache dir
+        // can't be created (read-only/shared cache root) we log and
+        // compile without it — the prior behavior — rather than failing
+        // the whole index pass.
+        let coreml = CoreML::default()
             .with_model_format(ModelFormat::MLProgram)
-            .with_compute_units(ComputeUnits::All)
-            .build()];
+            .with_compute_units(ComputeUnits::All);
+        let coreml = match ensure_coreml_cache_dir() {
+            Ok(cache_dir) => coreml.with_model_cache_dir(cache_dir.to_string_lossy()),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "CoreML compile cache unavailable; continuing without persistent cache"
+                );
+                coreml
+            }
+        };
+        let eps = vec![coreml.build()];
         let opts = InitOptionsUserDefined::new()
             .with_execution_providers(eps)
             .with_max_length(FIXED_SEQ);
@@ -178,6 +208,16 @@ mod imp {
                 ..Default::default()
             }));
         Ok(model)
+    }
+
+    /// Resolve and create the compiled-CoreML cache directory under the
+    /// fastembed cache root, returning the path to hand to the CoreML EP's
+    /// `with_model_cache_dir`. ORT requires the directory to exist.
+    fn ensure_coreml_cache_dir() -> Result<PathBuf> {
+        let dir = super::coreml_cache_subdir(&PathBuf::from(fastembed::get_cache_dir()));
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("creating CoreML compile cache at {}", dir.display()))?;
+        Ok(dir)
     }
 
     /// Locate the fp32 snapshot in the fastembed cache, downloading it
@@ -248,6 +288,18 @@ mod tests {
         let chunk: Vec<String> = (0..4).map(|i| format!("row {i}")).collect();
         let padded = pad_rows(&chunk, 4);
         assert_eq!(padded, chunk);
+    }
+
+    #[test]
+    fn coreml_cache_subdir_sits_beside_the_model_cache() {
+        // The compiled-CoreML cache MUST live at a stable, model-cache-
+        // relative location so a warm cache survives across `ohara index`
+        // runs (moving it would silently force the ~30s recompile again).
+        let root = std::path::Path::new("/tmp/fe-cache");
+        assert_eq!(
+            coreml_cache_subdir(root),
+            std::path::Path::new("/tmp/fe-cache/ohara-coreml-compiled"),
+        );
     }
 
     #[cfg(not(all(feature = "coreml", target_os = "macos")))]
