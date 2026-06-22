@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-06-22
+
+### Changed
+
+- **Lower per-hunk indexing and per-query retrieval overhead (internal,
+  no behavior change).** Indexing computes each hunk's content hash once
+  instead of twice and borrows embedder inputs instead of cloning them
+  (#115), and the attribute stage deduplicates repeated `file_at_commit`
+  blob reads while dropping a discarded per-hunk head-symbol lookup
+  (#114). Retrieval shares each `HunkHit` via `Arc` to drop a redundant
+  double clone on every query (#113). Same index, same results.
+
 ### Fixed
 
 - **Embedding models and the CoreML compile cache now live in a stable
@@ -697,7 +709,8 @@ the build-from-source path on older distros.
 - Pin rmcp to `=0.1.5` for stable API surface ([9935c7b](https://github.com/vss96/ohara/commit/9935c7bf369d6a7ecce5366d38ef43186b762599))
 - Drop dead `OharaServer::embedder` field ([0acf38a](https://github.com/vss96/ohara/commit/0acf38a97c5c2d9f35bec7f37009088647898512))
 
-[Unreleased]: https://github.com/vss96/ohara/compare/v0.14.2...HEAD
+[Unreleased]: https://github.com/vss96/ohara/compare/v0.14.3...HEAD
+[0.14.3]: https://github.com/vss96/ohara/compare/v0.14.2...v0.14.3
 [0.14.2]: https://github.com/vss96/ohara/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/vss96/ohara/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/vss96/ohara/compare/v0.13.0...v0.14.0
