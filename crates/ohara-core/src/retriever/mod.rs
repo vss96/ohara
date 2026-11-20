@@ -186,8 +186,11 @@ impl Retriever {
         let out: Vec<PatternHit> = raw_hits
             .into_iter()
             .map(|h| {
-                let age_days = ((now_unix - h.commit.ts).max(0) as f32) / 86_400.0;
-                let recency = (-age_days / effective_weights.recency_half_life_days).exp();
+                let recency = ranking::recency_factor(
+                    h.commit.ts,
+                    now_unix,
+                    effective_weights.recency_half_life_days,
+                );
                 let date = DateTime::<Utc>::from_timestamp(h.commit.ts, 0)
                     .map(|d| d.to_rfc3339())
                     .unwrap_or_default();

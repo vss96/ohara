@@ -44,6 +44,27 @@ pub fn fuse_to_pool(
         .collect()
 }
 
+/// Exp-decay recency factor in `[0, 1]`: `exp(-age_days / half_life_days)`
+/// where `age_days` is `now_unix - commit_ts` (floored at 0).
+///
+/// Total over all inputs:
+/// - the age subtraction saturates instead of overflowing `i64`;
+/// - a zero-age commit always gets `1.0` (`exp(0)` for any decay rate);
+/// - a non-positive or NaN `half_life_days` is treated as its `0+`
+///   limit — instant decay — so older commits get `0.0` instead of
+///   `NaN` (`-0.0 / 0.0`) or an exploding `exp(+x)` for negatives.
+pub(crate) fn recency_factor(commit_ts: i64, now_unix: i64, half_life_days: f32) -> f32 {
+    let age_secs = now_unix.saturating_sub(commit_ts).max(0);
+    if age_secs == 0 {
+        return 1.0;
+    }
+    if half_life_days.is_nan() || half_life_days <= 0.0 {
+        return 0.0;
+    }
+    let age_days = age_secs as f32 / 86_400.0;
+    (-age_days / half_life_days).exp()
+}
+
 /// Apply the exp-decay recency multiplier:
 /// `final = similarity * (1.0 + recency_weight * exp(-age_days / half_life_days))`.
 ///
@@ -63,8 +84,7 @@ pub fn apply_recency(
     let mut scored: Vec<(HunkHit, f32)> = hits
         .into_iter()
         .map(|mut h| {
-            let age_days = ((now_unix - h.commit.ts).max(0) as f32) / 86_400.0;
-            let recency = (-age_days / recency_half_life_days).exp();
+            let recency = recency_factor(h.commit.ts, now_unix, recency_half_life_days);
             let combined = h.similarity * (1.0 + recency_weight * recency);
             h.similarity = combined;
             (h, combined)
@@ -208,6 +228,35 @@ mod tests {
         assert!(out.is_empty());
     }
 
+    #[test]
+    fn apply_recency_does_not_overflow_on_extreme_timestamps() {
+        // Regression for #120: `now_unix - ts` overflowed i64 (panic in
+        // debug builds) for the proptest-shrunk input below.
+        let out = apply_recency(
+            vec![make_hit(1, 1_516_920_528_225_666_549, 0.5)],
+            1.0,
+            90.0,
+            -7_706_451_508_629_109_260,
+        );
+        assert_eq!(out.len(), 1);
+        assert!(out[0].similarity.is_finite());
+        let out = apply_recency(vec![make_hit(1, i64::MIN, 0.5)], 1.0, 90.0, i64::MAX);
+        // Astronomically old commit: recency factor decays to ~0.
+        assert!((out[0].similarity - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn apply_recency_zero_half_life_is_not_nan() {
+        // Regression for #120: age 0 with half_life 0 computed
+        // `exp(-0.0 / 0.0)` = NaN. A zero-age hit keeps its full boost
+        // (exp(0) = 1 for any decay rate); older hits decay instantly.
+        let now = 1_700_000_000;
+        let out = apply_recency(vec![make_hit(1, now, 0.5)], 1.0, 0.0, now);
+        assert!((out[0].similarity - 1.0).abs() < 1e-6);
+        let out = apply_recency(vec![make_hit(1, now - 86_400, 0.5)], 1.0, 0.0, now);
+        assert!((out[0].similarity - 0.5).abs() < 1e-6);
+    }
+
     mod proptests {
         use super::*;
         use proptest::prelude::*;
@@ -267,7 +316,6 @@ mod tests {
             }
 
             #[test]
-            #[ignore = "tracked in #120: apply_recency overflows i64 on (now_unix - ts) and produces NaN when recency_half_life_days == 0.0"]
             fn apply_recency_never_overflows_or_produces_nan_on_extreme_inputs(
                 ts in any::<i64>(),
                 now in any::<i64>(),
