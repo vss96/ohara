@@ -51,8 +51,14 @@ const AUTH_MARKERS: [&str; 4] = ["not logged in", "unauthorized", "401", "login"
 
 /// Classify a failed run from the tail of its output. Shared by all adapters.
 pub fn classify_failure(stdout_tail: &str) -> AgentStatus {
-    let _ = (stdout_tail, RATE_LIMIT_MARKERS, AUTH_MARKERS);
-    unimplemented!("red")
+    let lower = stdout_tail.to_lowercase();
+    if RATE_LIMIT_MARKERS.iter().any(|m| lower.contains(m)) {
+        return AgentStatus::RateLimited;
+    }
+    if AUTH_MARKERS.iter().any(|m| lower.contains(m)) {
+        return AgentStatus::AuthFailed;
+    }
+    AgentStatus::Crashed
 }
 
 #[cfg(test)]

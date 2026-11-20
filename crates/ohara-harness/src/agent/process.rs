@@ -38,11 +38,94 @@ pub async fn run_streaming(
     deadline: Deadline,
     transcript: &Path,
 ) -> Result<ProcessExit> {
-    let _ = (argv, stdin, cwd, deadline, transcript);
-    unimplemented!("red")
+    let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| Error::Runtime("empty command".to_string()))?;
+    if let Some(parent) = transcript.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let mut log = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(transcript)
+        .await?;
+
+    let mut child = Command::new(program)
+        .args(args)
+        .current_dir(cwd)
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let mut readers = Vec::new();
+    if let Some(out) = child.stdout.take() {
+        readers.push(tokio::spawn(pump(out, tx.clone())));
+    }
+    if let Some(err) = child.stderr.take() {
+        readers.push(tokio::spawn(pump(err, tx.clone())));
+    }
+    drop(tx);
+    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
+        tokio::spawn(async move {
+            if let Err(e) = pipe.write_all(text.as_bytes()).await {
+                tracing::debug!("agent stdin write failed: {e}");
+            }
+        });
+    }
+
+    let sleep = tokio::time::sleep(until(deadline));
+    tokio::pin!(sleep);
+    let mut tail: Vec<u8> = Vec::new();
+    let mut killed = false;
+    loop {
+        tokio::select! {
+            chunk = rx.recv() => {
+                match chunk {
+                    Some(chunk) => {
+                        log.write_all(&chunk).await?;
+                        push_tail(&mut tail, &chunk);
+                    }
+                    None => break,
+                }
+            }
+            _ = &mut sleep => {
+                killed = true;
+                break;
+            }
+        }
+    }
+
+    if killed {
+        if let Err(e) = child.start_kill() {
+            tracing::warn!("kill at deadline failed: {e}");
+        }
+        for r in &readers {
+            r.abort();
+        }
+    }
+    let status = match killed {
+        true => tokio::time::timeout(REAP_GRACE, child.wait()).await.ok(),
+        false => Some(child.wait().await),
+    };
+    log.flush().await?;
+    let code = match status {
+        Some(res) => res?.code(),
+        None => None,
+    };
+    Ok(ProcessExit {
+        code,
+        stdout_tail: String::from_utf8_lossy(&tail).into_owned(),
+        killed_at_deadline: killed,
+    })
 }
 
-#[allow(dead_code)]
 fn until(deadline: Deadline) -> Duration {
     (deadline.0 - chrono::Utc::now())
         .to_std()
