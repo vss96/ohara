@@ -552,3 +552,79 @@ async fn blame_cache_does_not_cross_worktrees() {
         "worktree blame must not be served from main's cache entry"
     );
 }
+
+// ---- plan-33: per-worktree visibility ----
+
+fn frobnicate_query() -> ohara_core::query::PatternQuery {
+    ohara_core::query::PatternQuery {
+        query: "frobnicate retry".into(),
+        k: 10,
+        language: None,
+        since_unix: None,
+        no_rerank: true,
+    }
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn run_branch_commit_is_visible_only_from_its_own_worktree() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (main, slot1) = repo_with_worktree().await;
+    let repo = git2::Repository::open(main.path()).unwrap();
+    let slot2 = main.path().join(".wt").join("slot-2");
+    repo.worktree("slot-2", &slot2, None).unwrap();
+    let slot2 = std::fs::canonicalize(slot2).unwrap();
+
+    let wt_repo = git2::Repository::open(&slot1).unwrap();
+    let w = commit_file(
+        &wt_repo,
+        "retry.rs",
+        "fn frobnicate_retry() { /* frobnicate retry with backoff */ }\n",
+        "add frobnicate retry",
+    )
+    .to_string();
+    index_checkout(&slot1).await;
+
+    let engine = make_test_engine();
+    let from_slot1 = engine
+        .find_pattern(&slot1, frobnicate_query())
+        .await
+        .expect("slot-1");
+    assert!(
+        from_slot1.hits.iter().any(|h| h.commit_sha == w),
+        "slot-1 must see W, got {:?}",
+        from_slot1
+            .hits
+            .iter()
+            .map(|h| &h.commit_sha)
+            .collect::<Vec<_>>()
+    );
+    for (name, path) in [("main", main.path()), ("slot-2", slot2.as_path())] {
+        let out = engine
+            .find_pattern(path, frobnicate_query())
+            .await
+            .expect(name);
+        assert!(
+            out.hits.iter().all(|h| h.commit_sha != w),
+            "{name} must not see W"
+        );
+    }
+    assert!(engine.ancestry_filtered_queries() >= 2);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn filter_is_skipped_when_every_tip_is_visible() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (main, _slot1) = repo_with_worktree().await;
+    let engine = make_test_engine();
+    engine
+        .find_pattern(main.path(), frobnicate_query())
+        .await
+        .expect("find_pattern");
+    assert_eq!(engine.ancestry_filtered_queries(), 0);
+}

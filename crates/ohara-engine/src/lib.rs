@@ -15,6 +15,7 @@ pub mod registry;
 mod runtime_metadata;
 pub mod server;
 
+pub use cache::AncestryCache;
 pub use cache::BlameCache;
 pub use cache::EmbeddingCache;
 pub use cache::MetaCache;
