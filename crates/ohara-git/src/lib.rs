@@ -19,7 +19,7 @@ pub mod walker;
 pub use blame::Blamer;
 pub use head::read_head;
 pub use identity::RepoIdentity;
-pub use visibility::{reachable_commit_shas, GitVisibility};
+pub use visibility::{any_unreachable, reachable_commit_shas, GitVisibility};
 pub use walker::GitWalker;
 
 use anyhow::Result;

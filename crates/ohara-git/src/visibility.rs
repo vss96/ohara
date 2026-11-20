@@ -62,20 +62,7 @@ impl CommitVisibility for GitVisibility {
 /// including detached ones. Used by prune. Works from the main repo path or
 /// from a linked worktree path.
 pub fn reachable_commit_shas(path: &Path) -> Result<HashSet<String>> {
-    let repo = git2::Repository::discover(path)?;
-    // Linked worktree: enumerate from the main repository that owns it.
-    let main = match repo.is_worktree() {
-        true => {
-            // `.git/worktrees/<name>/` -> the shared `.git` dir two levels up.
-            let common = repo
-                .path()
-                .parent()
-                .and_then(Path::parent)
-                .ok_or_else(|| anyhow!("worktree gitdir has no common dir"))?;
-            git2::Repository::open(common)?
-        }
-        false => repo,
-    };
+    let main = main_repo(path)?;
     let mut walk = main.revwalk()?;
     walk.push_glob("refs/*")?;
     match walk.push_head() {
@@ -83,6 +70,93 @@ pub fn reachable_commit_shas(path: &Path) -> Result<HashSet<String>> {
         Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {}
         Err(e) => return Err(anyhow::Error::new(e).context("push main HEAD")),
     }
+    for oid in worktree_heads(&main)? {
+        walk.push(oid)
+            .with_context(|| format!("push worktree HEAD {oid}"))?;
+    }
+    let mut out = HashSet::new();
+    for oid in walk {
+        out.insert(oid?.to_string());
+    }
+    Ok(out)
+}
+
+/// True when at least one of `commits` is reached by no ref (`refs/*`), no
+/// main HEAD and no worktree HEAD — the same roots as
+/// [`reachable_commit_shas`]. A commit the repository does not have counts
+/// as unreachable. Checks each commit by ancestry against the roots and
+/// stops at the first unreachable one, so it is much cheaper than listing
+/// every reachable commit. Errors mean "unknown"; callers deciding whether
+/// to prune should treat them as `true` (prune itself fails closed).
+pub fn any_unreachable(path: &Path, commits: &[CommitSha]) -> Result<bool> {
+    if commits.is_empty() {
+        return Ok(false);
+    }
+    let main = main_repo(path)?;
+    let roots = liveness_roots(&main)?;
+    for c in commits {
+        let oid = git2::Oid::from_str(c.as_str())?;
+        if main.find_commit(oid).is_err() {
+            return Ok(true);
+        }
+        if !reached_by_any(&main, &roots, oid)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether `oid` is one of `roots` or an ancestor of one.
+fn reached_by_any(repo: &git2::Repository, roots: &[git2::Oid], oid: git2::Oid) -> Result<bool> {
+    for root in roots {
+        if *root == oid || repo.graph_descendant_of(*root, oid)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Commits every ref, the main HEAD and every worktree HEAD point at.
+fn liveness_roots(main: &git2::Repository) -> Result<Vec<git2::Oid>> {
+    let mut roots = Vec::new();
+    for r in main.references()? {
+        // A ref that does not peel to a commit (e.g. a tag on a tree)
+        // reaches no commits, as in the revwalk of `reachable_commit_shas`.
+        if let Ok(c) = r?.peel_to_commit() {
+            roots.push(c.id());
+        }
+    }
+    match main.head() {
+        Ok(h) => roots.push(h.peel_to_commit().context("peel main HEAD")?.id()),
+        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {}
+        Err(e) => return Err(anyhow::Error::new(e).context("read main HEAD")),
+    }
+    roots.extend(worktree_heads(main)?);
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
+}
+
+/// The main repository owning the repo or linked worktree at `path`.
+fn main_repo(path: &Path) -> Result<git2::Repository> {
+    let repo = git2::Repository::discover(path)?;
+    if !repo.is_worktree() {
+        return Ok(repo);
+    }
+    // `.git/worktrees/<name>/` -> the shared `.git` dir two levels up.
+    let common = repo
+        .path()
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| anyhow!("worktree gitdir has no common dir"))?;
+    Ok(git2::Repository::open(common)?)
+}
+
+/// The HEAD commit of every linked worktree of `main`, detached ones
+/// included. Unopenable worktrees and unborn HEADs are skipped with a
+/// warning; any other HEAD read error fails.
+fn worktree_heads(main: &git2::Repository) -> Result<Vec<git2::Oid>> {
+    let mut out = Vec::new();
     for name in main.worktrees()?.iter().flatten() {
         let wt_repo = match main
             .find_worktree(name)
@@ -108,12 +182,7 @@ pub fn reachable_commit_shas(path: &Path) -> Result<HashSet<String>> {
             tracing::debug!(worktree = %name, "worktree HEAD has no direct target; skipping");
             continue;
         };
-        walk.push(oid)
-            .with_context(|| format!("push HEAD {oid} of worktree {name}"))?;
-    }
-    let mut out = HashSet::new();
-    for oid in walk {
-        out.insert(oid?.to_string());
+        out.push(oid);
     }
     Ok(out)
 }
