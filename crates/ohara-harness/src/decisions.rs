@@ -233,13 +233,39 @@ pub fn propose_decision_tool_name() -> String {
 
 /// Write an MCP config that runs `ohara-mcp --harness-task <id>` and return
 /// its path (`<dir>/mcp.json`).
+///
+/// The command is the `ohara-mcp` next to the running executable (a stale one
+/// on `PATH` may not know `--harness-task`), and the server entry pins
+/// `OHARA_HOME`: some runtimes start MCP servers with a cleared environment,
+/// and a different home would mean a different `harness.sqlite`.
 pub fn mcp_config_for(task: &TaskId, dir: &Path) -> Result<PathBuf> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf));
+    let home = ohara_core::paths::ohara_home()?;
+    mcp_config_with(task, dir, exe_dir.as_deref(), &home)
+}
+
+/// [`mcp_config_for`] with the executable directory and `OHARA_HOME` supplied.
+/// Falls back to the bare `ohara-mcp` name when no sibling binary exists.
+pub fn mcp_config_with(
+    task: &TaskId,
+    dir: &Path,
+    exe_dir: Option<&Path>,
+    home: &Path,
+) -> Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
+    let command = exe_dir
+        .map(|d| d.join("ohara-mcp"))
+        .filter(|p| p.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "ohara-mcp".to_string());
     let config = serde_json::json!({
         "mcpServers": {
             MCP_SERVER_NAME: {
-                "command": "ohara-mcp",
+                "command": command,
                 "args": ["--harness-task", task.to_string()],
+                "env": { "OHARA_HOME": home.to_string_lossy() },
             }
         }
     });
@@ -644,18 +670,43 @@ mod tests {
         );
     }
 
+    fn server_entry(path: &Path) -> serde_json::Value {
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        v["mcpServers"][MCP_SERVER_NAME].clone()
+    }
+
     #[test]
     fn mcp_config_names_the_harness_task() {
         let dir = tempfile::tempdir().unwrap();
+        let exe_dir = tempfile::tempdir().unwrap();
+        let bin = exe_dir.path().join("ohara-mcp");
+        std::fs::write(&bin, "").unwrap();
+        let home = Path::new("/var/ohara-home");
         let task = TaskId::new();
-        let path = mcp_config_for(&task, dir.path()).unwrap();
-        let v: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        let server = &v["mcpServers"]["ohara"];
-        assert_eq!(server["command"], "ohara-mcp");
+
+        let path = mcp_config_with(&task, dir.path(), Some(exe_dir.path()), home).unwrap();
+        let server = server_entry(&path);
+        assert_eq!(server["command"], bin.to_string_lossy().as_ref());
+        assert!(Path::new(server["command"].as_str().unwrap()).is_absolute());
         assert_eq!(
             server["args"],
             serde_json::json!(["--harness-task", task.to_string()])
         );
+        assert_eq!(server["env"]["OHARA_HOME"], "/var/ohara-home");
+    }
+
+    #[test]
+    fn mcp_config_falls_back_to_path_name_without_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = tempfile::tempdir().unwrap();
+        let path = mcp_config_with(
+            &TaskId::new(),
+            dir.path(),
+            Some(empty.path()),
+            Path::new("/h"),
+        )
+        .unwrap();
+        assert_eq!(server_entry(&path)["command"], "ohara-mcp");
     }
 }
