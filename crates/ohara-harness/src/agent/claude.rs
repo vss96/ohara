@@ -94,6 +94,11 @@ fn parse_result(tail: &str) -> Option<ResultEvent> {
     })
 }
 
+/// Result event from the capped tail, else from the full transcript.
+async fn find_result(tail: &str, _transcript: &std::path::Path) -> Option<ResultEvent> {
+    parse_result(tail)
+}
+
 #[async_trait]
 impl AgentRuntime for ClaudeCodeRuntime {
     fn name(&self) -> &RuntimeName {
@@ -117,7 +122,7 @@ impl AgentRuntime for ClaudeCodeRuntime {
                 exit_code: exit.code,
             });
         }
-        let Some(ev) = parse_result(&exit.stdout_tail) else {
+        let Some(ev) = find_result(&exit.stdout_tail, &req.transcript).await else {
             return Ok(AgentOutcome {
                 status: classify_failure(&exit.stdout_tail),
                 final_message: exit.stdout_tail,
@@ -212,6 +217,29 @@ mod tests {
         assert_eq!(usd_to_cents(0.001), CostCents(1));
         assert_eq!(usd_to_cents(0.5), CostCents(50));
         assert_eq!(usd_to_cents(-1.0), CostCents(0));
+    }
+
+    #[test]
+    fn cents_ignore_float_noise() {
+        assert_eq!(usd_to_cents(0.07), CostCents(7));
+        assert_eq!(usd_to_cents(0.0701), CostCents(8));
+    }
+
+    #[tokio::test]
+    async fn oversized_result_line_is_read_from_transcript() {
+        let big = "x".repeat(70 * 1024);
+        let line = format!(
+            r#"{{"type":"result","is_error":false,"result":"{big}","total_cost_usd":0.07}}"#
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("t.log");
+        std::fs::write(&log, format!("{FIXTURE}{line}\n")).unwrap();
+        let tail = &line[line.len() - 64 * 1024..];
+        assert!(parse_result(tail).is_none());
+        let ev = find_result(tail, &log).await.unwrap();
+        assert_eq!(ev.result, big);
+        assert_eq!(ev.cost, Some(CostCents(7)));
+        assert!(find_result(tail, &dir.path().join("missing.log")).await.is_none());
     }
 
     #[test]
