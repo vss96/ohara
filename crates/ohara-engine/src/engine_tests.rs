@@ -1086,3 +1086,58 @@ async fn find_pattern_is_served_while_an_index_job_runs() {
     let out = job.await.unwrap().expect("index job");
     assert_eq!(out.new_commits, 1);
 }
+
+// ---- plan-33 final review I2: HEAD discovery ----
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn find_pattern_works_from_a_plain_clone_subdirectory() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let main = tempfile::tempdir().unwrap();
+    build_test_repo(main.path());
+    index_checkout(main.path()).await;
+    let sub = main.path().join("src").join("deep");
+    std::fs::create_dir_all(&sub).unwrap();
+    let engine = make_test_engine();
+    engine
+        .find_pattern(&sub, frobnicate_query())
+        .await
+        .expect("find_pattern from a subdirectory of a plain clone");
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn find_pattern_on_an_unborn_head_returns_empty_hits() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let repo = tempfile::tempdir().unwrap();
+    git2::Repository::init(repo.path()).unwrap();
+    let engine = make_test_engine();
+    let out = engine
+        .find_pattern(repo.path(), frobnicate_query())
+        .await
+        .expect("unborn HEAD must not be an error");
+    assert!(out.hits.is_empty(), "got {:?}", out.hits);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn find_pattern_from_a_linked_worktree_on_an_unborn_branch_is_not_an_error() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (_main, slot1) = repo_with_worktree().await;
+    git2::Repository::open(&slot1)
+        .unwrap()
+        .set_head("refs/heads/orphan")
+        .unwrap();
+    let engine = make_test_engine();
+    let out = engine
+        .find_pattern(&slot1, frobnicate_query())
+        .await
+        .expect("unborn worktree HEAD must not be an error");
+    assert!(out.hits.is_empty(), "got {:?}", out.hits);
+}
