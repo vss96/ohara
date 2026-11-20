@@ -569,6 +569,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_query_extracts_backtick_symbol_after_apostrophe() {
+        // Regression for #119: the apostrophe in a contraction opened a
+        // `'`-quoted span that swallowed the rest of the query.
+        let pq = parse_query("what's the caller of `__A`");
+        assert_eq!(pq.symbol_terms, vec!["__A".to_string()]);
+        let pq = parse_query("don't touch 'cfg' or `Aa0`");
+        assert_eq!(pq.symbol_terms, vec!["cfg".to_string(), "Aa0".to_string()]);
+        // An unclosed quote must not swallow later quoted symbols.
+        let pq = parse_query("\"oops `fetch`");
+        assert_eq!(pq.symbol_terms, vec!["fetch".to_string()]);
+    }
+
+    #[test]
     fn parse_query_high_confidence_for_phrase_match_medium_for_keyword_only() {
         // Plan 12 Task 1.2 Step 3: confidence reflects the strength
         // of the matching rule. Phrase patterns are High; topic
@@ -704,7 +717,6 @@ mod tests {
             }
 
             #[test]
-            #[ignore = "tracked in #119: apostrophe in contraction before backtick-quoted symbol swallows the symbol in extract_quoted_symbols"]
             fn parse_query_extracts_backtick_symbol_after_contraction(
                 contraction in prop_oneof![Just("what's"), Just("don't"), Just(" where's"), Just("isn't")],
                 symbol in "[a-zA-Z_][a-zA-Z0-9_]{2,15}",
