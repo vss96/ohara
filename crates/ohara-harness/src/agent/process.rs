@@ -17,6 +17,9 @@ pub const STDOUT_TAIL_CAP: usize = 64 * 1024;
 /// Grace allowed for the killed child to be reaped after the deadline.
 const REAP_GRACE: Duration = Duration::from_secs(5);
 
+/// Upper bound on the helper `kill` invocation, keeping the deadline bound strict.
+const KILL_CMD_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// How long to keep collecting queued output after the child is done/killed.
 const DRAIN_GRACE: Duration = Duration::from_millis(200);
 
@@ -95,16 +98,26 @@ pub async fn run_streaming(
     let mut tail: Vec<u8> = Vec::new();
     let mut killed = false;
     let mut status = None;
+    let mut pipes_open = true;
+    let mut failure: Option<Error> = None;
     loop {
         tokio::select! {
-            chunk = rx.recv() => {
+            chunk = rx.recv(), if pipes_open => {
                 match chunk {
-                    Some(chunk) => record(&mut log, &mut tail, &chunk).await?,
-                    None => break,
+                    Some(chunk) => {
+                        if let Err(e) = record(&mut log, &mut tail, &chunk).await {
+                            failure = Some(e);
+                            break;
+                        }
+                    }
+                    None => pipes_open = false,
                 }
             }
             exited = child.wait() => {
-                status = Some(exited?);
+                match exited {
+                    Ok(st) => status = Some(st),
+                    Err(e) => failure = Some(e.into()),
+                }
                 break;
             }
             _ = &mut sleep => {
@@ -114,7 +127,7 @@ pub async fn run_streaming(
         }
     }
 
-    if killed {
+    if killed || failure.is_some() {
         kill_group(pid).await;
         if let Err(e) = child.start_kill() {
             tracing::warn!("kill at deadline failed: {e}");
@@ -122,17 +135,24 @@ pub async fn run_streaming(
     }
     // Collect output still in flight. Bounded, because a surviving
     // grandchild could hold the pipes open indefinitely.
-    drain(&mut rx, &mut log, &mut tail).await?;
+    if failure.is_none() {
+        if let Err(e) = drain(&mut rx, &mut log, &mut tail).await {
+            kill_group(pid).await;
+            failure = Some(e);
+        }
+    }
     for r in &readers {
         r.abort();
     }
-    let status = match (status, killed) {
-        (Some(st), _) => Some(st),
-        (None, true) => tokio::time::timeout(REAP_GRACE, child.wait())
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    let status = match status {
+        Some(st) => Some(st),
+        None => tokio::time::timeout(REAP_GRACE, child.wait())
             .await
             .ok()
             .transpose()?,
-        (None, false) => Some(child.wait().await?),
     };
     log.flush().await?;
     let code = status.and_then(|st| st.code());
@@ -164,12 +184,18 @@ async fn drain(
 async fn kill_group(pid: Option<u32>) {
     let Some(pid) = pid else { return };
     let target = format!("-{pid}");
-    let res = Command::new("kill")
-        .args(["-KILL", "--", &target])
-        .output()
-        .await;
-    if let Err(e) = res {
-        tracing::warn!("kill of process group {pid} failed: {e}");
+    let res = tokio::time::timeout(
+        KILL_CMD_TIMEOUT,
+        Command::new("kill")
+            .args(["-KILL", "--", &target])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    match res {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!("kill of process group {pid} failed: {e}"),
+        Err(_) => tracing::warn!("kill of process group {pid} timed out"),
     }
 }
 
