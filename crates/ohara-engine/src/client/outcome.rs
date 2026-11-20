@@ -32,6 +32,11 @@ pub enum DaemonCallResult {
     ConnectFailed(String),
     /// The daemon answered with an error payload.
     DaemonErrored(ErrorPayload),
+    /// The request was sent but no usable reply came back (timeout,
+    /// dropped connection, missing or unreadable reply). The daemon may
+    /// still be working on it. Produced by
+    /// [`try_daemon_write`](crate::client::try_daemon_write).
+    Interrupted(String),
 }
 
 /// What the caller should do with a [`DaemonCallResult`].
@@ -70,6 +75,43 @@ impl DaemonCallResult {
                 tracing::debug!(code = ?err.code, message = %err.message, "daemon error; falling back in-process");
                 DaemonRoute::Fallback
             }
+            Self::Unavailable | Self::ConnectFailed(_) | Self::Interrupted(_) => {
+                DaemonRoute::Fallback
+            }
+        }
+    }
+
+    /// The routing policy for requests that write the index (plan-33:
+    /// `EnsureIndexed`, `PruneUnreachable`). An in-process run while the
+    /// daemon may still be writing would be a second writer, so:
+    /// - [`DaemonRoute::Fallback`] only when the request provably never
+    ///   reached the daemon (`Unavailable`, `ConnectFailed`) or the daemon
+    ///   declined with one of `fallback_codes` (e.g. `NotIndexed` for an
+    ///   index, which the daemon never builds from scratch);
+    /// - `NeedsRebuild` → [`DaemonRoute::Refuse`] with [`rebuild_refusal`];
+    /// - any other daemon error, an [`Self::Interrupted`] exchange, or an
+    ///   undecodable result → [`DaemonRoute::Refuse`].
+    pub fn route_write<T: DeserializeOwned>(self, fallback_codes: &[ErrorCode]) -> DaemonRoute<T> {
+        match self {
+            Self::Ok(value) => match serde_json::from_value(value) {
+                Ok(v) => DaemonRoute::Served(v),
+                Err(e) => DaemonRoute::Refuse(format!(
+                    "undecodable daemon response: {e}; it may still be working"
+                )),
+            },
+            Self::DaemonErrored(err) if err.code == ErrorCode::NeedsRebuild => {
+                DaemonRoute::Refuse(rebuild_refusal(&err.message))
+            }
+            Self::DaemonErrored(err) if fallback_codes.contains(&err.code) => {
+                tracing::debug!(code = ?err.code, "daemon declined; running in-process");
+                DaemonRoute::Fallback
+            }
+            Self::DaemonErrored(err) => {
+                DaemonRoute::Refuse(format!("daemon failed: {}", err.message))
+            }
+            Self::Interrupted(e) => DaemonRoute::Refuse(format!(
+                "daemon did not finish ({e}); it may still be working. Retry, or pass --no-daemon"
+            )),
             Self::Unavailable | Self::ConnectFailed(_) => DaemonRoute::Fallback,
         }
     }
