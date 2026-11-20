@@ -47,10 +47,11 @@ fn classify_error_result(result: &str, tail: &str) -> AgentStatus {
 
 /// Status for a parsed result event. A clean result alone is not success:
 /// claude must also have exited 0.
-fn result_status(ev: &ResultEvent, _code: Option<i32>, tail: &str) -> AgentStatus {
-    match ev.is_error {
-        true => classify_error_result(&ev.result, tail),
-        false => AgentStatus::Completed,
+fn result_status(ev: &ResultEvent, code: Option<i32>, tail: &str) -> AgentStatus {
+    match (ev.is_error, code) {
+        (false, Some(0)) => AgentStatus::Completed,
+        (false, _) => classify_failure(tail),
+        (true, _) => classify_error_result(&ev.result, tail),
     }
 }
 
