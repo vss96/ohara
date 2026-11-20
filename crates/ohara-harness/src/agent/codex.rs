@@ -25,6 +25,7 @@ use super::stream::{last_json_line, last_json_line_in_file};
 use super::{classify_failure, AgentOutcome, AgentRequest, AgentRuntime, AgentStatus};
 use crate::error::{Error, Result};
 
+/// [`AgentRuntime`] adapter that drives `codex exec --json` as a subprocess.
 pub struct CodexRuntime {
     name: RuntimeName,
     model: Option<String>,
@@ -39,6 +40,8 @@ enum Final {
 }
 
 impl CodexRuntime {
+    /// Create a codex runtime registered under `name`; `model` is the default
+    /// `-m` value, overridable per request.
     pub fn new(name: RuntimeName, model: Option<String>) -> Self {
         Self { name, model }
     }
