@@ -168,3 +168,93 @@ fn adding_tests_is_clean() {
     });
     assert!(v.is_empty(), "{v:?}");
 }
+
+#[test]
+fn unreadable_blob_fails_closed() {
+    let (dir, git) = temp_repo();
+    write(&dir, "tests/a.rs", TESTS_FILE);
+    let from = git.commit_all("base").unwrap();
+    write(&dir, "tests/a.rs", "#[test]\nfn a() {}\n");
+    let to = git.commit_all("work").unwrap();
+    let blob = git
+        .run(&["rev-parse", &format!("{to}:tests/a.rs")])
+        .unwrap();
+    let blob = blob.trim();
+    let obj = dir
+        .path()
+        .join(".git/objects")
+        .join(&blob[..2])
+        .join(&blob[2..]);
+    std::fs::remove_file(obj).unwrap();
+    assert!(guard(&git, &contract(false), &from, &to).is_err());
+}
+
+#[test]
+fn deleting_inline_rust_test_module_is_violation() {
+    let with = "pub fn f() {}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { assert!(true); }\n}\n";
+    let v = run(&contract(false), &[("src/lib.rs", with)], |d| {
+        write(d, "src/lib.rs", "pub fn f() {}\n")
+    });
+    assert!(
+        v.iter()
+            .any(|x| matches!(x, Violation::TestCountDropped { .. })),
+        "{v:?}"
+    );
+}
+
+#[test]
+fn cfg_any_disable_is_violation() {
+    let v = run(&contract(true), &[("tests/a.rs", TESTS_FILE)], |d| {
+        write(d, "tests/a.rs", &format!("#[cfg(any())]\n{TESTS_FILE}"))
+    });
+    assert_eq!(
+        v,
+        vec![Violation::TestsIgnored {
+            file: "tests/a.rs".into(),
+            added: 1
+        }]
+    );
+}
+
+#[test]
+fn xtest_is_ignored_and_not_counted_as_a_test() {
+    let before = "test('a', () => { expect(1) });\n";
+    let v = run(&contract(false), &[("web/a.test.js", before)], |d| {
+        write(d, "web/a.test.js", "xtest('a', () => { expect(1) });\n")
+    });
+    assert!(v.contains(&Violation::TestsIgnored {
+        file: "web/a.test.js".into(),
+        added: 1
+    }));
+    assert!(v
+        .iter()
+        .any(|x| matches!(x, Violation::TestCountDropped { .. })));
+}
+
+#[test]
+fn protected_globs_are_normalised() {
+    let src = r#"
+outcome = "x"
+protected_paths = ["./Cargo.lock", "ci/"]
+[budget]
+deadline = "2026-11-20T17:00:00Z"
+"#;
+    let c = Contract::parse(src).unwrap();
+    let v = run(&c, &[("Cargo.lock", "1"), ("ci/a.yml", "1")], |d| {
+        write(d, "Cargo.lock", "2");
+        write(d, "ci/a.yml", "2");
+    });
+    assert_eq!(
+        v,
+        vec![
+            Violation::ProtectedPathChanged("Cargo.lock".into()),
+            Violation::ProtectedPathChanged("ci/a.yml".into()),
+        ]
+    );
+}
+
+#[test]
+fn bad_protected_glob_fails_at_parse() {
+    let src = "outcome = \"x\"\nprotected_paths = [\"[abc\"]\n[budget]\ndeadline = \"2026-11-20T17:00:00Z\"\n";
+    assert!(Contract::parse(src).is_err());
+}
