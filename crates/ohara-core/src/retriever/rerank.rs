@@ -21,6 +21,15 @@ fn sigmoid(x: f32) -> f32 {
     }
 }
 
+/// The text the cross-encoder scores for one hit: commit message, blank
+/// line, diff. A diff often never names what the change is for (issue
+/// #140: the "retry with backoff" diff only says `attempt` / `sleep`), so
+/// the message carries the intent. It leads so the model's 512-token
+/// truncation cuts the diff tail, never the message.
+fn rerank_passage(hit: &HunkHit) -> String {
+    format!("{}\n\n{}", hit.commit.message, hit.hunk.diff_text)
+}
+
 /// Score `hits` with `reranker` against `query_text`, sigmoid-normalize
 /// the returned logits into `HunkHit::similarity`, and re-sort
 /// highest-first. Empty input is returned unchanged without invoking
@@ -33,7 +42,8 @@ pub async fn cross_encode(
     if hits.is_empty() {
         return Ok(hits);
     }
-    let candidates: Vec<&str> = hits.iter().map(|h| h.hunk.diff_text.as_str()).collect();
+    let passages: Vec<String> = hits.iter().map(rerank_passage).collect();
+    let candidates: Vec<&str> = passages.iter().map(String::as_str).collect();
     let scores = reranker.rerank(query_text, &candidates).await?;
     let mut scored: Vec<(HunkHit, f32)> = hits
         .into_iter()
