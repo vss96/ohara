@@ -543,6 +543,8 @@ mod phase_timing_tests {
         /// happened" — the partial-failure test checks this stays
         /// unchanged across a failed run.
         last_metadata: Mutex<Option<Vec<(String, String)>>>,
+        /// Number of `put_head_symbols` calls (plan-33 tip tests).
+        head_puts: Mutex<usize>,
     }
 
     impl FakeStorage {
@@ -552,6 +554,7 @@ mod phase_timing_tests {
                 last_indexed: Mutex::new(None),
                 seen_commits: Mutex::new(HashSet::new()),
                 last_metadata: Mutex::new(None),
+                head_puts: Mutex::new(0),
             }
         }
 
@@ -593,6 +596,7 @@ mod phase_timing_tests {
             Ok(())
         }
         async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> Result<()> {
+            *self.head_puts.lock().unwrap() += 1;
             std::thread::sleep(self.write_sleep);
             Ok(())
         }
@@ -1381,6 +1385,256 @@ mod phase_timing_tests {
             1,
             "extractor must be called exactly once for the in-bounds hunk"
         );
+    }
+
+    // ---- plan-33 Task 5: per-worktree tips ----
+
+    use crate::worktree::{CommitSha, IndexedTip, TipStore, WorktreeKey};
+
+    fn sha40(c: char) -> CommitSha {
+        CommitSha::parse(&c.to_string().repeat(40)).expect("valid sha")
+    }
+
+    #[derive(Default)]
+    struct FakeTips {
+        tips: Mutex<Vec<IndexedTip>>,
+    }
+
+    impl FakeTips {
+        fn with(tips: Vec<(WorktreeKey, CommitSha)>) -> Self {
+            let tips = tips
+                .into_iter()
+                .map(|(worktree, sha)| IndexedTip { worktree, sha })
+                .collect();
+            Self {
+                tips: Mutex::new(tips),
+            }
+        }
+        fn snapshot(&self) -> Vec<IndexedTip> {
+            self.tips.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl TipStore for FakeTips {
+        async fn indexed_tips(&self, _: &RepoId) -> Result<Vec<IndexedTip>> {
+            Ok(self.snapshot())
+        }
+        async fn set_indexed_tip(
+            &self,
+            _: &RepoId,
+            worktree: &WorktreeKey,
+            sha: &CommitSha,
+        ) -> Result<()> {
+            let mut tips = self.tips.lock().unwrap();
+            tips.retain(|t| &t.worktree != worktree);
+            tips.push(IndexedTip {
+                worktree: worktree.clone(),
+                sha: sha.clone(),
+            });
+            Ok(())
+        }
+        async fn remove_indexed_tip(&self, _: &RepoId, _: &WorktreeKey) -> Result<()> {
+            Ok(())
+        }
+        async fn indexed_commit_shas(&self, _: &RepoId) -> Result<Vec<CommitSha>> {
+            Ok(vec![])
+        }
+        async fn delete_commits(&self, _: &RepoId, _: &[CommitSha]) -> Result<u64> {
+            Ok(0)
+        }
+    }
+
+    /// Records the `hide` argument of `list_commits_hiding`; can poison one sha.
+    struct HidingSource {
+        commits: Vec<CommitMeta>,
+        poison: Option<String>,
+        seen_hide: Mutex<Option<Vec<String>>>,
+    }
+
+    impl HidingSource {
+        fn new(commits: Vec<CommitMeta>) -> Self {
+            Self {
+                commits,
+                poison: None,
+                seen_hide: Mutex::new(None),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CommitSource for HidingSource {
+        async fn list_commits(&self, _: Option<&str>) -> Result<Vec<CommitMeta>> {
+            Err(crate::OhraError::Git(
+                "legacy list_commits must not run".into(),
+            ))
+        }
+        async fn list_commits_hiding(&self, hide: &[String]) -> Result<Vec<CommitMeta>> {
+            *self.seen_hide.lock().unwrap() = Some(hide.to_vec());
+            Ok(self.commits.clone())
+        }
+        async fn hunks_for_commit(&self, sha: &str) -> Result<Vec<Hunk>> {
+            if self.poison.as_deref() == Some(sha) {
+                return Err(crate::OhraError::Git(format!("poisoned {sha}")));
+            }
+            Ok(vec![fake_hunk(sha, "+x\n")])
+        }
+    }
+
+    /// Panics if HEAD symbols are requested.
+    struct PanickingSymbolSource;
+
+    #[async_trait]
+    impl SymbolSource for PanickingSymbolSource {
+        async fn extract_head_symbols(&self) -> Result<Vec<Symbol>> {
+            panic!("extract_head_symbols must not be called for a linked worktree");
+        }
+    }
+
+    fn tip_indexer(storage: Arc<FakeStorage>, tips: Arc<FakeTips>, wt: WorktreeKey) -> Indexer {
+        Indexer::new(
+            storage,
+            std::sync::Arc::new(FakeEmbedder {
+                sleep: std::time::Duration::ZERO,
+            }),
+        )
+        .with_tip_context(TipContext {
+            tips,
+            worktree: wt,
+            head: sha40('f'),
+        })
+    }
+
+    fn zero_storage() -> Arc<FakeStorage> {
+        Arc::new(FakeStorage::new(std::time::Duration::ZERO))
+    }
+
+    fn no_symbols() -> Arc<FakeSymbolSource> {
+        Arc::new(FakeSymbolSource {
+            symbols: vec![],
+            sleep: std::time::Duration::ZERO,
+        })
+    }
+
+    #[tokio::test]
+    async fn indexer_hides_every_indexed_tip_and_records_the_worktree_head() {
+        let slot1 = WorktreeKey::linked("slot-1").unwrap();
+        let tips = Arc::new(FakeTips::with(vec![
+            (WorktreeKey::main(), sha40('a')),
+            (WorktreeKey::linked("slot-2").unwrap(), sha40('b')),
+        ]));
+        let storage = zero_storage();
+        let source = Arc::new(HidingSource::new(vec![fake_commit("c1")]));
+        let indexer = tip_indexer(storage.clone(), tips.clone(), slot1.clone());
+        let repo_id = RepoId::from_parts("first", "/tmp/r");
+        indexer
+            .run(&repo_id, source.clone(), Arc::new(PanickingSymbolSource))
+            .await
+            .expect("run");
+
+        let mut hidden = source.seen_hide.lock().unwrap().clone().expect("hide seen");
+        hidden.sort();
+        assert_eq!(hidden, vec!["a".repeat(40), "b".repeat(40)]);
+        let snap = tips.snapshot();
+        assert!(snap.contains(&IndexedTip {
+            worktree: slot1,
+            sha: sha40('f')
+        }));
+        assert!(snap.contains(&IndexedTip {
+            worktree: WorktreeKey::main(),
+            sha: sha40('a')
+        }));
+        assert!(
+            storage.last_indexed.lock().unwrap().is_none(),
+            "legacy watermark must not be written when a TipContext is set"
+        );
+    }
+
+    #[tokio::test]
+    async fn linked_worktree_run_never_touches_head_symbols() {
+        let tips = Arc::new(FakeTips::default());
+        let storage = zero_storage();
+        let indexer = tip_indexer(
+            storage.clone(),
+            tips,
+            WorktreeKey::linked("slot-1").unwrap(),
+        );
+        let repo_id = RepoId::from_parts("first", "/tmp/r");
+        let report = indexer
+            .run(
+                &repo_id,
+                Arc::new(HidingSource::new(vec![fake_commit("c1")])),
+                Arc::new(PanickingSymbolSource),
+            )
+            .await
+            .expect("run");
+        assert_eq!(report.head_symbols, 0);
+        assert_eq!(*storage.head_puts.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn empty_walk_still_records_the_tip() {
+        let slot1 = WorktreeKey::linked("slot-1").unwrap();
+        let tips = Arc::new(FakeTips::default());
+        let indexer = tip_indexer(zero_storage(), tips.clone(), slot1.clone());
+        let repo_id = RepoId::from_parts("first", "/tmp/r");
+        indexer
+            .run(
+                &repo_id,
+                Arc::new(HidingSource::new(vec![])),
+                Arc::new(PanickingSymbolSource),
+            )
+            .await
+            .expect("run");
+        assert_eq!(
+            tips.snapshot(),
+            vec![IndexedTip {
+                worktree: slot1,
+                sha: sha40('f')
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_commits_leave_the_tip_unset() {
+        let slot1 = WorktreeKey::linked("slot-1").unwrap();
+        let tips = Arc::new(FakeTips::default());
+        let mut source = HidingSource::new(vec![fake_commit("c1"), fake_commit("c2")]);
+        source.poison = Some("c2".into());
+        let indexer = tip_indexer(zero_storage(), tips.clone(), slot1);
+        let repo_id = RepoId::from_parts("first", "/tmp/r");
+        let report = indexer
+            .run(&repo_id, Arc::new(source), Arc::new(PanickingSymbolSource))
+            .await
+            .expect("run");
+        assert_eq!(report.commits_failed, 1);
+        assert!(tips.snapshot().is_empty(), "tip must stay unset");
+    }
+
+    #[tokio::test]
+    async fn without_tip_context_the_legacy_watermark_path_is_unchanged() {
+        let storage = zero_storage();
+        let indexer = Indexer::new(
+            storage.clone(),
+            std::sync::Arc::new(FakeEmbedder {
+                sleep: std::time::Duration::ZERO,
+            }),
+        );
+        let source = FakeCommitSource {
+            commits: vec![fake_commit("aaaa")],
+            hunks: vec![fake_hunk("aaaa", "+x\n")],
+            sleep_per_call: std::time::Duration::ZERO,
+        };
+        let repo_id = RepoId::from_parts("first", "/tmp/r");
+        indexer
+            .run(&repo_id, Arc::new(source), no_symbols())
+            .await
+            .expect("run");
+        assert_eq!(
+            storage.last_indexed.lock().unwrap().as_deref(),
+            Some("aaaa")
+        );
+        assert_eq!(*storage.head_puts.lock().unwrap(), 1);
     }
 }
 
