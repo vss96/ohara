@@ -349,6 +349,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn index_tip_requires_repo_path() {
+        let resp = round_trip(Request {
+            id: 12,
+            repo_path: None,
+            method: RequestMethod::IndexTip,
+        })
+        .await;
+        assert!(resp.result.is_none(), "no result expected: {resp:?}");
+        let err = resp.error.expect("IndexTip without repo_path must error");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(err.message.contains("index_tip requires repo_path"));
+    }
+
+    #[tokio::test]
+    async fn ensure_indexed_rejects_a_malformed_sha() {
+        let resp = round_trip(Request {
+            id: 13,
+            repo_path: Some("/nonexistent/ohara-test-repo".into()),
+            method: RequestMethod::EnsureIndexed {
+                sha: "not-a-sha".into(),
+            },
+        })
+        .await;
+        assert!(resp.result.is_none(), "no result expected: {resp:?}");
+        let err = resp.error.expect("malformed sha must error");
+        assert_eq!(err.code, ErrorCode::InvalidRequest, "got {err:?}");
+    }
+
+    #[tokio::test]
     async fn metrics_returns_not_implemented_error() {
         let req = Request {
             id: 11,

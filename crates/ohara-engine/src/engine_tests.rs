@@ -922,3 +922,166 @@ async fn daemon_indexing_accepts_an_equivalent_model() {
         .expect("equivalent model");
     assert_eq!(out.new_commits, 1);
 }
+
+// ---- plan-33 Task 12: background index queue ----
+
+/// Embedder for queue tests. Batches that look like the `frobnicate`
+/// query return at once; every other (index) batch first sleeps `delay`
+/// and, when `gated`, waits for [`QueueEmbedder::release`].
+struct QueueEmbedder {
+    delay: std::time::Duration,
+    gated: bool,
+    started: tokio::sync::Notify,
+    gate: tokio::sync::Semaphore,
+    index_batches: std::sync::atomic::AtomicUsize,
+}
+
+impl QueueEmbedder {
+    fn new(delay: std::time::Duration, gated: bool) -> Self {
+        Self {
+            delay,
+            gated,
+            started: tokio::sync::Notify::new(),
+            gate: tokio::sync::Semaphore::new(0),
+            index_batches: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn release(&self) {
+        self.gate.add_permits(1 << 20);
+    }
+}
+
+#[async_trait::async_trait]
+impl ohara_core::EmbeddingProvider for QueueEmbedder {
+    fn dimension(&self) -> usize {
+        384
+    }
+
+    fn model_id(&self) -> &str {
+        ohara_embed::DEFAULT_MODEL_ID
+    }
+
+    async fn embed_batch(&self, texts: &[String]) -> ohara_core::Result<Vec<Vec<f32>>> {
+        let is_query = texts.len() == 1 && texts[0].contains("frobnicate");
+        if !is_query {
+            self.index_batches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.started.notify_one();
+            tokio::time::sleep(self.delay).await;
+            if self.gated {
+                let _permit = self.gate.acquire().await.unwrap();
+            }
+        }
+        Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
+    }
+}
+
+/// The indexed tip recorded for the worktree at `path`, if any.
+async fn tip_of(path: &Path) -> Option<String> {
+    let id = ohara_git::RepoIdentity::resolve(path).unwrap();
+    let db_path = ohara_core::paths::index_db_path(&id.repo_id).unwrap();
+    let sqlite = ohara_storage::SqliteStorage::open(&db_path).await.unwrap();
+    ohara_core::TipStore::indexed_tips(&sqlite, &id.repo_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|t| t.worktree == id.worktree)
+        .map(|t| t.sha.as_str().to_string())
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn index_tip_returns_before_indexing_and_the_queue_catches_up() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (_main, slot1) = repo_with_worktree().await;
+    let wt_repo = git2::Repository::open(&slot1).unwrap();
+    let head = commit_file(&wt_repo, "c.rs", "fn three() {}\n", "third").to_string();
+    let emb = Arc::new(QueueEmbedder::new(
+        std::time::Duration::from_millis(50),
+        false,
+    ));
+    let engine = Arc::new(RetrievalEngine::new(emb.clone(), Arc::new(DummyReranker)));
+
+    let t0 = std::time::Instant::now();
+    assert!(engine.enqueue_index_tip(slot1.clone()));
+    assert!(
+        t0.elapsed() < std::time::Duration::from_millis(20),
+        "enqueue must not block on indexing: {:?}",
+        t0.elapsed()
+    );
+    assert_eq!(
+        emb.index_batches.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+
+    let stop = tokio_util::sync::CancellationToken::new();
+    let worker = tokio::spawn(engine.clone().run_index_queue(stop.clone()));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while tip_of(&slot1).await.as_deref() != Some(head.as_str()) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "queue did not index slot-1 HEAD within 5 s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    stop.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(5), worker)
+        .await
+        .expect("worker must exit promptly after stop")
+        .expect("worker join");
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn repeated_index_tip_for_one_worktree_is_coalesced() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (_main, slot1) = repo_with_worktree().await;
+    let engine = make_test_engine();
+    let queued: Vec<bool> = (0..3)
+        .map(|_| engine.enqueue_index_tip(slot1.clone()))
+        .collect();
+    assert_eq!(queued, [true, false, false]);
+    // A non-canonical spelling of the same worktree coalesces too.
+    let dotted = slot1.join("..").join("slot-1");
+    assert!(!engine.enqueue_index_tip(dotted));
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn find_pattern_is_served_while_an_index_job_runs() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (main, slot1) = repo_with_worktree().await;
+    let wt_repo = git2::Repository::open(&slot1).unwrap();
+    commit_file(&wt_repo, "c.rs", "fn three() {}\n", "third");
+    let emb = Arc::new(QueueEmbedder::new(std::time::Duration::ZERO, true));
+    let engine = Arc::new(RetrievalEngine::new(emb.clone(), Arc::new(DummyReranker)));
+
+    let job = {
+        let engine = engine.clone();
+        let slot1 = slot1.clone();
+        tokio::spawn(async move { engine.index_worktree(&slot1).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), emb.started.notified())
+        .await
+        .expect("index job never reached the embedder");
+
+    let served = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        engine.find_pattern(main.path(), frobnicate_query()),
+    )
+    .await
+    .expect("find_pattern must not wait for the index job");
+    served.expect("find_pattern");
+    assert!(!job.is_finished(), "the index job must still be running");
+
+    emb.release();
+    let out = job.await.unwrap().expect("index job");
+    assert_eq!(out.new_commits, 1);
+}
