@@ -59,7 +59,8 @@ explicit record of what was decided without them.
   group), never as one large change. This is a core harness principle.
 
 **Non-goals (for now)**
-- Multi-user or hosted service, web UI, chat triggers.
+- Multi-user or hosted service, a remotely reachable UI, chat triggers.
+  The local UI in §12a is in scope.
 - Our own LLM client or agent loop. Headless CLIs (`claude`, `codex`,
   `agy`, or any CLI through the generic adapter) stay behind the trait
   (§8a).
@@ -436,6 +437,50 @@ bundle in the task repo otherwise. It includes a summary:
 `ohara task review <id>` lets the person mark each decision upheld or
 overturned, with a note. Those verdicts feed memory (§11).
 
+### 12a. Local web UI (decided by the user: interacting with tasks and seeing what's going on)
+
+The UI makes it easier to work with tasks and to see what is happening.
+It is a window onto the supervisor, not a second brain. Every rule stays
+in the Rust supervisor. The UI reads `harness.sqlite` and git, and writes
+only the human inputs the CLI can also write.
+
+It is served by the existing `ohara serve` daemon on `127.0.0.1` only,
+with a per-session token printed by `ohara ui`. The page updates live
+through server-sent events from the run log.
+
+Screens:
+- **Tasks.** All tasks, each with its state, a time bar and a cost bar.
+  Includes a "new task" form (outcome, deadline, roles preset), the same
+  as `ohara task`.
+- **Contract approval.** The drafted scripts, rubric criteria with pass
+  marks, budget and protected paths, all editable. One Approve button
+  freezes the contract and starts the clock. This is the same action as
+  `ohara task approve --edit`.
+- **Live run.**
+  - the current phase and round
+  - the decision frontier: settled, exploring, reopened or frozen
+  - running POCs, with their runtime and model
+  - the latest script results
+  - the tail of the active agent's output
+  - a stop button, which is the same action as `ohara task stop`
+- **Decision review.**
+  - The decision trail, most consequential first.
+  - Each decision opens to show its options, POC diffs side by side, and
+    the judge's rubric, scores and rationale.
+  - It also shows the assumptions and their check status, any reversal
+    chain (superseded → replacement), and which runtime did what.
+  - Per decision there are Upheld and Overturned buttons with a note.
+    These feed memory exactly as `ohara task review` does.
+
+Rules:
+- **CLI parity.** Every UI action has a CLI equivalent, and the CLI stays
+  first-class for scripts, hooks and agents.
+- **Contract edits only before approval.** The UI cannot edit the
+  contract after it is frozen, and it cannot edit decision records.
+- **Static fallback.** At hand-back, a self-contained HTML copy of the
+  review screen is written to the run directory, so a finished task can
+  be reviewed with no daemon running.
+
 ## 13. Supervisor phases as data
 
 ```rust
@@ -490,6 +535,13 @@ shared index store is built. Decided by the user:
      trade-off for phase 1.
    - Needs the CONTRIBUTING §9 amendment for a second SQLite file
      (earlier spec open question 4).
+   - Writes the static HTML review page at hand-back.
+1b. **Local UI.**
+   - Ships straight after phase 1, before POCs, because seeing what a
+     long run is doing matters from the first real task.
+   - Contains the Tasks, Contract approval, Live run and Decision review
+     screens (§12a).
+   - The POC and reversal views fill in as phases 2 and 3 land.
 2. **POCs, judge and isolation.**
    - Brings in the earlier spec's warm slot pool and srt sandbox, since
      parallel POCs need several slots anyway.
