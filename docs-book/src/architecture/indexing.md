@@ -269,9 +269,13 @@ safety comes from two other mechanisms:
   `commit_record` row (a sub-millisecond PK lookup), so re-running
   `ohara index` after a Ctrl-C / kill / crash re-walks the history
   since the last tip but re-embeds only the commits that never landed.
-- **DELETE-then-INSERT.** `put_hunks` clears any partially-written
-  hunks for a SHA first, so a commit interrupted mid-write is redone
-  without duplicate rows.
+- **One transaction per commit.** The persist stage writes a commit's
+  row and all of its hunks with `put_commit_with_hunks`, which the
+  SQLite backend runs as a single transaction. An interrupted write
+  leaves nothing behind, so the per-commit skip never trusts a commit
+  row whose hunks are missing; the commit is redone on the next pass.
+  The writes themselves are DELETE-then-INSERT, so a redo never
+  duplicates rows.
 
 Anything outside the commit walk (HEAD-symbol extraction, recording
 the tip) is small enough to redo cleanly.

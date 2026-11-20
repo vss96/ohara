@@ -60,6 +60,27 @@ impl StorageWrite for SqliteStorage {
         .await
     }
 
+    /// One transaction on the single write connection: the commit row and
+    /// every hunk land together or not at all (`commit::put_tx` +
+    /// `hunk::put_many_tx`; the commit goes first for the foreign key).
+    async fn put_commit_with_hunks(
+        &self,
+        _repo_id: &RepoId,
+        commit: &CommitRecord,
+        hunks: &[HunkRecord],
+    ) -> CoreResult<()> {
+        let commit = commit.clone();
+        let hunks = hunks.to_vec();
+        with_conn(self.write_pool(), move |c| {
+            let tx = c.transaction()?;
+            crate::tables::commit::put_tx(&tx, &commit)?;
+            crate::tables::hunk::put_many_tx(&tx, &hunks)?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn put_head_symbols(&self, _repo_id: &RepoId, symbols: &[Symbol]) -> CoreResult<()> {
         // Replace the whole snapshot (symbols + FTS/vec mirrors) in one
         // transaction; see `tables::symbol::replace_all`.

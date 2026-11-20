@@ -82,6 +82,9 @@ duplicating data:
   previously-written hunks (and their `vec_hunk` / `fts_hunk_text`
   rows) for that SHA are cleared first, so a re-index of the same
   commit produces exactly the same row count.
+- **`put_commit_with_hunks`** — what the indexer actually calls: the
+  two writes above in one transaction, so a commit row never exists
+  without its hunks.
 - **`put_head_symbols`** — replaces the entire `symbol` /
   `vec_symbol` / `fts_symbol` / `fts_symbol_name` content for the
   repo: the DELETE and the INSERTs share one transaction, so repeated
@@ -96,8 +99,10 @@ clean index pass (a pass with failed commits leaves it unchanged). The
 next pass walks from `HEAD` hiding every worktree's tip and skips any
 commit that already has a `commit_record` row, so a Ctrl-C / kill /
 crash mid-walk costs a re-walk but no re-embedding of stored commits.
-Combined with `put_hunks`'s DELETE-then-INSERT semantics, a commit
-interrupted mid-write is redone without duplicate rows.
+A commit's row and its hunks are written in one transaction
+(`put_commit_with_hunks`), so an interrupted write leaves no commit row
+for the skip to trust; the commit is redone on the next pass, and the
+DELETE-then-INSERT writes keep the redo free of duplicate rows.
 
 When a worktree moves to a commit that does not descend from its tip
 (branch switch, reset, slot reuse), the old tip is kept in

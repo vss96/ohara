@@ -475,8 +475,8 @@ pub struct PhaseTimings {
     /// Wall-time spent inside `EmbeddingProvider::embed_batch` calls.
     pub embed_ms: u64,
     /// Wall-time spent writing commit + hunk rows
-    /// (`Storage::put_commit` + `Storage::put_hunks`). Combined because
-    /// they share a transaction in the SQLite backend.
+    /// (`StorageWrite::put_commit_with_hunks`, one transaction per commit
+    /// in the SQLite backend).
     pub storage_write_ms: u64,
     /// Wall-time spent inside FTS5 inserts. Reserved: today the FTS
     /// insert is bundled inside `put_hunks` and rolls into
