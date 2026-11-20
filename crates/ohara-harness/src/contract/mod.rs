@@ -97,13 +97,20 @@ pub struct Contract {
 impl Contract {
     /// Parse a `contract.toml` document.
     pub fn parse(s: &str) -> Result<Self> {
-        toml::from_str(s).map_err(|e| Error::Contract(format!("invalid contract: {e}")))
+        let c: Self =
+            toml::from_str(s).map_err(|e| Error::Contract(format!("invalid contract: {e}")))?;
+        if let Some(bad) = c.scripts.iter().find(|s| s.run.is_empty()) {
+            return Err(Error::Contract(format!(
+                "invalid contract: script {:?} has an empty run command",
+                bad.name
+            )));
+        }
+        Ok(c)
     }
 
     /// Canonical TOML: the struct re-serialised, never the raw input.
     pub fn to_toml(&self) -> String {
-        // A plain struct of strings, numbers and vectors always serialises.
-        toml::to_string(self).unwrap_or_default()
+        toml::to_string(self).expect("invariant: Contract always serialises to TOML")
     }
 
     /// Blake3 of the canonical TOML.

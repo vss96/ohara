@@ -19,6 +19,16 @@ const IDENTITY: [&str; 4] = [
     "user.email=ohara-harness@localhost",
 ];
 
+/// Environment variables that would redirect git away from `cwd`.
+const REDIRECT_ENV: [&str; 6] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+];
+
 /// Git operations rooted at one working directory.
 #[derive(Debug, Clone)]
 pub struct Git {
@@ -43,7 +53,11 @@ impl Git {
 
     /// Run `git <args>` feeding `stdin`, returning stdout.
     pub fn run_with_stdin(&self, args: &[&str], stdin: Option<&str>) -> Result<String> {
-        let mut child = Command::new("git")
+        let mut cmd = Command::new("git");
+        for var in REDIRECT_ENV {
+            cmd.env_remove(var);
+        }
+        let mut child = cmd
             .args(args)
             .current_dir(&self.cwd)
             .stdin(match stdin {
@@ -78,6 +92,25 @@ impl Git {
         self.run_with_stdin(&full, stdin)
     }
 
+    /// Fail unless `cwd` is itself the top level of a git work tree.
+    ///
+    /// Git searches parent directories, so a plain directory inside another
+    /// repository would otherwise make mutating commands hit that repository.
+    /// Every mutating helper calls this first.
+    pub(crate) fn ensure_own_toplevel(&self) -> Result<()> {
+        let top = self.run(&["rev-parse", "--show-toplevel"])?;
+        let top = std::fs::canonicalize(top.trim())?;
+        let cwd = std::fs::canonicalize(&self.cwd)?;
+        if top != cwd {
+            return Err(Error::Git(format!(
+                "{} is not a git work tree root (nearest is {})",
+                cwd.display(),
+                top.display()
+            )));
+        }
+        Ok(())
+    }
+
     /// The commit `HEAD` points at.
     pub fn head(&self) -> Result<String> {
         Ok(self.run(&["rev-parse", "HEAD"])?.trim().to_string())
@@ -85,22 +118,40 @@ impl Git {
 
     /// `git reset --hard <sha>`.
     pub fn reset_hard(&self, sha: &str) -> Result<()> {
+        self.ensure_own_toplevel()?;
         self.run(&["reset", "--hard", sha]).map(|_| ())
     }
 
     /// Stage everything (`git add -A`, tracked and untracked) and commit it,
     /// returning the new `HEAD`. An empty change set still yields a commit.
     ///
-    /// Safe only inside the task's own worktree: it sweeps up every file in
-    /// the working directory.
+    /// Safe only inside the task's own worktree (refused elsewhere): it sweeps
+    /// up every file in the working directory. Hooks and commit signing are
+    /// disabled: checkpoints are harness commits and must never block on user
+    /// configuration.
     pub fn commit_all(&self, msg: &str) -> Result<String> {
+        self.ensure_own_toplevel()?;
         self.run(&["add", "-A"])?;
-        self.run_as_harness(&["commit", "--allow-empty", "-m", msg], None)?;
+        self.run_as_harness(
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "--no-verify",
+                "--allow-empty",
+                "-m",
+                msg,
+            ],
+            None,
+        )?;
         self.head()
     }
 
     /// `git worktree add -b <branch> <path> <base>`.
     pub fn worktree_add(&self, path: &Path, branch: &str, base: &str) -> Result<()> {
+        self.ensure_own_toplevel()?;
         let path = path.to_string_lossy();
         self.run(&["worktree", "add", "-b", branch, &path, base])
             .map(|_| ())
@@ -108,8 +159,12 @@ impl Git {
 
     /// Paths changed between two commits.
     pub fn diff_names(&self, from: &str, to: &str) -> Result<Vec<String>> {
-        let out = self.run(&["diff", "--name-only", from, to])?;
-        Ok(out.lines().map(str::to_string).collect())
+        let out = self.run(&["diff", "--name-only", "-z", "--no-renames", from, to])?;
+        Ok(out
+            .split('\0')
+            .filter(|n| !n.is_empty())
+            .map(str::to_string)
+            .collect())
     }
 }
 

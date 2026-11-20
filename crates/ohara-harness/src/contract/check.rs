@@ -73,7 +73,20 @@ async fn run_script(
             return Err(e.into());
         }
     }
-    let exit = run_streaming(&script.run, None, cwd, deadline, &log).await?;
+    let exit = match run_streaming(&script.run, None, cwd, deadline, &log).await {
+        Ok(exit) => exit,
+        Err(e) => {
+            return Ok(ScriptResult {
+                name: script.name.clone(),
+                passed: false,
+                exit_code: None,
+                tests_ran: None,
+                missing_required: Vec::new(),
+                failures: vec![format!("could not run script: {e}")],
+                log,
+            })
+        }
+    };
     let mut failures = Vec::new();
     if exit.killed_at_deadline {
         failures.push("timed out at the deadline".to_string());
@@ -116,9 +129,24 @@ async fn run_script(
     })
 }
 
-/// A passed test satisfies a requirement by exact name or `::`-suffix
-/// (cargo prints module paths without the crate prefix a contract may use).
+/// Whether a passed test satisfies a required name.
+///
+/// The canonical form is the cargo-printed test path. `required` matches when
+/// it equals `passed` or is a suffix of it at a `::` boundary, so a bare
+/// single-segment name matches that test in any module. A required name with
+/// two or more segments that still fails is retried once without its first
+/// segment, tolerating a crate/package prefix.
 fn matches_name(passed: &str, required: &str) -> bool {
+    if suffix_at_boundary(passed, required) {
+        return true;
+    }
+    match required.split_once("::") {
+        Some((_, rest)) => suffix_at_boundary(passed, rest),
+        None => false,
+    }
+}
+
+fn suffix_at_boundary(passed: &str, required: &str) -> bool {
     passed == required || passed.ends_with(&format!("::{required}"))
 }
 
