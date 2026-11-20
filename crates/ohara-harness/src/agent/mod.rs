@@ -7,6 +7,8 @@ use ohara_core::task::{CostCents, Deadline, RuntimeName};
 
 use crate::error::Result;
 
+/// Antigravity (`agy -p`) runtime adapter.
+pub mod agy;
 /// Claude Code (`claude -p`) runtime adapter.
 pub mod claude;
 /// Codex (`codex exec --json`) runtime adapter.
@@ -99,6 +101,16 @@ pub fn classify_failure(stdout_tail: &str) -> AgentStatus {
         return AgentStatus::AuthFailed;
     }
     AgentStatus::Crashed
+}
+
+/// Classify an `is_error` result event. The result text is preferred; when it
+/// is generic (classifies as `Crashed`) the stdout/stderr tail is consulted,
+/// since rate-limit/auth markers sometimes appear only there.
+pub(crate) fn classify_error_result(result: &str, tail: &str) -> AgentStatus {
+    match classify_failure(result) {
+        AgentStatus::Crashed => classify_failure(tail),
+        specific => specific,
+    }
 }
 
 #[cfg(test)]

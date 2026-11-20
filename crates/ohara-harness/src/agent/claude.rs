@@ -15,7 +15,9 @@ use ohara_core::task::{CostCents, RuntimeName};
 
 use super::process::run_streaming;
 use super::stream::{last_json_line, last_json_line_in_file};
-use super::{classify_failure, AgentOutcome, AgentRequest, AgentRuntime, AgentStatus};
+use super::{
+    classify_error_result, classify_failure, AgentOutcome, AgentRequest, AgentRuntime, AgentStatus,
+};
 use crate::error::Result;
 
 const ALLOWED_TOOLS: &str = "Bash Edit Write Read Glob Grep";
@@ -35,13 +37,13 @@ struct ResultEvent {
     cost: Option<CostCents>,
 }
 
-/// Classify an `is_error` result event. The result text is preferred; when it
-/// is generic (classifies as `Crashed`) the stdout/stderr tail is consulted,
-/// since rate-limit/auth markers sometimes appear only there.
-fn classify_error_result(result: &str, tail: &str) -> AgentStatus {
-    match classify_failure(result) {
-        AgentStatus::Crashed => classify_failure(tail),
-        specific => specific,
+/// Status for a parsed result event. A clean result alone is not success:
+/// claude must also have exited 0.
+fn result_status(ev: &ResultEvent, code: Option<i32>, tail: &str) -> AgentStatus {
+    match (ev.is_error, code) {
+        (false, Some(0)) => AgentStatus::Completed,
+        (false, _) => classify_failure(tail),
+        (true, _) => classify_error_result(&ev.result, tail),
     }
 }
 
@@ -152,10 +154,7 @@ impl AgentRuntime for ClaudeCodeRuntime {
                 exit_code: exit.code,
             });
         };
-        let status = match ev.is_error {
-            true => classify_error_result(&ev.result, &exit.stdout_tail),
-            false => AgentStatus::Completed,
-        };
+        let status = result_status(&ev, exit.code, &exit.stdout_tail);
         Ok(AgentOutcome {
             status,
             final_message: ev.result,
@@ -287,6 +286,18 @@ mod tests {
             AgentStatus::RateLimited
         );
         assert_eq!(classify_error_result("error", "boom"), AgentStatus::Crashed);
+    }
+
+    #[test]
+    fn claude_nonzero_exit_is_not_completed() {
+        let ev = parse_result(FIXTURE).unwrap();
+        assert_eq!(result_status(&ev, Some(0), ""), AgentStatus::Completed);
+        assert_eq!(result_status(&ev, Some(1), ""), AgentStatus::Crashed);
+        assert_eq!(result_status(&ev, None, ""), AgentStatus::Crashed);
+        assert_eq!(
+            result_status(&ev, Some(1), "HTTP 429"),
+            AgentStatus::RateLimited
+        );
     }
 
     #[tokio::test]
