@@ -18,7 +18,7 @@ pub struct ScriptResult {
     /// Exit code, if the process exited normally.
     pub exit_code: Option<i32>,
     /// Tests counted in the output (test scripts only).
-    pub tests_ran: Option<u32>,
+    pub tests_run: Option<u32>,
     /// Required tests that did not pass.
     pub missing_required: Vec<String>,
     /// Why the script failed; empty when it passed.
@@ -80,7 +80,7 @@ async fn run_script(
                 name: script.name.clone(),
                 passed: false,
                 exit_code: None,
-                tests_ran: None,
+                tests_run: None,
                 missing_required: Vec::new(),
                 failures: vec![format!("could not run script: {e}")],
                 log,
@@ -94,12 +94,12 @@ async fn run_script(
     if !exit.killed_at_deadline && exit.code != Some(0) {
         failures.push(format!("exited with {:?}", exit.code));
     }
-    let mut tests_ran = None;
+    let mut tests_run = None;
     let mut missing_required = Vec::new();
     if script.kind == ScriptKind::Test {
         let output = String::from_utf8_lossy(&tokio::fs::read(&log).await?).into_owned();
         let summary = test_output::parse(&output);
-        tests_ran = summary.ran;
+        tests_run = summary.ran;
         match summary.ran {
             None => failures.push("could not count tests".to_string()),
             Some(n) if n < script.effective_min_tests() => failures.push(format!(
@@ -122,7 +122,7 @@ async fn run_script(
         name: script.name.clone(),
         passed: failures.is_empty(),
         exit_code: exit.code,
-        tests_ran,
+        tests_run,
         missing_required,
         failures,
         log,
@@ -221,7 +221,7 @@ mod tests {
         );
         let r = run(&c).await;
         assert!(!r.satisfied);
-        assert_eq!(r.scripts[0].tests_ran, Some(0));
+        assert_eq!(r.scripts[0].tests_run, Some(0));
     }
 
     #[tokio::test]
@@ -285,5 +285,25 @@ mod tests {
         let r = run(&c).await;
         assert!(!r.satisfied);
         assert!(!r.scripts[0].failures.is_empty());
+    }
+
+    #[test]
+    fn script_result_converts_to_core_record() {
+        let r = ScriptResult {
+            name: "tests".into(),
+            passed: false,
+            exit_code: Some(1),
+            tests_run: Some(4),
+            missing_required: vec!["a::b".into()],
+            failures: vec!["boom".into()],
+            log: PathBuf::from("logs/0-tests.log"),
+        };
+        let core = ohara_core::task::decision::ScriptResult::from(&r);
+        assert_eq!(core.name, "tests");
+        assert!(!core.passed);
+        assert_eq!(core.exit_code, Some(1));
+        assert_eq!(core.tests_run, Some(4));
+        assert_eq!(core.missing_required, vec!["a::b".to_string()]);
+        assert_eq!(core.log, PathBuf::from("logs/0-tests.log"));
     }
 }
