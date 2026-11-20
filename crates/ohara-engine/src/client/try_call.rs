@@ -90,4 +90,45 @@ mod try_call_tests {
             "connect to dead socket must be ConnectFailed"
         );
     }
+
+    fn ping() -> Request {
+        Request {
+            id: 1,
+            repo_path: None,
+            method: RequestMethod::Ping,
+        }
+    }
+
+    #[tokio::test]
+    async fn write_to_unreachable_socket_is_connect_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let resp = try_daemon_write(
+            &dir.path().join("absent.sock"),
+            ping(),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            matches!(resp, DaemonCallResult::ConnectFailed(_)),
+            "got {resp:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_dropped_after_send_is_interrupted() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("drop.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        tokio::spawn(async move {
+            // Accept the probe, then the request, and drop both unanswered.
+            while let Ok((conn, _)) = listener.accept().await {
+                drop(conn);
+            }
+        });
+        let resp = try_daemon_write(&sock, ping(), std::time::Duration::from_secs(5)).await;
+        assert!(
+            matches!(resp, DaemonCallResult::Interrupted(_)),
+            "got {resp:?}"
+        );
+    }
 }

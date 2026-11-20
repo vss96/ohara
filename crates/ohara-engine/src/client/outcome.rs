@@ -137,6 +137,76 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_read_falls_back() {
+        let r = DaemonCallResult::Interrupted("timed out".into()).route::<u32>();
+        assert!(matches!(r, DaemonRoute::Fallback));
+    }
+
+    #[test]
+    fn write_falls_back_only_before_send_or_on_listed_codes() {
+        let not_indexed = || {
+            DaemonCallResult::DaemonErrored(ErrorPayload {
+                code: ErrorCode::NotIndexed,
+                message: "repo not indexed".into(),
+            })
+        };
+        assert!(matches!(
+            DaemonCallResult::Unavailable.route_write::<u32>(&[]),
+            DaemonRoute::Fallback
+        ));
+        assert!(matches!(
+            DaemonCallResult::ConnectFailed("connect".into()).route_write::<u32>(&[]),
+            DaemonRoute::Fallback
+        ));
+        assert!(matches!(
+            not_indexed().route_write::<u32>(&[ErrorCode::NotIndexed]),
+            DaemonRoute::Fallback
+        ));
+        assert!(matches!(
+            not_indexed().route_write::<u32>(&[]),
+            DaemonRoute::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn write_refuses_everything_after_send() {
+        let DaemonRoute::Refuse(msg) =
+            DaemonCallResult::Interrupted("timed out".into()).route_write::<u32>(&[])
+        else {
+            panic!("a write interrupted after send must refuse");
+        };
+        assert!(
+            msg.contains("timed out") && msg.contains("may still be"),
+            "{msg}"
+        );
+
+        let DaemonRoute::Refuse(msg) = DaemonCallResult::DaemonErrored(ErrorPayload {
+            code: ErrorCode::Internal,
+            message: "boom".into(),
+        })
+        .route_write::<u32>(&[ErrorCode::NotIndexed]) else {
+            panic!("a daemon error on a write must refuse");
+        };
+        assert!(msg.contains("boom"), "{msg}");
+
+        let DaemonRoute::Refuse(msg) =
+            errored(ErrorCode::NeedsRebuild).route_write::<u32>(&[ErrorCode::NotIndexed])
+        else {
+            panic!("NeedsRebuild must refuse");
+        };
+        assert!(msg.contains(REBUILD_REMEDY), "{msg}");
+
+        assert!(matches!(
+            DaemonCallResult::Ok(serde_json::json!("x")).route_write::<u32>(&[]),
+            DaemonRoute::Refuse(_)
+        ));
+        assert!(matches!(
+            DaemonCallResult::Ok(serde_json::json!(7)).route_write::<u32>(&[]),
+            DaemonRoute::Served(7)
+        ));
+    }
+
+    #[test]
     fn rebuild_refusal_appends_the_remedy_once() {
         let msg = rebuild_refusal("index needs rebuild (x)");
         assert_eq!(msg.matches(REBUILD_REMEDY).count(), 1);
