@@ -55,9 +55,11 @@ worktree: feature-x (shared index)
 ```
 
 `commits_behind_head` is per worktree (each checkout has its own
-`HEAD`); `last_indexed_commit`, `indexed_at` and `compatibility`
-describe the shared index. The main checkout prints no `worktree:`
-line.
+`HEAD`). `last_indexed_commit` is this worktree's own indexed tip, or
+the main checkout's tip when this worktree has not been indexed itself
+(the same value `find_pattern` reports in `_meta`). `indexed_at` and
+`compatibility` describe the shared index. The main checkout prints no
+`worktree:` line.
 
 ### Compatibility line (v0.7+)
 

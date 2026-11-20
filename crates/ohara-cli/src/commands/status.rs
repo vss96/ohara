@@ -69,6 +69,14 @@ pub fn render_embed_cache_summary(
     ))
 }
 
+/// `last_indexed_commit` as the engine and MCP report it: this worktree's
+/// own indexed tip, else the main checkout's (plan-33), `<none>` if unset.
+pub fn render_last_indexed(st: &ohara_core::query::IndexStatus) -> String {
+    st.last_indexed_commit
+        .clone()
+        .unwrap_or_else(|| "<none>".into())
+}
+
 fn count_ignore_layers(repo_root: &std::path::Path) -> (usize, usize, usize) {
     let builtins = ohara_core::BUILT_IN_DEFAULTS.len();
     let gitattrs = std::fs::read_to_string(repo_root.join(".gitattributes"))
@@ -115,13 +123,7 @@ pub async fn run(args: Args) -> Result<()> {
     }
     let compatibility = CompatibilityStatus::assess(&runtime, &stored);
 
-    // Plan 28: derive last_indexed_commit from MAX(ulid) for V6+ indexes;
-    // fall back to the watermark column for pre-V6 rows.
-    let derived = storage.latest_indexed_by_ulid(&repo_id).await?;
-    let last_indexed_display = derived
-        .map(|m| m.commit_sha)
-        .or(st.last_indexed_commit.clone())
-        .unwrap_or_else(|| "<none>".into());
+    let last_indexed_display = render_last_indexed(&st);
 
     println!(
         "repo: {}\nid: {}\nlast_indexed_commit: {}\nindexed_at: {}\ncommits_behind_head: {}\n{}",
