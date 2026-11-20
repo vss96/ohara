@@ -63,6 +63,8 @@ impl CodexRuntime {
             argv.push(model.clone());
         }
         argv.extend(mcp.iter().cloned());
+        // `--` so a prompt starting with `-` is not parsed as a flag.
+        argv.push("--".to_string());
         argv.push(req.prompt.clone());
         argv
     }
@@ -178,6 +180,9 @@ fn decide(
 ) -> (AgentStatus, String) {
     match found {
         Some((AgentStatus::Completed, msg)) if code != Some(0) => (classify_failure(tail), msg),
+        // A generic `turn.failed` message maps to Crashed; the tail (stderr,
+        // earlier `error` events) may still reveal rate-limit/auth causes.
+        Some((AgentStatus::Crashed, msg)) => (classify_failure(tail), msg),
         Some(f) => f,
         None => (classify_failure(tail), tail.to_string()),
     }
@@ -263,6 +268,7 @@ mod tests {
                 "/work",
                 "--sandbox",
                 "workspace-write",
+                "--",
                 "do it"
             ]
         );
@@ -282,6 +288,7 @@ mod tests {
                 "b",
                 "-c",
                 "x=1",
+                "--",
                 "do it"
             ]
         );
