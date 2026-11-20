@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use ohara_core::task::{ContractHash, Deadline};
 
-use super::Contract;
+use super::{test_output, Contract, Script, ScriptKind};
+use crate::agent::process::run_streaming;
 use crate::error::{Error, Result};
 
 /// Outcome of one script.
@@ -36,14 +37,98 @@ pub struct CheckReport {
 }
 
 /// Run the contract's scripts in `cwd` after verifying the contract hash.
+///
+/// Each script runs under `deadline` with its output teed to
+/// `<logs>/<index>-<name>.log`. A `Test` script only passes when the output
+/// shows enough tests ran and every required test passed.
 pub async fn check(
-    _c: &Contract,
-    _expected: &ContractHash,
-    _cwd: &Path,
-    _deadline: Deadline,
-    _logs: &Path,
+    c: &Contract,
+    expected: &ContractHash,
+    cwd: &Path,
+    deadline: Deadline,
+    logs: &Path,
 ) -> Result<CheckReport> {
-    Err(Error::Contract("unimplemented".into()))
+    if c.hash() != *expected {
+        return Err(Error::Contract("contract hash mismatch".to_string()));
+    }
+    let mut scripts = Vec::with_capacity(c.scripts.len());
+    for (i, script) in c.scripts.iter().enumerate() {
+        scripts.push(run_script(i, script, cwd, deadline, logs).await?);
+    }
+    let satisfied = scripts.iter().all(|s| s.passed);
+    Ok(CheckReport { scripts, satisfied })
+}
+
+async fn run_script(
+    index: usize,
+    script: &Script,
+    cwd: &Path,
+    deadline: Deadline,
+    logs: &Path,
+) -> Result<ScriptResult> {
+    let log = logs.join(format!("{index}-{}.log", sanitize(&script.name)));
+    // The transcript is append-only; start clean so output is this run's only.
+    if let Err(e) = tokio::fs::remove_file(&log).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(e.into());
+        }
+    }
+    let exit = run_streaming(&script.run, None, cwd, deadline, &log).await?;
+    let mut failures = Vec::new();
+    if exit.killed_at_deadline {
+        failures.push("timed out at the deadline".to_string());
+    }
+    if !exit.killed_at_deadline && exit.code != Some(0) {
+        failures.push(format!("exited with {:?}", exit.code));
+    }
+    let mut tests_ran = None;
+    let mut missing_required = Vec::new();
+    if script.kind == ScriptKind::Test {
+        let output = String::from_utf8_lossy(&tokio::fs::read(&log).await?).into_owned();
+        let summary = test_output::parse(&output);
+        tests_ran = summary.ran;
+        match summary.ran {
+            None => failures.push("could not count tests".to_string()),
+            Some(n) if n < script.effective_min_tests() => failures.push(format!(
+                "ran {n} tests, expected at least {}",
+                script.effective_min_tests()
+            )),
+            Some(_) => {}
+        }
+        missing_required = script
+            .required_tests
+            .iter()
+            .filter(|req| !summary.passed_names.iter().any(|n| matches_name(n, req)))
+            .cloned()
+            .collect();
+        for name in &missing_required {
+            failures.push(format!("required test did not pass: {name}"));
+        }
+    }
+    Ok(ScriptResult {
+        name: script.name.clone(),
+        passed: failures.is_empty(),
+        exit_code: exit.code,
+        tests_ran,
+        missing_required,
+        failures,
+        log,
+    })
+}
+
+/// A passed test satisfies a requirement by exact name or `::`-suffix
+/// (cargo prints module paths without the crate prefix a contract may use).
+fn matches_name(passed: &str, required: &str) -> bool {
+    passed == required || passed.ends_with(&format!("::{required}"))
+}
+
+fn sanitize(name: &str) -> String {
+    name.chars()
+        .map(|c| match c.is_ascii_alphanumeric() || c == '-' {
+            true => c,
+            false => '_',
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -121,7 +206,10 @@ mod tests {
         let r = run(&c).await;
         assert!(!r.satisfied);
         assert_eq!(r.scripts[0].missing_required, vec!["a::absent".to_string()]);
-        assert!(r.scripts[0].failures.iter().any(|f| f.contains("a::absent")));
+        assert!(r.scripts[0]
+            .failures
+            .iter()
+            .any(|f| f.contains("a::absent")));
     }
 
     #[tokio::test]

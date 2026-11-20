@@ -12,8 +12,63 @@ pub struct TestSummary {
 }
 
 /// Parse cargo, pytest or jest/vitest output.
-pub fn parse(_output: &str) -> TestSummary {
-    TestSummary::default()
+pub fn parse(output: &str) -> TestSummary {
+    let mut passed_names = BTreeSet::new();
+    let mut cargo_total: Option<u32> = None;
+    let mut other_total: Option<u32> = None;
+    for line in output.lines() {
+        let line = line.trim();
+        if let Some(name) = cargo_passed_name(line) {
+            passed_names.insert(name.to_string());
+            continue;
+        }
+        if let Some(name) = pytest_passed_name(line) {
+            passed_names.insert(name.to_string());
+            continue;
+        }
+        if line.starts_with("test result:") {
+            let n = passed_count(line).unwrap_or(0);
+            cargo_total = Some(cargo_total.unwrap_or(0) + n);
+            continue;
+        }
+        if is_summary_line(line) {
+            other_total = other_total.or_else(|| passed_count(line));
+        }
+    }
+    TestSummary {
+        ran: cargo_total.or(other_total),
+        passed_names,
+    }
+}
+
+/// `test <name> ... ok` (cargo).
+fn cargo_passed_name(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("test ")?;
+    rest.strip_suffix(" ... ok")
+}
+
+/// `<path>::<name> PASSED [ 50%]` (pytest -v).
+fn pytest_passed_name(line: &str) -> Option<&str> {
+    let idx = line.find(" PASSED")?;
+    let name = line[..idx].trim();
+    name.contains("::").then_some(name)
+}
+
+/// Jest/vitest `Tests:`/`Tests ` summaries and pytest `... N passed ... in 1s` lines.
+fn is_summary_line(line: &str) -> bool {
+    line.starts_with("Tests:")
+        || line.starts_with("Tests ")
+        || (line.contains(" passed") && line.contains(" in "))
+}
+
+/// The number directly before the word `passed`.
+fn passed_count(line: &str) -> Option<u32> {
+    line.match_indices("passed").find_map(|(idx, _)| {
+        line[..idx]
+            .split_whitespace()
+            .next_back()
+            .and_then(|tok| tok.parse().ok())
+    })
 }
 
 #[cfg(test)]

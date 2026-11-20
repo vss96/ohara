@@ -46,10 +46,9 @@ impl Git {
         let mut child = Command::new("git")
             .args(args)
             .current_dir(&self.cwd)
-            .stdin(if stdin.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
+            .stdin(match stdin {
+                Some(_) => Stdio::piped(),
+                None => Stdio::null(),
             })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -71,7 +70,11 @@ impl Git {
 
     /// Run `git <args>` with the harness commit identity configured.
     pub(crate) fn run_as_harness(&self, args: &[&str], stdin: Option<&str>) -> Result<String> {
-        let full: Vec<&str> = IDENTITY.iter().copied().chain(args.iter().copied()).collect();
+        let full: Vec<&str> = IDENTITY
+            .iter()
+            .copied()
+            .chain(args.iter().copied())
+            .collect();
         self.run_with_stdin(&full, stdin)
     }
 
@@ -107,5 +110,38 @@ impl Git {
     pub fn diff_names(&self, from: &str, to: &str) -> Result<Vec<String>> {
         let out = self.run(&["diff", "--name-only", from, to])?;
         Ok(out.lines().map(str::to_string).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo() -> (tempfile::TempDir, Git) {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::new(dir.path());
+        git.run(&["init", "-q"]).unwrap();
+        git.run(&["config", "user.name", "t"]).unwrap();
+        git.run(&["config", "user.email", "t@example.com"]).unwrap();
+        (dir, git)
+    }
+
+    #[test]
+    fn commit_all_head_diff_reset_and_worktree() {
+        let (dir, git) = repo();
+        std::fs::write(dir.path().join("a.txt"), "1").unwrap();
+        let first = git.commit_all("first").unwrap();
+        assert_eq!(git.head().unwrap(), first);
+        std::fs::write(dir.path().join("b.txt"), "2").unwrap();
+        let second = git.commit_all("second").unwrap();
+        assert_eq!(git.diff_names(&first, &second).unwrap(), vec!["b.txt"]);
+        git.reset_hard(&first).unwrap();
+        assert_eq!(git.head().unwrap(), first);
+        assert!(!dir.path().join("b.txt").exists());
+
+        let wt = dir.path().join("wt");
+        git.worktree_add(&wt, "ohara/x", &first).unwrap();
+        assert!(wt.join("a.txt").exists());
+        assert!(git.run(&["bogus-subcommand"]).is_err());
     }
 }
