@@ -33,7 +33,7 @@ rmcp.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-async-trait = "0.1"
+async-trait.workspace = true
 chrono.workspace = true
 
 [dev-dependencies]

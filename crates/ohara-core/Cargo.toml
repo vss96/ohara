@@ -14,7 +14,7 @@ serde_json.workspace = true
 chrono.workspace = true
 sha2.workspace = true
 hex.workspace = true
-async-trait = "0.1"
+async-trait.workspace = true
 git2.workspace = true
 # `macros` for tokio::join! in the retrieval lanes.
 # `rt` + `sync` added for plan-28 actor pipeline (tokio::spawn,

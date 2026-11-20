@@ -165,7 +165,7 @@ chrono.workspace = true
 fastembed.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
-tempfile = "3"
+tempfile.workspace = true
 tokio = { workspace = true }
 tracing.workspace = true
 tracing-subscriber.workspace = true
