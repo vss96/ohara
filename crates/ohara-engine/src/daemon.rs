@@ -99,9 +99,7 @@ pub async fn run_daemon_with_engine(
                 if watchdog_stop.is_cancelled() {
                     break;
                 }
-                if let Ok(reg) = crate::registry::Registry::open(&reg_path) {
-                    let _ = reg.touch_health(pid);
-                }
+                crate::lifecycle::heartbeat(&reg_path, pid);
             }
         });
     }

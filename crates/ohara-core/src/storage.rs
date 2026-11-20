@@ -125,55 +125,143 @@ pub struct EmbedCacheStats {
     pub total_bytes: u64,
 }
 
+/// Content-addressed caches the indexer consults to skip redundant
+/// embedding work: the per-blob "seen" set and the plan-27 chunk-level
+/// embed cache.
+///
+/// Split out of [`Storage`] (issue #98) so the embed stage, and its test
+/// fakes, depend only on this seam. [`Storage`] has it as a supertrait,
+/// so an `Arc<dyn Storage>` upcasts to `Arc<dyn StorageCache>`.
 #[async_trait]
-pub trait Storage: Send + Sync {
-    // --- Repo lifecycle ---
+pub trait StorageCache: Send + Sync {
+    // --- Blob cache ---
 
-    /// Register a repository in the index. Idempotent on `repo_id`:
-    /// re-calling with the same id updates `path` / `first_commit_sha`
-    /// without dropping previously indexed rows.
-    async fn open_repo(&self, repo_id: &RepoId, path: &str, first_commit_sha: &str) -> Result<()>;
+    /// Has a blob with this `(blob_sha, embedding_model)` been embedded
+    /// before? Used to skip re-embedding identical content across
+    /// commits.
+    async fn blob_was_seen(&self, blob_sha: &str, embedding_model: &str) -> Result<bool>;
 
-    /// Return the current index watermark for `repo_id`. A fresh repo
-    /// returns `IndexStatus { last_indexed_commit: None, .. }`.
-    async fn get_index_status(&self, repo_id: &RepoId) -> Result<IndexStatus>;
+    /// Record that `(blob_sha, embedding_model)` has been embedded.
+    /// Idempotent on the pair.
+    async fn record_blob_seen(&self, blob_sha: &str, embedding_model: &str) -> Result<()>;
 
-    /// Advance the watermark to `sha`. The indexer calls this after
-    /// every commit it successfully indexes; it must be monotonic in
-    /// caller-visible terms (callers always pass the newest commit
-    /// they've persisted).
-    async fn set_last_indexed_commit(&self, repo_id: &RepoId, sha: &str) -> Result<()>;
+    // --- Chunk-level embed cache (plan 27) ---
 
-    // --- Write path ---
-
-    /// Persist a commit's metadata + message embedding. Idempotent on
-    /// `record.meta.commit_sha` (INSERT OR REPLACE).
-    async fn put_commit(&self, repo_id: &RepoId, record: &CommitRecord) -> Result<()>;
-
-    /// Cheap "is this commit already indexed?" check used by the indexer's
-    /// per-commit short-circuit on resume.
+    /// Plan 27: chunk-level embed cache. Look up cached vectors for
+    /// `hashes` under the given `embed_model`. Returns a map keyed by
+    /// the `ContentHash` values that hit; misses are simply absent
+    /// from the map.
     ///
-    /// The watermark only excludes a commit and its strict ancestor chain
-    /// (`git2::Revwalk::hide`). Commits reachable via a non-watermark-ancestor
-    /// path — merge from a feature branch, octopus merge, history rewrite —
-    /// would otherwise be re-walked and re-embedded even though their
-    /// `commit_record` row already exists. Implementations should answer
-    /// from the primary-key index on `commit_record.sha` so this stays
-    /// sub-millisecond per commit. See plan-9 / RFC v0.6.3.
-    async fn commit_exists(&self, sha: &str) -> Result<bool>;
+    /// Default impl returns an empty map — appropriate for in-memory
+    /// test storages that don't carry a cache. `SqliteStorage`
+    /// overrides with a real batched SELECT.
+    async fn embed_cache_get_many(
+        &self,
+        hashes: &[crate::types::ContentHash],
+        embed_model: &str,
+    ) -> Result<std::collections::HashMap<crate::types::ContentHash, Vec<f32>>> {
+        let _ = (hashes, embed_model);
+        Ok(std::collections::HashMap::new())
+    }
 
-    /// Persist a batch of hunks with their diff embeddings. Idempotent
-    /// at the (commit_sha, file_path) grain — re-calling with the same
-    /// hunk replaces the row rather than appending a duplicate.
-    async fn put_hunks(&self, repo_id: &RepoId, records: &[HunkRecord]) -> Result<()>;
+    /// Plan 27: read-only stats over the chunk_embed_cache. Default
+    /// returns an all-zero snapshot for in-memory storages.
+    async fn embed_cache_stats(&self) -> Result<EmbedCacheStats> {
+        Ok(EmbedCacheStats::default())
+    }
 
-    /// Replace the repo's HEAD-symbol snapshot with `symbols` (extracted
-    /// by the AST chunker). Deleting the previous snapshot (and its FTS
-    /// mirrors) and inserting the new set happen in one transaction, so
-    /// repeated calls never accumulate duplicates and readers never see
-    /// an empty snapshot in between.
-    async fn put_head_symbols(&self, repo_id: &RepoId, symbols: &[Symbol]) -> Result<()>;
+    /// Plan 27: chunk-level embed cache write. Insert one row per
+    /// `(hash, model)` pair (composite primary key). Re-insertion of
+    /// an existing key is a no-op via `INSERT OR IGNORE`.
+    ///
+    /// Default impl is a no-op. `SqliteStorage` overrides with a
+    /// real batched INSERT.
+    async fn embed_cache_put_many(
+        &self,
+        entries: &[(crate::types::ContentHash, Vec<f32>)],
+        embed_model: &str,
+    ) -> Result<()> {
+        let _ = (entries, embed_model);
+        Ok(())
+    }
+}
 
+/// Read-side lookups `explain_change` needs to hydrate blame results:
+/// commit metadata, a commit's hunks for one file, and neighbouring
+/// commits on the same file.
+///
+/// Split out of [`Storage`] (issue #98) so the explain hydrator and
+/// orchestrator, and their test fakes, depend only on this seam.
+#[async_trait]
+pub trait StorageExplain: Send + Sync {
+    // --- Explain support ---
+
+    /// Fetch a single commit's metadata. Returns `Ok(None)` if the SHA
+    /// isn't indexed (e.g., commit is older than the watermark). Used by
+    /// the `explain_change` orchestrator to enrich blame results with
+    /// commit message + author + date for display.
+    async fn get_commit(&self, repo_id: &RepoId, sha: &str) -> Result<Option<CommitMeta>>;
+
+    /// Plan 21: fetch multiple commits by SHA in one call. Returns a
+    /// `HashMap` mapping each found SHA to its `CommitMeta`. SHAs that
+    /// are not indexed produce no entry — callers treat absence as
+    /// "unindexed" (same semantics as `get_commit` returning `Ok(None)`).
+    ///
+    /// The default implementation calls `get_commit` once per SHA
+    /// (preserves backward compatibility for `MockStorage` and other
+    /// test fakes that don't override this method). Production callers
+    /// should use `SqliteStorage` whose override issues a single SQL
+    /// statement with `IN (?, …)`.
+    async fn get_commits_by_sha(
+        &self,
+        repo_id: &RepoId,
+        shas: &[String],
+    ) -> Result<std::collections::HashMap<String, CommitMeta>> {
+        let mut out = std::collections::HashMap::with_capacity(shas.len());
+        for sha in shas {
+            if let Some(cm) = self.get_commit(repo_id, sha).await? {
+                out.insert(sha.clone(), cm);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Fetch the hunks of a commit that touch a specific file path. Used
+    /// by `explain_change` to attach a diff excerpt per blame hit.
+    /// JOINs `hunk` against `file_path` filtered by sha + path.
+    async fn get_hunks_for_file_in_commit(
+        &self,
+        repo_id: &RepoId,
+        sha: &str,
+        file_path: &str,
+    ) -> Result<Vec<Hunk>>;
+
+    /// Plan 12 Task 3.1: commits that touched `file_path` near
+    /// `anchor_sha`, with their per-commit touched-hunk count for
+    /// the file. `limit_before` is the cap on commits older than
+    /// the anchor (newest-first); `limit_after` is the cap on
+    /// commits newer than the anchor (oldest-first → chronological
+    /// after the anchor). The anchor itself is never returned.
+    /// Returns an empty Vec when the anchor isn't indexed (so the
+    /// orchestrator can fall back to "no contextual commits" rather
+    /// than error).
+    async fn get_neighboring_file_commits(
+        &self,
+        repo_id: &RepoId,
+        file_path: &str,
+        anchor_sha: &str,
+        limit_before: u8,
+        limit_after: u8,
+    ) -> Result<Vec<(u32, CommitMeta)>>;
+}
+
+/// Retrieval-lane queries: vector KNN, the BM25 lanes, and hunk symbol
+/// attribution lookups used to annotate hits.
+///
+/// Split out of [`Storage`] (issue #98) so each retrieval lane and the
+/// [`crate::Retriever`], and their test fakes, depend only on this seam.
+#[async_trait]
+pub trait StorageRead: Send + Sync {
     // --- Read lanes (retrieval) ---
 
     /// Vector KNN over hunk diff embeddings. Ordered best-first.
@@ -265,119 +353,64 @@ pub trait Storage: Send + Sync {
         repo_id: &RepoId,
         hunk_ids: &[HunkId],
     ) -> Result<std::collections::HashMap<HunkId, Vec<HunkSymbol>>>;
+}
 
-    // --- Blob cache ---
+/// The indexer's write path: repo registration, the index watermark,
+/// and persisting commits, hunks, and HEAD symbols.
+///
+/// Split out of [`Storage`] (issue #98).
+#[async_trait]
+pub trait StorageWrite: Send + Sync {
+    /// Register a repository in the index. Idempotent on `repo_id`:
+    /// re-calling with the same id updates `path` / `first_commit_sha`
+    /// without dropping previously indexed rows.
+    async fn open_repo(&self, repo_id: &RepoId, path: &str, first_commit_sha: &str) -> Result<()>;
 
-    /// Has a blob with this `(blob_sha, embedding_model)` been embedded
-    /// before? Used to skip re-embedding identical content across
-    /// commits.
-    async fn blob_was_seen(&self, blob_sha: &str, embedding_model: &str) -> Result<bool>;
+    /// Advance the watermark to `sha`. The indexer calls this after
+    /// every commit it successfully indexes; it must be monotonic in
+    /// caller-visible terms (callers always pass the newest commit
+    /// they've persisted).
+    async fn set_last_indexed_commit(&self, repo_id: &RepoId, sha: &str) -> Result<()>;
 
-    /// Record that `(blob_sha, embedding_model)` has been embedded.
-    /// Idempotent on the pair.
-    async fn record_blob_seen(&self, blob_sha: &str, embedding_model: &str) -> Result<()>;
+    /// Persist a commit's metadata + message embedding. Idempotent on
+    /// `record.meta.commit_sha` (INSERT OR REPLACE).
+    async fn put_commit(&self, repo_id: &RepoId, record: &CommitRecord) -> Result<()>;
 
-    // --- Chunk-level embed cache (plan 27) ---
-
-    /// Plan 27: chunk-level embed cache. Look up cached vectors for
-    /// `hashes` under the given `embed_model`. Returns a map keyed by
-    /// the `ContentHash` values that hit; misses are simply absent
-    /// from the map.
+    /// Cheap "is this commit already indexed?" check used by the indexer's
+    /// per-commit short-circuit on resume.
     ///
-    /// Default impl returns an empty map — appropriate for in-memory
-    /// test storages that don't carry a cache. `SqliteStorage`
-    /// overrides with a real batched SELECT.
-    async fn embed_cache_get_many(
-        &self,
-        hashes: &[crate::types::ContentHash],
-        embed_model: &str,
-    ) -> Result<std::collections::HashMap<crate::types::ContentHash, Vec<f32>>> {
-        let _ = (hashes, embed_model);
-        Ok(std::collections::HashMap::new())
-    }
+    /// The watermark only excludes a commit and its strict ancestor chain
+    /// (`git2::Revwalk::hide`). Commits reachable via a non-watermark-ancestor
+    /// path — merge from a feature branch, octopus merge, history rewrite —
+    /// would otherwise be re-walked and re-embedded even though their
+    /// `commit_record` row already exists. Implementations should answer
+    /// from the primary-key index on `commit_record.sha` so this stays
+    /// sub-millisecond per commit. See plan-9 / RFC v0.6.3.
+    async fn commit_exists(&self, sha: &str) -> Result<bool>;
 
-    /// Plan 27: read-only stats over the chunk_embed_cache. Default
-    /// returns an all-zero snapshot for in-memory storages.
-    async fn embed_cache_stats(&self) -> Result<EmbedCacheStats> {
-        Ok(EmbedCacheStats::default())
-    }
+    /// Persist a batch of hunks with their diff embeddings. Idempotent
+    /// at the (commit_sha, file_path) grain — re-calling with the same
+    /// hunk replaces the row rather than appending a duplicate.
+    async fn put_hunks(&self, repo_id: &RepoId, records: &[HunkRecord]) -> Result<()>;
 
-    /// Plan 27: chunk-level embed cache write. Insert one row per
-    /// `(hash, model)` pair (composite primary key). Re-insertion of
-    /// an existing key is a no-op via `INSERT OR IGNORE`.
-    ///
-    /// Default impl is a no-op. `SqliteStorage` overrides with a
-    /// real batched INSERT.
-    async fn embed_cache_put_many(
-        &self,
-        entries: &[(crate::types::ContentHash, Vec<f32>)],
-        embed_model: &str,
-    ) -> Result<()> {
-        let _ = (entries, embed_model);
-        Ok(())
-    }
+    /// Replace the repo's HEAD-symbol snapshot with `symbols` (extracted
+    /// by the AST chunker). Deleting the previous snapshot (and its FTS
+    /// mirrors) and inserting the new set happen in one transaction, so
+    /// repeated calls never accumulate duplicates and readers never see
+    /// an empty snapshot in between.
+    async fn put_head_symbols(&self, repo_id: &RepoId, symbols: &[Symbol]) -> Result<()>;
+}
 
-    // --- Explain support ---
-
-    /// Fetch a single commit's metadata. Returns `Ok(None)` if the SHA
-    /// isn't indexed (e.g., commit is older than the watermark). Used by
-    /// the `explain_change` orchestrator to enrich blame results with
-    /// commit message + author + date for display.
-    async fn get_commit(&self, repo_id: &RepoId, sha: &str) -> Result<Option<CommitMeta>>;
-
-    /// Plan 21: fetch multiple commits by SHA in one call. Returns a
-    /// `HashMap` mapping each found SHA to its `CommitMeta`. SHAs that
-    /// are not indexed produce no entry — callers treat absence as
-    /// "unindexed" (same semantics as `get_commit` returning `Ok(None)`).
-    ///
-    /// The default implementation calls `get_commit` once per SHA
-    /// (preserves backward compatibility for `MockStorage` and other
-    /// test fakes that don't override this method). Production callers
-    /// should use `SqliteStorage` whose override issues a single SQL
-    /// statement with `IN (?, …)`.
-    async fn get_commits_by_sha(
-        &self,
-        repo_id: &RepoId,
-        shas: &[String],
-    ) -> Result<std::collections::HashMap<String, CommitMeta>> {
-        let mut out = std::collections::HashMap::with_capacity(shas.len());
-        for sha in shas {
-            if let Some(cm) = self.get_commit(repo_id, sha).await? {
-                out.insert(sha.clone(), cm);
-            }
-        }
-        Ok(out)
-    }
-
-    /// Fetch the hunks of a commit that touch a specific file path. Used
-    /// by `explain_change` to attach a diff excerpt per blame hit.
-    /// JOINs `hunk` against `file_path` filtered by sha + path.
-    async fn get_hunks_for_file_in_commit(
-        &self,
-        repo_id: &RepoId,
-        sha: &str,
-        file_path: &str,
-    ) -> Result<Vec<Hunk>>;
-
-    /// Plan 12 Task 3.1: commits that touched `file_path` near
-    /// `anchor_sha`, with their per-commit touched-hunk count for
-    /// the file. `limit_before` is the cap on commits older than
-    /// the anchor (newest-first); `limit_after` is the cap on
-    /// commits newer than the anchor (oldest-first → chronological
-    /// after the anchor). The anchor itself is never returned.
-    /// Returns an empty Vec when the anchor isn't indexed (so the
-    /// orchestrator can fall back to "no contextual commits" rather
-    /// than error).
-    async fn get_neighboring_file_commits(
-        &self,
-        repo_id: &RepoId,
-        file_path: &str,
-        anchor_sha: &str,
-        limit_before: u8,
-        limit_after: u8,
-    ) -> Result<Vec<(u32, CommitMeta)>>;
-
-    // --- Index metadata (plan 13) ---
+/// Facts about the index itself: freshness watermark, stamped component
+/// versions (plan 13), the newest indexed commit, and per-method metrics.
+///
+/// Split out of [`Storage`] (issue #98) so `compute_index_status` and
+/// `ohara status`-style readers, and their fakes, depend only on this seam.
+#[async_trait]
+pub trait StorageStatus: Send + Sync {
+    /// Return the current index watermark for `repo_id`. A fresh repo
+    /// returns `IndexStatus { last_indexed_commit: None, .. }`.
+    async fn get_index_status(&self, repo_id: &RepoId) -> Result<IndexStatus>;
 
     /// Read every `index_metadata` row for `repo_id` as a typed
     /// `StoredIndexMetadata`. Components absent from the table are
@@ -415,4 +448,18 @@ pub trait Storage: Send + Sync {
         let _ = repo_id;
         Ok(None)
     }
+}
+
+/// The full persistence surface: every seam at once. Implemented
+/// automatically for any type implementing all of them, so backends and
+/// test fakes implement the seams, never `Storage` itself. Consumers
+/// that need only one slice should take that seam instead (issue #98).
+pub trait Storage:
+    StorageCache + StorageExplain + StorageRead + StorageWrite + StorageStatus + Send + Sync
+{
+}
+
+impl<T> Storage for T where
+    T: StorageCache + StorageExplain + StorageRead + StorageWrite + StorageStatus + ?Sized
+{
 }

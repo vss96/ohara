@@ -145,13 +145,13 @@ libc.workspace = true
 # Direct ort dep for the coreml_matrix harness's EP builder types
 # (ModelFormat / ComputeUnits — fastembed only re-exports the dispatch
 # type). Same pin + same target-conditional shape as ohara-embed's:
-# must match fastembed 5.13's transitive ort exactly so the dispatch
+# must match fastembed 7.7's transitive ort exactly so the dispatch
 # stays type-compatible.
 [target.'cfg(target_os = "macos")'.dependencies]
-ort = { version = "=2.0.0-rc.12", optional = true, features = ["coreml"] }
+ort = { version = "=2.0.0-rc.15", optional = true, features = ["coreml"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-ort = { version = "=2.0.0-rc.12", optional = true }
+ort = { version = "=2.0.0-rc.15", optional = true }
 
 [features]
 # Enables the coreml_matrix harness. Pulls the CoreML EP into ort on

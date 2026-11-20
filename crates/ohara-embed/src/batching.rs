@@ -463,4 +463,60 @@ mod tests {
             "error must name the row-count mismatch: {err}"
         );
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config as ProptestConfig, TestRunner};
+
+        #[test]
+        fn batching_embedder_preserves_caller_alignment_and_conserves_rows() {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+
+            let mut runner = TestRunner::new(ProptestConfig::with_cases(32));
+            let strategy = (1usize..=32, proptest::collection::vec(0usize..=35, 1..=12));
+
+            runner
+                .run(&strategy, |(batch_rows, caller_sizes)| {
+                    rt.block_on(async move {
+                        let sizes = Arc::new(Mutex::new(Vec::new()));
+                        let be = Arc::new(BatchingEmbedder::new(
+                            Arc::new(StubEmbedder {
+                                batch_sizes: sizes.clone(),
+                            }),
+                            batch_rows,
+                        ));
+
+                        let expected_total: usize = caller_sizes.iter().sum();
+                        let mut handles = Vec::with_capacity(caller_sizes.len());
+                        for (caller_idx, &len) in caller_sizes.iter().enumerate() {
+                            let be = be.clone();
+                            let base = caller_idx * 1_000;
+                            let inputs: Vec<String> =
+                                (0..len).map(|j| (base + j).to_string()).collect();
+                            let expected: Vec<f32> = (0..len).map(|j| (base + j) as f32).collect();
+                            handles.push(tokio::spawn(async move {
+                                let out = be.embed_batch(&inputs).await.unwrap();
+                                let got: Vec<f32> = out.into_iter().map(|v| v[0]).collect();
+                                (got, expected)
+                            }));
+                        }
+
+                        for h in handles {
+                            let (got, expected) = h.await.unwrap();
+                            prop_assert_eq!(got, expected);
+                        }
+
+                        let dispatched_total: usize = sizes.lock().unwrap().iter().sum();
+                        prop_assert_eq!(dispatched_total, expected_total);
+                        Ok(())
+                    })
+                })
+                .unwrap();
+        }
+    }
 }

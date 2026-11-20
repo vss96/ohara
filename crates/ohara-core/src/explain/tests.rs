@@ -2,9 +2,7 @@
 //! to keep `mod.rs` under the 500-line limit (plan-21 D.1).
 
 use super::*;
-use crate::query::IndexStatus;
-use crate::storage::{CommitRecord, HunkHit, HunkRecord};
-use crate::types::{ChangeKind, CommitMeta, Hunk, Symbol};
+use crate::types::{ChangeKind, CommitMeta, Hunk};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -82,103 +80,12 @@ impl FakeStorageOrch {
 }
 
 #[async_trait]
-impl Storage for FakeStorageOrch {
-    async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> Result<()> {
-        Ok(())
-    }
-    async fn get_index_status(&self, _: &RepoId) -> Result<IndexStatus> {
-        unreachable!()
-    }
-    async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> Result<()> {
-        Ok(())
-    }
-    async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> Result<()> {
-        Ok(())
-    }
-    async fn commit_exists(&self, _: &str) -> Result<bool> {
-        unreachable!("explain orchestrator should not exercise commit_exists")
-    }
-    async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> Result<()> {
-        Ok(())
-    }
-    async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> Result<()> {
-        Ok(())
-    }
-    async fn knn_hunks(
-        &self,
-        _: &RepoId,
-        _: &[f32],
-        _: u8,
-        _: Option<&str>,
-        _: Option<i64>,
-    ) -> Result<Vec<HunkHit>> {
-        unreachable!()
-    }
-    async fn bm25_hunks_by_text(
-        &self,
-        _: &RepoId,
-        _: &str,
-        _: u8,
-        _: Option<&str>,
-        _: Option<i64>,
-    ) -> Result<Vec<HunkHit>> {
-        unreachable!()
-    }
-    async fn bm25_hunks_by_semantic_text(
-        &self,
-        _: &RepoId,
-        _: &str,
-        _: u8,
-        _: Option<&str>,
-        _: Option<i64>,
-    ) -> Result<Vec<HunkHit>> {
-        unreachable!()
-    }
-    async fn bm25_hunks_by_symbol_name(
-        &self,
-        _: &RepoId,
-        _: &str,
-        _: u8,
-        _: Option<&str>,
-        _: Option<i64>,
-    ) -> Result<Vec<HunkHit>> {
-        unreachable!()
-    }
-    async fn bm25_hunks_by_historical_symbol(
-        &self,
-        _: &RepoId,
-        _: &str,
-        _: u8,
-        _: Option<&str>,
-        _: Option<i64>,
-    ) -> Result<Vec<HunkHit>> {
-        unreachable!()
-    }
-    async fn get_hunk_symbols(
-        &self,
-        _: &RepoId,
-        _: crate::storage::HunkId,
-    ) -> Result<Vec<crate::types::HunkSymbol>> {
-        unreachable!()
-    }
-    async fn get_hunk_symbols_batch(
-        &self,
-        _: &RepoId,
-        _: &[crate::storage::HunkId],
-    ) -> Result<std::collections::HashMap<crate::storage::HunkId, Vec<crate::types::HunkSymbol>>>
-    {
-        Ok(std::collections::HashMap::new())
-    }
-    async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> {
-        Ok(false)
-    }
-    async fn record_blob_seen(&self, _: &str, _: &str) -> Result<()> {
-        Ok(())
-    }
+impl crate::storage::StorageExplain for FakeStorageOrch {
     async fn get_commit(&self, _: &RepoId, sha: &str) -> Result<Option<CommitMeta>> {
         self.get_commit_calls.lock().unwrap().push(sha.to_string());
         Ok(self.commits.get(sha).cloned())
     }
+
     async fn get_hunks_for_file_in_commit(
         &self,
         _: &RepoId,
@@ -191,6 +98,7 @@ impl Storage for FakeStorageOrch {
             .cloned()
             .unwrap_or_default())
     }
+
     async fn get_neighboring_file_commits(
         &self,
         _: &RepoId,
@@ -204,15 +112,6 @@ impl Storage for FakeStorageOrch {
             .get(&(file.to_string(), anchor.to_string()))
             .cloned()
             .unwrap_or_default())
-    }
-    async fn get_index_metadata(
-        &self,
-        _: &RepoId,
-    ) -> Result<crate::index_metadata::StoredIndexMetadata> {
-        Ok(crate::index_metadata::StoredIndexMetadata::default())
-    }
-    async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> Result<()> {
-        Ok(())
     }
 }
 

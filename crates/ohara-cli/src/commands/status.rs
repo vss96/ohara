@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
 use ohara_core::index_metadata::{CompatibilityStatus, RuntimeIndexMetadata};
-use ohara_core::{EmbedMode, Storage};
+use ohara_core::{EmbedMode, StorageCache, StorageStatus};
 use std::path::PathBuf;
 use std::sync::Arc;
 

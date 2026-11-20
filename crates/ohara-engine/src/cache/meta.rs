@@ -2,6 +2,7 @@ use ohara_core::query::ResponseMeta;
 use ohara_core::types::RepoId;
 use ohara_core::WorktreeKey;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,8 @@ type Key = (RepoId, WorktreeKey);
 pub struct MetaCache {
     ttl: Duration,
     inner: Mutex<HashMap<Key, (Instant, ResponseMeta)>>,
+    /// Number of `get` calls served from a fresh (non-expired) entry.
+    hits: AtomicU64,
 }
 
 impl MetaCache {
@@ -26,6 +29,7 @@ impl MetaCache {
         Self {
             ttl,
             inner: Mutex::new(HashMap::new()),
+            hits: AtomicU64::new(0),
         }
     }
 
@@ -38,7 +42,14 @@ impl MetaCache {
         if t.elapsed() > self.ttl {
             return None;
         }
+        self.hits.fetch_add(1, Ordering::Relaxed);
         Some(v.clone())
+    }
+
+    /// Number of `get` calls served from a fresh entry. Misses and
+    /// TTL-expired entries are not counted.
+    pub fn hits(&self) -> u64 {
+        self.hits.load(Ordering::Relaxed)
     }
 
     /// Insert or overwrite the cached value for `(repo_id, worktree)`,
@@ -132,5 +143,23 @@ mod tests {
         cache.invalidate(&key);
         assert!(cache.get(&key, &main_wt()).is_none());
         assert!(cache.get(&key, &slot).is_none());
+    }
+
+    #[test]
+    fn hits_count_only_fresh_cache_hits() {
+        let cache = MetaCache::new(Duration::from_secs(60));
+        let key = make_key();
+        assert!(cache.get(&key, &main_wt()).is_none());
+        assert_eq!(cache.hits(), 0, "a miss is not a hit");
+        cache.put(key.clone(), main_wt(), make_meta("x"));
+        cache.get(&key, &main_wt()).unwrap();
+        cache.get(&key, &main_wt()).unwrap();
+        assert_eq!(cache.hits(), 2);
+
+        let expired = MetaCache::new(Duration::from_nanos(0));
+        expired.put(key.clone(), main_wt(), make_meta("stale"));
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(expired.get(&key, &main_wt()).is_none());
+        assert_eq!(expired.hits(), 0, "an expired entry is not a hit");
     }
 }

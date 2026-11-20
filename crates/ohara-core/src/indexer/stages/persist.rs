@@ -91,7 +91,7 @@ mod tests {
     use crate::query::IndexStatus;
     use crate::storage::{CommitRecord, HunkHit, HunkId, HunkRecord as StorageHunkRecord};
     use crate::types::{CommitMeta, Hunk, HunkSymbol, RepoId, Symbol};
-    use crate::{Result, Storage};
+    use crate::Result;
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
 
@@ -137,10 +137,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl Storage for RecordingStorage {
-        async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> Result<()> {
-            Ok(())
-        }
+    impl crate::storage::StorageStatus for RecordingStorage {
         async fn get_index_status(&self, _: &RepoId) -> Result<IndexStatus> {
             Ok(IndexStatus {
                 last_indexed_commit: None,
@@ -148,9 +145,26 @@ mod tests {
                 indexed_at: None,
             })
         }
+
+        async fn get_index_metadata(&self, _: &RepoId) -> Result<StoredIndexMetadata> {
+            Ok(StoredIndexMetadata::default())
+        }
+
+        async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl crate::storage::StorageWrite for RecordingStorage {
+        async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+
         async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> Result<()> {
             Ok(())
         }
+
         async fn put_commit(&self, _: &RepoId, record: &CommitRecord) -> Result<()> {
             self.commits
                 .lock()
@@ -158,16 +172,23 @@ mod tests {
                 .push(record.meta.commit_sha.clone());
             Ok(())
         }
+
         async fn commit_exists(&self, _: &str) -> Result<bool> {
             Ok(false)
         }
+
         async fn put_hunks(&self, _: &RepoId, rows: &[StorageHunkRecord]) -> Result<()> {
             self.hunk_counts.lock().unwrap().push(rows.len());
             Ok(())
         }
+
         async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> Result<()> {
             Ok(())
         }
+    }
+
+    #[async_trait]
+    impl crate::storage::StorageRead for RecordingStorage {
         async fn knn_hunks(
             &self,
             _: &RepoId,
@@ -178,6 +199,7 @@ mod tests {
         ) -> Result<Vec<HunkHit>> {
             Ok(vec![])
         }
+
         async fn bm25_hunks_by_text(
             &self,
             _: &RepoId,
@@ -188,6 +210,7 @@ mod tests {
         ) -> Result<Vec<HunkHit>> {
             Ok(vec![])
         }
+
         async fn bm25_hunks_by_semantic_text(
             &self,
             _: &RepoId,
@@ -198,6 +221,7 @@ mod tests {
         ) -> Result<Vec<HunkHit>> {
             Ok(vec![])
         }
+
         async fn bm25_hunks_by_symbol_name(
             &self,
             _: &RepoId,
@@ -208,6 +232,7 @@ mod tests {
         ) -> Result<Vec<HunkHit>> {
             Ok(vec![])
         }
+
         async fn bm25_hunks_by_historical_symbol(
             &self,
             _: &RepoId,
@@ -218,9 +243,11 @@ mod tests {
         ) -> Result<Vec<HunkHit>> {
             Ok(vec![])
         }
+
         async fn get_hunk_symbols(&self, _: &RepoId, _: HunkId) -> Result<Vec<HunkSymbol>> {
             Ok(vec![])
         }
+
         async fn get_hunk_symbols_batch(
             &self,
             _: &RepoId,
@@ -228,15 +255,14 @@ mod tests {
         ) -> Result<std::collections::HashMap<HunkId, Vec<HunkSymbol>>> {
             Ok(std::collections::HashMap::new())
         }
-        async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> {
-            Ok(false)
-        }
-        async fn record_blob_seen(&self, _: &str, _: &str) -> Result<()> {
-            Ok(())
-        }
+    }
+
+    #[async_trait]
+    impl crate::storage::StorageExplain for RecordingStorage {
         async fn get_commit(&self, _: &RepoId, _: &str) -> Result<Option<CommitMeta>> {
             Ok(None)
         }
+
         async fn get_hunks_for_file_in_commit(
             &self,
             _: &RepoId,
@@ -245,6 +271,7 @@ mod tests {
         ) -> Result<Vec<Hunk>> {
             Ok(vec![])
         }
+
         async fn get_neighboring_file_commits(
             &self,
             _: &RepoId,
@@ -255,10 +282,15 @@ mod tests {
         ) -> Result<Vec<(u32, CommitMeta)>> {
             Ok(vec![])
         }
-        async fn get_index_metadata(&self, _: &RepoId) -> Result<StoredIndexMetadata> {
-            Ok(StoredIndexMetadata::default())
+    }
+
+    #[async_trait]
+    impl crate::storage::StorageCache for RecordingStorage {
+        async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> {
+            Ok(false)
         }
-        async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> Result<()> {
+
+        async fn record_blob_seen(&self, _: &str, _: &str) -> Result<()> {
             Ok(())
         }
     }

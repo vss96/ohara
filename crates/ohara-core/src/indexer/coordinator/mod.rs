@@ -69,7 +69,7 @@ pub struct Coordinator {
     embed_mode: crate::EmbedMode,
     /// Plan 27: storage handle reused by EmbedStage for the
     /// chunk-embed cache. Set when embed_mode != Off.
-    cache_storage: Option<Arc<dyn crate::Storage>>,
+    cache_storage: Option<Arc<dyn crate::storage::StorageCache>>,
     workers: usize,
     /// Plan 33: when set, the walk hides these tips instead of reading
     /// the legacy watermark from `get_index_status`.
@@ -150,8 +150,10 @@ impl Coordinator {
     pub fn with_embed_mode(mut self, mode: crate::EmbedMode) -> Self {
         self.embed_mode = mode;
         if mode != crate::EmbedMode::Off {
-            // Reuse the storage handle that was passed to `new`.
-            self.cache_storage = Some(self.storage.clone());
+            // Reuse the storage handle that was passed to `new`, upcast to
+            // the cache seam the embed stage depends on.
+            let cache: Arc<dyn crate::storage::StorageCache> = self.storage.clone();
+            self.cache_storage = Some(cache);
         }
         self
     }

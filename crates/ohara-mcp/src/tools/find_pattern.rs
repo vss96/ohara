@@ -15,7 +15,8 @@ use crate::tools::explain_change::{ExplainChangeInput, EXPLAIN_TOOL_DESCRIPTION}
 use ohara_core::count_lines;
 use ohara_core::index_metadata::CompatibilityStatus;
 use ohara_core::query_understanding::{parse_query, RetrievalProfile};
-use ohara_engine::ipc::{ErrorCode, RequestMethod, Response};
+use ohara_engine::client::DaemonRoute;
+use ohara_engine::ipc::RequestMethod;
 use ohara_engine::FindPatternResult;
 use rmcp::{
     model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
@@ -29,13 +30,13 @@ use std::sync::Arc;
 /// the index is incompatible with the current runtime. Surfaced to the MCP
 /// client as `invalid_params` so the agent can run the rebuild itself.
 fn rebuild_refusal(detail: &str) -> rmcp::Error {
-    rmcp::Error::invalid_params(
-        format!(
-            "find_pattern refuses to run: {detail}. \
-             Run `ohara index --rebuild` in this repo first."
-        ),
-        None,
-    )
+    refusal_error(ohara_engine::client::rebuild_refusal(detail))
+}
+
+/// Wrap an already-composed refusal message (detail + remedy) in the
+/// MCP `invalid_params` envelope.
+fn refusal_error(message: String) -> rmcp::Error {
+    rmcp::Error::invalid_params(format!("find_pattern refuses to run: {message}"), None)
 }
 
 fn map_engine_error(e: ohara_engine::EngineError) -> rmcp::Error {
@@ -45,31 +46,6 @@ fn map_engine_error(e: ohara_engine::EngineError) -> rmcp::Error {
         }
         other => rmcp::Error::internal_error(other.to_string(), None),
     }
-}
-
-/// Daemon response → typed result, mapping NeedsRebuild to the same
-/// refusal envelope the in-process path produces.
-fn decode_find_pattern(resp: Response) -> Result<FindPatternResult, rmcp::Error> {
-    if let Some(err) = resp.error {
-        if err.code == ErrorCode::NeedsRebuild {
-            return Err(rebuild_refusal(&err.message));
-        }
-        return Err(rmcp::Error::internal_error(err.message, None));
-    }
-    let value = resp.result.ok_or_else(|| {
-        rmcp::Error::internal_error("daemon response missing result".to_string(), None)
-    })?;
-    serde_json::from_value(value)
-        .map_err(|e| rmcp::Error::internal_error(format!("decode FindPatternResult: {e}"), None))
-}
-
-/// Successful daemon response → typed value; anything else → None
-/// (caller falls back in-process).
-fn decode_ok<T: serde::de::DeserializeOwned>(resp: Response) -> Option<T> {
-    if resp.error.is_some() {
-        return None;
-    }
-    serde_json::from_value(resp.result?).ok()
 }
 
 /// Shared envelope builder — both paths produce the existing wire shape.
@@ -175,16 +151,22 @@ impl OharaService {
         };
 
         // Daemon-first (plan-29): one shared engine across sessions.
-        if let Some(resp) = self
+        // Shared routing policy (issue #96): NeedsRebuild refuses; every
+        // other daemon outcome falls back in-process.
+        match self
             .server
             .daemon_call(RequestMethod::FindPattern(q.clone()))
             .await
+            .route()
         {
-            return find_pattern_body(decode_find_pattern(resp)?, &input.query);
+            DaemonRoute::Served(result) => return find_pattern_body(result, &input.query),
+            DaemonRoute::Refuse(msg) => return Err(refusal_error(msg)),
+            DaemonRoute::Fallback => {}
         }
 
-        // In-process fallback (daemon disabled or unreachable). The engine
-        // now guards NeedsRebuild itself, so the refusal still surfaces here.
+        // In-process fallback (daemon disabled, unreachable, or errored).
+        // The engine guards NeedsRebuild itself, so the refusal still
+        // surfaces here.
         let engine = self.server.engine().await;
         let result = engine
             .find_pattern(&self.server.repo_path, q)
@@ -235,18 +217,18 @@ impl OharaService {
 
         // Daemon-first: blame result + index status both from the shared
         // engine. Any miss → full in-process fallback below.
-        if let Some(resp) = self
+        if let DaemonRoute::Served(explain) = self
             .server
             .daemon_call(RequestMethod::ExplainChange(q.clone()))
             .await
+            .route::<ohara_engine::ExplainResult>()
         {
-            let explain: Option<ohara_engine::ExplainResult> = decode_ok(resp);
-            let meta: Option<ohara_core::query::ResponseMeta> =
-                match self.server.daemon_call(RequestMethod::IndexStatus).await {
-                    Some(m) => decode_ok(m),
-                    None => None,
-                };
-            if let (Some(explain), Some(meta)) = (explain, meta) {
+            let meta = self
+                .server
+                .daemon_call(RequestMethod::IndexStatus)
+                .await
+                .route::<ohara_core::query::ResponseMeta>();
+            if let DaemonRoute::Served(meta) = meta {
                 let body = json!({
                     "hits": explain.hits,
                     "_meta": {
@@ -435,18 +417,19 @@ mod tests {
     }
 
     #[test]
-    fn decode_find_pattern_maps_needs_rebuild_to_refusal() {
-        use ohara_engine::ipc::{ErrorCode, ErrorPayload, Response};
-        let resp = Response {
-            id: 1,
-            result: None,
-            error: Some(ErrorPayload {
-                code: ErrorCode::NeedsRebuild,
+    fn daemon_rebuild_refusal_is_wrapped_as_invalid_params() {
+        let route = ohara_engine::client::DaemonCallResult::DaemonErrored(
+            ohara_engine::ipc::ErrorPayload {
+                code: ohara_engine::ipc::ErrorCode::NeedsRebuild,
                 message: "index needs rebuild: embedding_model mismatch".into(),
-            }),
+            },
+        )
+        .route::<FindPatternResult>();
+        let DaemonRoute::Refuse(msg) = route else {
+            panic!("NeedsRebuild must refuse");
         };
-        let err = decode_find_pattern(resp).expect_err("must refuse");
-        let msg = err.to_string();
+        let msg = refusal_error(msg).to_string();
+        assert!(msg.contains("find_pattern refuses to run"), "got: {msg}");
         assert!(msg.contains("needs rebuild"), "got: {msg}");
         assert!(msg.contains("ohara index --rebuild"), "got: {msg}");
     }

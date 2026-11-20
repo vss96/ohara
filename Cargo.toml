@@ -25,7 +25,6 @@ thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-std", "io-util", "signal", "sync"] }
-rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
@@ -36,7 +35,7 @@ deadpool-sqlite = "0.8"
 rusqlite = { version = "0.31", features = ["bundled", "load_extension", "blob", "trace"] }
 sqlite-vec = "0.1"
 refinery = { version = "0.8", features = ["rusqlite"] }
-fastembed = "~5.13"
+fastembed = "~7.7"
 # Direct hf-hub for the opt-in INT8 reranker (issue #55): mirrors the
 # feature set fastembed already enables (sync `ureq` API + `native-tls`)
 # so no new TLS/HTTP backend is pulled — the crate is already in the graph.
@@ -68,10 +67,11 @@ tokio-util = { version = "0.7", features = ["rt"] }
 ulid = "1"
 num_cpus = "1"
 fs2 = "0.4"
-# Pinned to fastembed 5.13's resolved tokenizers so PaddingParams stays
+# Pinned to fastembed 7.7's resolved tokenizers so PaddingParams stays
 # type-compatible with the embedder session (ohara-embed overrides the
 # padding strategy on the CoreML fixed-shape path).
-tokenizers = "=0.22.2"
+tokenizers = "=0.23.2"
+proptest = "1"
 
 [profile.release]
 lto = "thin"

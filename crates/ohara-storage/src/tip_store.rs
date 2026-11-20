@@ -78,7 +78,7 @@ impl TipStore for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use crate::SqliteStorage;
-    use ohara_core::storage::Storage;
+    use ohara_core::storage::{StorageStatus, StorageWrite};
     use ohara_core::{CommitSha, RepoId, TipStore, WorktreeKey};
     use std::sync::Arc;
 

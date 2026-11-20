@@ -9,7 +9,7 @@ use clap::Args as ClapArgs;
 use ohara_core::count_lines;
 use ohara_core::explain::ExplainQuery;
 use ohara_core::perf_trace::timed_phase;
-use ohara_engine::client::{find_or_spawn_daemon, registry_path, try_daemon_call};
+use ohara_engine::client::{find_or_spawn_daemon, registry_path, try_daemon_call, DaemonRoute};
 use ohara_engine::ipc::{Request, RequestMethod};
 use ohara_engine::ExplainResult;
 use ohara_git::Blamer;
@@ -99,15 +99,13 @@ pub async fn run(args: Args, no_daemon: bool) -> Result<()> {
     )
     .await;
 
-    let result: ExplainResult = match daemon_resp {
-        Some(resp) if resp.error.is_none() => {
-            let value = resp
-                .result
-                .ok_or_else(|| anyhow::anyhow!("daemon response missing result"))?;
-            serde_json::from_value(value)
-                .map_err(|e| anyhow::anyhow!("decode ExplainResult: {e}"))?
+    // Explain never refuses on index compatibility (it is blame-based and
+    // model-free), so anything short of a served result runs in-process.
+    let result: ExplainResult = match daemon_resp.route() {
+        DaemonRoute::Served(r) => r,
+        DaemonRoute::Refuse(_) | DaemonRoute::Fallback => {
+            run_standalone(&canonical, explain_query).await?
         }
-        _ => run_standalone(&canonical, explain_query).await?,
     };
 
     println!("{}", serde_json::to_string_pretty(&result)?);

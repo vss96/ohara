@@ -36,8 +36,8 @@
 use std::time::Instant;
 
 use fastembed::{
-    EmbeddingModel, ExecutionProviderDispatch, InitOptions, InitOptionsUserDefined, Pooling,
-    TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel,
+    EmbeddingModel, ExecutionProviderDispatch, InitOptionsUserDefined, Pooling, TextEmbedding,
+    TextInitOptions, TokenizerFiles, UserDefinedEmbeddingModel,
 };
 
 const PROBES: &[&str] = &[
@@ -281,7 +281,7 @@ fn load_model(cfg: Cfg) -> TextEmbedding {
         return load_fixed_model(cfg);
     }
     let cache = ohara_perf_tests::workspace_root().join(".fastembed_cache");
-    let opts = InitOptions::new(cfg.model())
+    let opts = TextInitOptions::new(cfg.model())
         .with_cache_dir(cache)
         .with_show_download_progress(true)
         .with_execution_providers(cfg.eps());

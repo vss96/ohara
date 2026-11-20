@@ -46,7 +46,8 @@ impl Client {
     /// Opens a fresh connection per call, writes one length-prefixed frame,
     /// reads one length-prefixed frame back, and closes the connection. The
     /// whole round-trip is bounded by [`DEFAULT_CALL_TIMEOUT`]; on timeout this
-    /// returns an [`EngineError`] (which `try_daemon_call` maps to `None`, so a
+    /// returns an [`EngineError`] (which `try_daemon_call` reports as
+    /// `DaemonCallResult::ConnectFailed`, routed to `Fallback`, so a
     /// stalled daemon transparently degrades to the in-process fallback).
     pub async fn call(&self, req: Request) -> crate::Result<Response> {
         self.call_with_timeout(req, DEFAULT_CALL_TIMEOUT).await

@@ -5,7 +5,7 @@ use crate::index_metadata::StoredIndexMetadata;
 use crate::query::IndexStatus;
 use crate::storage::{CommitRecord, HunkHit, HunkId, HunkRecord as StorageHunkRecord};
 use crate::types::{CommitMeta, Hunk, HunkSymbol, RepoId, Symbol};
-use crate::{EmbeddingProvider, Result, Storage};
+use crate::{EmbeddingProvider, Result};
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 
@@ -68,10 +68,7 @@ struct SpyStorage {
 }
 
 #[async_trait]
-impl Storage for SpyStorage {
-    async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> Result<()> {
-        Ok(())
-    }
+impl crate::storage::StorageStatus for SpyStorage {
     async fn get_index_status(&self, _: &RepoId) -> Result<IndexStatus> {
         Ok(IndexStatus {
             last_indexed_commit: self.watermark.lock().unwrap().clone(),
@@ -79,9 +76,26 @@ impl Storage for SpyStorage {
             indexed_at: None,
         })
     }
+
+    async fn get_index_metadata(&self, _: &RepoId) -> Result<StoredIndexMetadata> {
+        Ok(StoredIndexMetadata::default())
+    }
+
+    async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl crate::storage::StorageWrite for SpyStorage {
+    async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> Result<()> {
+        Ok(())
+    }
+
     async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> Result<()> {
         Ok(())
     }
+
     async fn put_commit(&self, _: &RepoId, meta: &CommitRecord) -> Result<()> {
         self.put_commit_calls
             .lock()
@@ -93,12 +107,14 @@ impl Storage for SpyStorage {
             .push(meta.meta.commit_sha.clone());
         Ok(())
     }
+
     async fn commit_exists(&self, sha: &str) -> Result<bool> {
         // If we have a watermark matching sha, consider it already indexed.
         let wm = self.watermark.lock().unwrap().clone();
         Ok(wm.as_deref() == Some(sha)
             || self.seen_commits.lock().unwrap().contains(&sha.to_string()))
     }
+
     async fn put_hunks(&self, _: &RepoId, rows: &[StorageHunkRecord]) -> Result<()> {
         self.put_hunk_totals.lock().unwrap().push(rows.len());
         let mut paths = self.put_hunk_paths.lock().unwrap();
@@ -107,9 +123,14 @@ impl Storage for SpyStorage {
         }
         Ok(())
     }
+
     async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> Result<()> {
         Ok(())
     }
+}
+
+#[async_trait]
+impl crate::storage::StorageRead for SpyStorage {
     async fn knn_hunks(
         &self,
         _: &RepoId,
@@ -120,6 +141,7 @@ impl Storage for SpyStorage {
     ) -> Result<Vec<HunkHit>> {
         Ok(vec![])
     }
+
     async fn bm25_hunks_by_text(
         &self,
         _: &RepoId,
@@ -130,6 +152,7 @@ impl Storage for SpyStorage {
     ) -> Result<Vec<HunkHit>> {
         Ok(vec![])
     }
+
     async fn bm25_hunks_by_semantic_text(
         &self,
         _: &RepoId,
@@ -140,6 +163,7 @@ impl Storage for SpyStorage {
     ) -> Result<Vec<HunkHit>> {
         Ok(vec![])
     }
+
     async fn bm25_hunks_by_symbol_name(
         &self,
         _: &RepoId,
@@ -150,6 +174,7 @@ impl Storage for SpyStorage {
     ) -> Result<Vec<HunkHit>> {
         Ok(vec![])
     }
+
     async fn bm25_hunks_by_historical_symbol(
         &self,
         _: &RepoId,
@@ -160,9 +185,11 @@ impl Storage for SpyStorage {
     ) -> Result<Vec<HunkHit>> {
         Ok(vec![])
     }
+
     async fn get_hunk_symbols(&self, _: &RepoId, _: HunkId) -> Result<Vec<HunkSymbol>> {
         Ok(vec![])
     }
+
     async fn get_hunk_symbols_batch(
         &self,
         _: &RepoId,
@@ -170,15 +197,14 @@ impl Storage for SpyStorage {
     ) -> Result<std::collections::HashMap<HunkId, Vec<HunkSymbol>>> {
         Ok(std::collections::HashMap::new())
     }
-    async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> {
-        Ok(false)
-    }
-    async fn record_blob_seen(&self, _: &str, _: &str) -> Result<()> {
-        Ok(())
-    }
+}
+
+#[async_trait]
+impl crate::storage::StorageExplain for SpyStorage {
     async fn get_commit(&self, _: &RepoId, _: &str) -> Result<Option<CommitMeta>> {
         Ok(None)
     }
+
     async fn get_hunks_for_file_in_commit(
         &self,
         _: &RepoId,
@@ -187,6 +213,7 @@ impl Storage for SpyStorage {
     ) -> Result<Vec<Hunk>> {
         Ok(vec![])
     }
+
     async fn get_neighboring_file_commits(
         &self,
         _: &RepoId,
@@ -197,10 +224,15 @@ impl Storage for SpyStorage {
     ) -> Result<Vec<(u32, CommitMeta)>> {
         Ok(vec![])
     }
-    async fn get_index_metadata(&self, _: &RepoId) -> Result<StoredIndexMetadata> {
-        Ok(StoredIndexMetadata::default())
+}
+
+#[async_trait]
+impl crate::storage::StorageCache for SpyStorage {
+    async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> {
+        Ok(false)
     }
-    async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> Result<()> {
+
+    async fn record_blob_seen(&self, _: &str, _: &str) -> Result<()> {
         Ok(())
     }
 }

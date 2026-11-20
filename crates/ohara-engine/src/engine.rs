@@ -2,9 +2,8 @@
 //! and per-repo handles.
 
 use crate::cache::AncestryCache;
-use crate::cache::BlameCache;
 use crate::cache::EmbeddingCache;
-use crate::cache::MetaCache;
+use crate::cache::RepoCaches;
 use crate::error::EngineError;
 use crate::handle::{RepoHandle, RepoStore};
 use crate::index_service::{EnsureIndexedOutcome, IndexService, PruneOutcome};
@@ -56,18 +55,16 @@ pub struct RetrievalEngine {
     stores: RwLock<HashMap<RepoId, Arc<RepoStore>>>,
     /// One handle per worktree, keyed by canonical worktree path.
     repos: RwLock<HashMap<PathBuf, Arc<RepoHandle>>>,
+    /// Repo-independent: keyed by `(model_id, query text)`.
     embed_cache: EmbeddingCache,
-    meta_cache: MetaCache,
-    blame_cache: BlameCache,
-    meta_hit_count: AtomicU64,
+    /// Per-repo caches (meta + blame), invalidated as one group.
+    repo_caches: RepoCaches,
     /// One ancestry cache for every repo (keys hold full SHAs).
     ancestry: Arc<AncestryCache>,
     /// Counts `find_pattern` calls that needed the ancestry filter.
     ancestry_filtered_count: AtomicU64,
     /// Perf-harness switch: when set, `find_pattern` skips visibility.
     visibility_bypass: AtomicBool,
-    /// Plan 21 E.1: counts BlameCache hits in `explain_change`.
-    blame_cache_hit_count: AtomicU64,
     /// Unix-second timestamp of the last dispatched request.
     /// Written by [`Self::touch`]; read by [`Self::idle_for`].
     last_request_at: AtomicU64,
@@ -88,13 +85,10 @@ impl RetrievalEngine {
             stores: RwLock::new(HashMap::new()),
             repos: RwLock::new(HashMap::new()),
             embed_cache: EmbeddingCache::new(model_id, 256),
-            meta_cache: MetaCache::new(Duration::from_secs(5)),
-            blame_cache: BlameCache::new(64),
-            meta_hit_count: AtomicU64::new(0),
+            repo_caches: RepoCaches::new(),
             ancestry: Arc::new(AncestryCache::default()),
             ancestry_filtered_count: AtomicU64::new(0),
             visibility_bypass: AtomicBool::new(false),
-            blame_cache_hit_count: AtomicU64::new(0),
             last_request_at: AtomicU64::new(now_unix),
             index_service: IndexService::default(),
         }
@@ -135,7 +129,7 @@ impl RetrievalEngine {
     /// behaviour without touching internal fields.
     #[cfg(test)]
     pub fn meta_hits(&self) -> u64 {
-        self.meta_hit_count.load(Ordering::Relaxed)
+        self.repo_caches.meta.hits()
     }
 
     /// Returns the number of times `explain_change` served blame ranges
@@ -145,7 +139,7 @@ impl RetrievalEngine {
     /// behaviour without touching internal fields.
     #[cfg(test)]
     pub fn blame_cache_hits(&self) -> u64 {
-        self.blame_cache_hit_count.load(Ordering::Relaxed)
+        self.repo_caches.blame.hits()
     }
 
     /// Embed `text`, returning a cached `Arc<Vec<f32>>` on repeat calls.
@@ -182,12 +176,11 @@ impl RetrievalEngine {
     /// (TTL = 5 s). On a miss the meta is computed via `compose_response_meta`
     /// and stored before returning.
     async fn cached_meta(&self, handle: &RepoHandle) -> crate::Result<ResponseMeta> {
-        if let Some(cached) = self.meta_cache.get(&handle.repo_id, &handle.worktree) {
-            self.meta_hit_count.fetch_add(1, Ordering::Relaxed);
+        if let Some(cached) = self.repo_caches.meta.get(&handle.repo_id, &handle.worktree) {
             return Ok(cached);
         }
         let fresh = compose_response_meta(handle).await?;
-        self.meta_cache.put(
+        self.repo_caches.meta.put(
             handle.repo_id.clone(),
             handle.worktree.clone(),
             fresh.clone(),
@@ -321,13 +314,12 @@ impl RetrievalEngine {
 
         // Cache hit path — skip Blamer entirely.
         if let Some(ref hash) = content_hash_opt {
-            if let Some(cached) = self.blame_cache.get(
+            if let Some(cached) = self.repo_caches.blame.get(
                 &handle.repo_id,
                 &handle.worktree,
                 &query.file,
                 hash.as_str(),
             ) {
-                self.blame_cache_hit_count.fetch_add(1, Ordering::Relaxed);
                 tracing::debug!(file = %query.file, "explain_change: BlameCache hit");
                 let hydrated = ohara_core::explain::hydrator::hydrate_blame_results(
                     ohara_core::explain::hydrator::HydrateInputs {
@@ -353,7 +345,7 @@ impl RetrievalEngine {
             .map_err(EngineError::from)?;
 
         if let Some(hash) = content_hash_opt {
-            self.blame_cache.put(
+            self.repo_caches.blame.put(
                 handle.repo_id.clone(),
                 handle.worktree.clone(),
                 query.file.clone(),

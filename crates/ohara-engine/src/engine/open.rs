@@ -107,18 +107,16 @@ impl RetrievalEngine {
             .write()
             .await
             .retain(|_, handle| handle.repo_id != repo_id);
-        self.meta_cache.invalidate(&repo_id);
-        self.blame_cache.invalidate_repo(&repo_id);
+        self.repo_caches.invalidate_repo(&repo_id);
         Ok(())
     }
 
     /// Drop the caches an index or prune job makes stale for `repo_id`:
-    /// the `MetaCache` entries of every worktree and the `BlameCache`
-    /// entries. The query `EmbeddingCache` and the `AncestryCache` are
+    /// the whole [`crate::cache::RepoCaches`] group (meta entries of every
+    /// worktree plus blame entries). The query `EmbeddingCache` and the `AncestryCache` are
     /// not repo state, so they stay.
     pub(crate) fn refresh_repo_caches(&self, repo_id: &RepoId) {
         // Keep RepoStore/RepoHandles: same DB file, and dropping them races open_repo into a second pool.
-        self.meta_cache.invalidate(repo_id);
-        self.blame_cache.invalidate_repo(repo_id);
+        self.repo_caches.invalidate_repo(repo_id);
     }
 }

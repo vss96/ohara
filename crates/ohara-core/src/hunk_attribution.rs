@@ -43,13 +43,21 @@ pub struct AttributionInputs<'a> {
 /// inside this crate (rather than calling `ohara-parse`) because
 /// `ohara-core` is the dependency root — leaf crates implement its
 /// traits, never the other way round.
+///
+/// Line numbers are clamped to the file's last line (as counted by
+/// [`crate::diff_text::count_lines`], minimum 1): the EOF offset of a
+/// newline-terminated file sits *after* the final `\n` but still
+/// belongs to the last line, not a phantom line past it.
 fn byte_span_to_line_span(span_start: u32, span_end: u32, source: &str) -> (u32, u32) {
     let bytes = source.as_bytes();
     let start = (span_start as usize).min(bytes.len());
     let end = (span_end as usize).min(bytes.len());
+    let last_line = crate::diff_text::count_lines(source).max(1);
     let line_at = |pos: usize| -> u32 {
         let counted = bytes[..pos].iter().filter(|&&b| b == b'\n').count();
-        u32::try_from(counted + 1).unwrap_or(u32::MAX)
+        u32::try_from(counted + 1)
+            .unwrap_or(u32::MAX)
+            .min(last_line)
     };
     let line_start = line_at(start);
     let line_end = if end == 0 {
@@ -231,6 +239,19 @@ pub fn attribute_hunk(inputs: &AttributionInputs<'_>) -> Vec<HunkSymbol> {
 mod tests {
     use super::*;
     use crate::types::AttributionKind;
+
+    #[test]
+    fn byte_span_to_line_span_clamps_eof_offset_after_trailing_newline() {
+        // Regression for #122: an offset at EOF of a newline-terminated
+        // file must map to the last real line, not a phantom line
+        // `count_lines(source) + 1`.
+        assert_eq!(byte_span_to_line_span(2, 0, "A\n"), (1, 1));
+        assert_eq!(byte_span_to_line_span(2, 2, "A\n"), (1, 1));
+        assert_eq!(byte_span_to_line_span(4, 4, "A\nB\n"), (2, 2));
+        // Unterminated last line and empty source are unaffected.
+        assert_eq!(byte_span_to_line_span(3, 3, "A\nB"), (2, 2));
+        assert_eq!(byte_span_to_line_span(0, 0, ""), (1, 1));
+    }
 
     #[test]
     fn parse_post_image_ranges_extracts_start_and_count() {
@@ -423,5 +444,145 @@ mod tests {
         let attrs = attribute_hunk(&inputs);
         assert_eq!(attrs.len(), 1, "exact-span should dedupe the header match");
         assert_eq!(attrs[0].attribution, AttributionKind::ExactSpan);
+    }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::BTreeSet;
+
+        proptest! {
+            #[test]
+            fn byte_span_to_line_span_is_ordered_and_monotonic(
+                lines in proptest::collection::vec("[a-z ]{0,20}", 0..=15),
+                trailing_newline in any::<bool>(),
+                a in 0u32..=350,
+                b in 0u32..=350,
+                c in 0u32..=350,
+            ) {
+                let mut source = lines.join("\n");
+                if trailing_newline && !lines.is_empty() {
+                    source.push('\n');
+                }
+                let mut pts = [a, b, c];
+                pts.sort_unstable();
+                let (s1, e1) = byte_span_to_line_span(pts[0], pts[1], &source);
+                let (s2, e2) = byte_span_to_line_span(pts[1], pts[2], &source);
+                prop_assert!(s1 >= 1);
+                prop_assert!(s1 <= e1);
+                prop_assert!(s2 <= e2);
+                prop_assert!(s1 <= s2);
+            }
+
+            #[test]
+            fn parse_post_image_ranges_round_trips_valid_headers(
+                ranges in proptest::collection::vec((1u32..=10_000, 1u32..=1_000, any::<bool>()), 0..=10)
+            ) {
+                let mut diff = String::new();
+                let mut expected = Vec::with_capacity(ranges.len());
+                for (start, count, omit_unit) in ranges {
+                    if count == 1 && omit_unit {
+                        diff.push_str(&format!("@@ -1 +{} @@ fn ctx()\n+line\n", start));
+                    } else {
+                        diff.push_str(&format!("@@ -1,1 +{},{} @@ fn ctx()\n+line\n", start, count));
+                    }
+                    expected.push((start, count));
+                }
+                prop_assert_eq!(parse_post_image_ranges(&diff), expected);
+            }
+
+            #[test]
+            fn attribute_hunk_never_panics_and_deduplicates_keys(
+                diff_text in "\\PC{0,200}",
+                source in "\\PC{0,200}",
+                raw_syms in proptest::collection::vec(("[a-zA-Z_][a-zA-Z0-9_]{0,12}", 0u32..=250, 0u32..=250), 0..=6)
+            ) {
+                let symbols: Vec<Symbol> = raw_syms
+                    .into_iter()
+                    .map(|(name, s, e)| fake_symbol(&name, s, e))
+                    .collect();
+                let inputs = AttributionInputs {
+                    diff_text: &diff_text,
+                    symbols: Some(&symbols),
+                    source: Some(&source),
+                };
+                let got = attribute_hunk(&inputs);
+                let unique_keys: BTreeSet<(SymbolKind, &str)> =
+                    got.iter().map(|h| (h.kind, h.name.as_str())).collect();
+                prop_assert_eq!(unique_keys.len(), got.len());
+            }
+
+            #[test]
+            fn attribute_hunk_exact_span_dominates_header_and_excludes_disjoint(
+                total_lines in 3u32..=25,
+                sym_line in 1u32..=25,
+                hunk_start in 1u32..=25,
+                hunk_count in 1u32..=10,
+                include_same_in_header in any::<bool>(),
+            ) {
+                let sym_line = sym_line.min(total_lines);
+                let hunk_start = hunk_start.min(total_lines);
+                let lines: Vec<String> = (1..=total_lines)
+                    .map(|i| format!("fn sym_{i}() {{}}"))
+                    .collect();
+                let source = format!("{}\n", lines.join("\n"));
+
+                let mut byte_offset = 0u32;
+                let mut target_span = (0u32, 0u32);
+                for (idx, line) in lines.iter().enumerate() {
+                    let start = byte_offset;
+                    let end = start + line.len() as u32;
+                    if (idx as u32 + 1) == sym_line {
+                        target_span = (start, end);
+                    }
+                    byte_offset = end + 1;
+                }
+
+                let sym_name = format!("sym_{sym_line}");
+                let symbols = vec![fake_symbol(&sym_name, target_span.0, target_span.1)];
+                let header_suffix = if include_same_in_header {
+                    format!(" fn {sym_name}() {{")
+                } else {
+                    String::new()
+                };
+                let diff = format!("@@ -1,1 +{hunk_start},{hunk_count} @@{header_suffix}\n+body\n");
+                let inputs = AttributionInputs {
+                    diff_text: &diff,
+                    symbols: Some(&symbols),
+                    source: Some(&source),
+                };
+                let attrs = attribute_hunk(&inputs);
+                let hunk_end = hunk_start.saturating_add(hunk_count).saturating_sub(1);
+                let intersects = sym_line >= hunk_start && sym_line <= hunk_end;
+
+                if intersects {
+                    prop_assert_eq!(attrs.len(), 1);
+                    prop_assert_eq!(&attrs[0].name, &sym_name);
+                    prop_assert_eq!(attrs[0].attribution, AttributionKind::ExactSpan);
+                } else {
+                    prop_assert!(
+                        attrs.iter().all(|a| a.attribution != AttributionKind::ExactSpan),
+                        "disjoint symbol must never get ExactSpan: {attrs:?}"
+                    );
+                }
+            }
+
+            #[test]
+            fn byte_span_to_line_span_never_exceeds_count_lines(
+                lines in proptest::collection::vec("[a-zA-Z0-9_ ]{1,20}", 1..=10),
+                span_start in 0u32..=250,
+                span_end in 0u32..=250,
+            ) {
+                let source = format!("{}\n", lines.join("\n"));
+                let max_line = crate::diff_text::count_lines(&source);
+                let (line_start, line_end) = byte_span_to_line_span(span_start, span_end, &source);
+                prop_assert!(
+                    line_end <= max_line,
+                    "line_end {line_end} exceeded total lines {max_line} for source len {}",
+                    source.len()
+                );
+                prop_assert!(line_start <= line_end);
+            }
+        }
     }
 }

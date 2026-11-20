@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
-use ohara_engine::client::{find_or_spawn_daemon, registry_path, try_daemon_call, DaemonHandle};
-use ohara_engine::ipc::{ErrorCode, Request, RequestMethod, Response};
+use ohara_engine::client::{
+    find_or_spawn_daemon, registry_path, try_daemon_call, DaemonCallResult, DaemonHandle,
+};
+use ohara_engine::ipc::{Request, RequestMethod};
 use ohara_engine::RetrievalEngine;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -50,12 +52,13 @@ impl OharaServer {
             .await
     }
 
-    /// Route one request to the shared daemon. `None` means "use the
-    /// in-process fallback": daemon disabled, unreachable, or it answered
-    /// `NotImplemented`. `OHARA_DAEMON_SOCKET` skips discovery (tests).
-    pub async fn daemon_call(&self, method: RequestMethod) -> Option<Response> {
+    /// Route one request to the shared daemon and report what happened.
+    /// Callers decide via [`DaemonCallResult::route`]; anything but a
+    /// served result means "use the in-process fallback" (except a
+    /// `NeedsRebuild` refusal). `OHARA_DAEMON_SOCKET` skips discovery (tests).
+    pub async fn daemon_call(&self, method: RequestMethod) -> DaemonCallResult {
         if !self.use_daemon {
-            return None;
+            return DaemonCallResult::Unavailable;
         }
         let req = Request {
             id: 1,
@@ -68,11 +71,17 @@ impl OharaServer {
                 pid: 0,
                 spawned: false,
             };
-            return filter_not_implemented(try_daemon_call(move || Ok(Some(h)), req).await);
+            return try_daemon_call(move || Ok(Some(h)), req).await;
         }
-        let registry = registry_path().ok()?;
-        let current_exe = std::env::current_exe().ok()?;
-        let resp = try_daemon_call(
+        let registry = match registry_path() {
+            Ok(r) => r,
+            Err(e) => return DaemonCallResult::ConnectFailed(format!("registry_path: {e}")),
+        };
+        let current_exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(e) => return DaemonCallResult::ConnectFailed(format!("current_exe: {e}")),
+        };
+        try_daemon_call(
             move || {
                 find_or_spawn_daemon(
                     &current_exe,
@@ -84,21 +93,11 @@ impl OharaServer {
             },
             req,
         )
-        .await;
-        filter_not_implemented(resp)
+        .await
     }
 
     pub async fn serve_stdio(self) -> Result<()> {
         crate::tools::serve(self).await
-    }
-}
-
-/// `NotImplemented` means "this daemon can't do that yet" — treat it as
-/// daemon-unavailable so the caller falls back in-process.
-fn filter_not_implemented(resp: Option<Response>) -> Option<Response> {
-    match resp {
-        Some(r) if matches!(&r.error, Some(e) if e.code == ErrorCode::NotImplemented) => None,
-        other => other,
     }
 }
 
@@ -116,38 +115,3 @@ pub fn compose_hint(
 // Tests for compose_hint and compose_hint wording are now in
 // ohara-core::index_metadata::tests to avoid duplication.
 // MCP-layer integration tests live in crates/ohara-mcp/tests/.
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod thin_client_tests {
-    use super::*;
-    use ohara_engine::ipc::ErrorPayload;
-
-    fn resp(error: Option<ErrorPayload>) -> Response {
-        Response {
-            id: 1,
-            result: Some(serde_json::json!({})),
-            error,
-        }
-    }
-
-    #[test]
-    fn not_implemented_becomes_none() {
-        let r = resp(Some(ErrorPayload {
-            code: ErrorCode::NotImplemented,
-            message: "x".into(),
-        }));
-        assert!(filter_not_implemented(Some(r)).is_none());
-    }
-
-    #[test]
-    fn other_errors_pass_through() {
-        let r = resp(Some(ErrorPayload {
-            code: ErrorCode::NeedsRebuild,
-            message: "x".into(),
-        }));
-        assert!(filter_not_implemented(Some(r)).is_some());
-        assert!(filter_not_implemented(Some(resp(None))).is_some());
-        assert!(filter_not_implemented(None).is_none());
-    }
-}

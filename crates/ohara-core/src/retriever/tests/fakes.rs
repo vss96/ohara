@@ -72,10 +72,7 @@ impl FakeStorage {
 }
 
 #[async_trait]
-impl crate::Storage for FakeStorage {
-    async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> crate::Result<()> {
-        Ok(())
-    }
+impl crate::storage::StorageStatus for FakeStorage {
     async fn get_index_status(&self, _: &RepoId) -> crate::Result<IndexStatus> {
         Ok(IndexStatus {
             last_indexed_commit: None,
@@ -83,21 +80,48 @@ impl crate::Storage for FakeStorage {
             indexed_at: None,
         })
     }
+
+    async fn get_index_metadata(
+        &self,
+        _: &RepoId,
+    ) -> crate::Result<crate::index_metadata::StoredIndexMetadata> {
+        Ok(crate::index_metadata::StoredIndexMetadata::default())
+    }
+
+    async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> crate::Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl crate::storage::StorageWrite for FakeStorage {
+    async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> crate::Result<()> {
+        Ok(())
+    }
+
     async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> crate::Result<()> {
         Ok(())
     }
+
     async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> crate::Result<()> {
         Ok(())
     }
+
     async fn commit_exists(&self, _: &str) -> crate::Result<bool> {
         unreachable!("retriever tests should not exercise commit_exists")
     }
+
     async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> crate::Result<()> {
         Ok(())
     }
+
     async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> crate::Result<()> {
         Ok(())
     }
+}
+
+#[async_trait]
+impl crate::storage::StorageRead for FakeStorage {
     async fn knn_hunks(
         &self,
         _: &RepoId,
@@ -109,6 +133,7 @@ impl crate::Storage for FakeStorage {
         self.calls.lock().unwrap().push("knn");
         Ok(self.knn.clone())
     }
+
     async fn bm25_hunks_by_text(
         &self,
         _: &RepoId,
@@ -120,6 +145,7 @@ impl crate::Storage for FakeStorage {
         self.calls.lock().unwrap().push("fts_text");
         Ok(self.fts_text.clone())
     }
+
     async fn bm25_hunks_by_semantic_text(
         &self,
         _: &RepoId,
@@ -135,6 +161,7 @@ impl crate::Storage for FakeStorage {
         self.calls.lock().unwrap().push("fts_semantic");
         Ok(self.fts_semantic.clone())
     }
+
     async fn bm25_hunks_by_symbol_name(
         &self,
         _: &RepoId,
@@ -146,6 +173,7 @@ impl crate::Storage for FakeStorage {
         self.calls.lock().unwrap().push("fts_sym");
         Ok(self.fts_sym.clone())
     }
+
     async fn bm25_hunks_by_historical_symbol(
         &self,
         _: &RepoId,
@@ -160,6 +188,7 @@ impl crate::Storage for FakeStorage {
         self.calls.lock().unwrap().push("fts_hist_sym");
         Ok(Vec::new())
     }
+
     async fn get_hunk_symbols(
         &self,
         _: &RepoId,
@@ -171,6 +200,7 @@ impl crate::Storage for FakeStorage {
         self.calls.lock().unwrap().push("get_hunk_symbols");
         Ok(Vec::new())
     }
+
     async fn get_hunk_symbols_batch(
         &self,
         _: &RepoId,
@@ -183,15 +213,14 @@ impl crate::Storage for FakeStorage {
         *self.batch_calls.lock().unwrap() += 1;
         Ok(std::collections::HashMap::new())
     }
-    async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
-        Ok(false)
-    }
-    async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
-        Ok(())
-    }
+}
+
+#[async_trait]
+impl crate::storage::StorageExplain for FakeStorage {
     async fn get_commit(&self, _: &RepoId, _: &str) -> crate::Result<Option<CommitMeta>> {
         unreachable!("retriever tests should not exercise get_commit")
     }
+
     async fn get_hunks_for_file_in_commit(
         &self,
         _: &RepoId,
@@ -200,6 +229,7 @@ impl crate::Storage for FakeStorage {
     ) -> crate::Result<Vec<crate::types::Hunk>> {
         unreachable!("retriever tests should not exercise get_hunks_for_file_in_commit")
     }
+
     async fn get_neighboring_file_commits(
         &self,
         _: &RepoId,
@@ -210,13 +240,15 @@ impl crate::Storage for FakeStorage {
     ) -> crate::Result<Vec<(u32, crate::types::CommitMeta)>> {
         Ok(Vec::new())
     }
-    async fn get_index_metadata(
-        &self,
-        _: &RepoId,
-    ) -> crate::Result<crate::index_metadata::StoredIndexMetadata> {
-        Ok(crate::index_metadata::StoredIndexMetadata::default())
+}
+
+#[async_trait]
+impl crate::storage::StorageCache for FakeStorage {
+    async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
+        Ok(false)
     }
-    async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> crate::Result<()> {
+
+    async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
         Ok(())
     }
 }

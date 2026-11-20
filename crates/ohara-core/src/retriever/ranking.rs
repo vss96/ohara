@@ -44,6 +44,27 @@ pub fn fuse_to_pool(
         .collect()
 }
 
+/// Exp-decay recency factor in `[0, 1]`: `exp(-age_days / half_life_days)`
+/// where `age_days` is `now_unix - commit_ts` (floored at 0).
+///
+/// Total over all inputs:
+/// - the age subtraction saturates instead of overflowing `i64`;
+/// - a zero-age commit always gets `1.0` (`exp(0)` for any decay rate);
+/// - a non-positive or NaN `half_life_days` is treated as its `0+`
+///   limit — instant decay — so older commits get `0.0` instead of
+///   `NaN` (`-0.0 / 0.0`) or an exploding `exp(+x)` for negatives.
+pub(crate) fn recency_factor(commit_ts: i64, now_unix: i64, half_life_days: f32) -> f32 {
+    let age_secs = now_unix.saturating_sub(commit_ts).max(0);
+    if age_secs == 0 {
+        return 1.0;
+    }
+    if half_life_days.is_nan() || half_life_days <= 0.0 {
+        return 0.0;
+    }
+    let age_days = age_secs as f32 / 86_400.0;
+    (-age_days / half_life_days).exp()
+}
+
 /// Apply the exp-decay recency multiplier:
 /// `final = similarity * (1.0 + recency_weight * exp(-age_days / half_life_days))`.
 ///
@@ -63,8 +84,7 @@ pub fn apply_recency(
     let mut scored: Vec<(HunkHit, f32)> = hits
         .into_iter()
         .map(|mut h| {
-            let age_days = ((now_unix - h.commit.ts).max(0) as f32) / 86_400.0;
-            let recency = (-age_days / recency_half_life_days).exp();
+            let recency = recency_factor(h.commit.ts, now_unix, recency_half_life_days);
             let combined = h.similarity * (1.0 + recency_weight * recency);
             h.similarity = combined;
             (h, combined)
@@ -206,5 +226,107 @@ mod tests {
     fn apply_recency_empty_input_returns_empty() {
         let out = apply_recency(vec![], 0.05, 90.0, 1_700_000_000);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn apply_recency_does_not_overflow_on_extreme_timestamps() {
+        // Regression for #120: `now_unix - ts` overflowed i64 (panic in
+        // debug builds) for the proptest-shrunk input below.
+        let out = apply_recency(
+            vec![make_hit(1, 1_516_920_528_225_666_549, 0.5)],
+            1.0,
+            90.0,
+            -7_706_451_508_629_109_260,
+        );
+        assert_eq!(out.len(), 1);
+        assert!(out[0].similarity.is_finite());
+        let out = apply_recency(vec![make_hit(1, i64::MIN, 0.5)], 1.0, 90.0, i64::MAX);
+        // Astronomically old commit: recency factor decays to ~0.
+        assert!((out[0].similarity - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn apply_recency_zero_half_life_is_not_nan() {
+        // Regression for #120: age 0 with half_life 0 computed
+        // `exp(-0.0 / 0.0)` = NaN. A zero-age hit keeps its full boost
+        // (exp(0) = 1 for any decay rate); older hits decay instantly.
+        let now = 1_700_000_000;
+        let out = apply_recency(vec![make_hit(1, now, 0.5)], 1.0, 0.0, now);
+        assert!((out[0].similarity - 1.0).abs() < 1e-6);
+        let out = apply_recency(vec![make_hit(1, now - 86_400, 0.5)], 1.0, 0.0, now);
+        assert!((out[0].similarity - 0.5).abs() < 1e-6);
+    }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::BTreeSet;
+
+        proptest! {
+            #[test]
+            fn fuse_to_pool_bounds_len_and_reuses_arc_allocations(
+                lanes in proptest::collection::vec(
+                    proptest::collection::vec(1i64..=30, 0..=15),
+                    0..=5
+                ),
+                rrf_k in 1u32..=100,
+                pool_k in 0usize..=40,
+            ) {
+                let mut all_ids = BTreeSet::new();
+                for lane in &lanes {
+                    all_ids.extend(lane.iter().copied());
+                }
+                let by_id = by_id_map(all_ids.iter().map(|&id| make_hit(id, 1_700_000_000, 0.5)));
+                let out = fuse_to_pool(&lanes, &by_id, rrf_k, pool_k);
+                prop_assert_eq!(out.len(), all_ids.len().min(pool_k));
+                for hit in &out {
+                    prop_assert!(Arc::ptr_eq(hit, &by_id[&hit.hunk_id]));
+                }
+            }
+
+            #[test]
+            fn apply_recency_monotonic_by_age_and_identity_at_zero_weight(
+                base_sim in 0.01f32..=1.0,
+                weight in 0.01f32..=2.0,
+                half_life in 1.0f32..=365.0,
+                now in 1_000_000_000i64..=2_000_000_000,
+                older_age_secs in 86_400i64..=50_000_000,
+                newer_age_secs in 0i64..=43_200,
+            ) {
+                let older_ts = now - older_age_secs;
+                let newer_ts = now - newer_age_secs;
+
+                let zero_out = apply_recency(
+                    vec![make_hit(1, older_ts, base_sim), make_hit(2, newer_ts, base_sim)],
+                    0.0,
+                    half_life,
+                    now,
+                );
+                prop_assert_eq!(zero_out[0].hunk_id, 1);
+                prop_assert!((zero_out[0].similarity - base_sim).abs() < 1e-6);
+
+                let weighted_out = apply_recency(
+                    vec![make_hit(1, older_ts, base_sim), make_hit(2, newer_ts, base_sim)],
+                    weight,
+                    half_life,
+                    now,
+                );
+                prop_assert_eq!(weighted_out[0].hunk_id, 2);
+                prop_assert!(weighted_out[0].similarity > weighted_out[1].similarity);
+            }
+
+            #[test]
+            fn apply_recency_never_overflows_or_produces_nan_on_extreme_inputs(
+                ts in any::<i64>(),
+                now in any::<i64>(),
+                sim in -1.0f32..=1.0,
+                weight in 0.0f32..=2.0,
+                half_life in 0.0f32..=365.0,
+            ) {
+                let out = apply_recency(vec![make_hit(1, ts, sim)], weight, half_life, now);
+                prop_assert_eq!(out.len(), 1);
+                prop_assert!(!out[0].similarity.is_nan());
+            }
+        }
     }
 }

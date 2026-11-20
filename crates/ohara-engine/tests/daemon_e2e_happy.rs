@@ -250,7 +250,7 @@ async fn seed_index(path: &Path) {
     let id = ohara_git::RepoIdentity::resolve(path).unwrap();
     let db_path = ohara_core::paths::index_db_path(&id.repo_id).unwrap();
     let sqlite = Arc::new(ohara_storage::SqliteStorage::open(&db_path).await.unwrap());
-    ohara_core::Storage::open_repo(
+    ohara_core::StorageWrite::open_repo(
         sqlite.as_ref(),
         &id.repo_id,
         &id.id_path,

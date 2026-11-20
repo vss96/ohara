@@ -7,7 +7,10 @@ use deadpool_sqlite::Pool;
 use ohara_core::{
     index_metadata::StoredIndexMetadata,
     query::IndexStatus,
-    storage::{CommitRecord, HunkHit, HunkId, HunkRecord, Storage, StorageMetricsSnapshot},
+    storage::{
+        CommitRecord, HunkHit, HunkId, HunkRecord, StorageCache, StorageExplain,
+        StorageMetricsSnapshot, StorageRead, StorageStatus, StorageWrite,
+    },
     types::{CommitMeta, Hunk, HunkSymbol, RepoId, Symbol},
     Result as CoreResult,
 };
@@ -74,7 +77,56 @@ where
 }
 
 #[async_trait::async_trait]
-impl Storage for SqliteStorage {
+impl StorageStatus for SqliteStorage {
+    async fn get_index_status(&self, repo_id: &RepoId) -> CoreResult<IndexStatus> {
+        let id = repo_id.as_str().to_string();
+        timed_with_conn(
+            &self.pool,
+            &self.counters.get_index_status,
+            |_: &IndexStatus| 1u64,
+            move |c| repo::get_status(c, &id),
+        )
+        .await
+    }
+
+    async fn get_index_metadata(&self, repo_id: &RepoId) -> CoreResult<StoredIndexMetadata> {
+        let id = repo_id.as_str().to_string();
+        timed_with_conn(
+            &self.pool,
+            &self.counters.get_index_metadata,
+            |m: &StoredIndexMetadata| m.components.len() as u64,
+            move |c| crate::tables::index_metadata::get(c, &id),
+        )
+        .await
+    }
+
+    async fn put_index_metadata(
+        &self,
+        repo_id: &RepoId,
+        components: &[(String, String)],
+    ) -> CoreResult<()> {
+        let id = repo_id.as_str().to_string();
+        let comps = components.to_vec();
+        with_conn(&self.write_pool, move |c| {
+            crate::tables::index_metadata::put_many(c, &id, &comps)
+        })
+        .await
+    }
+
+    fn metrics_snapshot(&self) -> StorageMetricsSnapshot {
+        self.counters.snapshot()
+    }
+
+    async fn latest_indexed_by_ulid(
+        &self,
+        _repo_id: &ohara_core::types::RepoId,
+    ) -> ohara_core::Result<Option<ohara_core::types::CommitMeta>> {
+        with_conn(&self.pool, |c| crate::tables::commit::latest_by_ulid(c)).await
+    }
+}
+
+#[async_trait::async_trait]
+impl StorageWrite for SqliteStorage {
     async fn open_repo(
         &self,
         repo_id: &RepoId,
@@ -85,17 +137,6 @@ impl Storage for SqliteStorage {
         let path = path.to_string();
         let fcs = first_commit_sha.to_string();
         with_conn(&self.write_pool, move |c| repo::upsert(c, &id, &path, &fcs)).await
-    }
-
-    async fn get_index_status(&self, repo_id: &RepoId) -> CoreResult<IndexStatus> {
-        let id = repo_id.as_str().to_string();
-        timed_with_conn(
-            &self.pool,
-            &self.counters.get_index_status,
-            |_: &IndexStatus| 1u64,
-            move |c| repo::get_status(c, &id),
-        )
-        .await
     }
 
     async fn set_last_indexed_commit(&self, repo_id: &RepoId, sha: &str) -> CoreResult<()> {
@@ -119,6 +160,7 @@ impl Storage for SqliteStorage {
         })
         .await
     }
+
     async fn put_hunks(&self, _repo_id: &RepoId, records: &[HunkRecord]) -> CoreResult<()> {
         let recs = records.to_vec();
         with_conn(&self.write_pool, move |c| {
@@ -136,7 +178,10 @@ impl Storage for SqliteStorage {
         })
         .await
     }
+}
 
+#[async_trait::async_trait]
+impl StorageRead for SqliteStorage {
     async fn knn_hunks(
         &self,
         _repo_id: &RepoId,
@@ -276,58 +321,10 @@ impl Storage for SqliteStorage {
         )
         .await
     }
+}
 
-    async fn blob_was_seen(&self, blob_sha: &str, model: &str) -> CoreResult<bool> {
-        let blob = blob_sha.to_string();
-        let m = model.to_string();
-        with_conn(&self.pool, move |c| {
-            crate::tables::blob_cache::was_seen(c, &blob, &m)
-        })
-        .await
-    }
-
-    async fn record_blob_seen(&self, blob_sha: &str, model: &str) -> CoreResult<()> {
-        let blob = blob_sha.to_string();
-        let m = model.to_string();
-        with_conn(&self.write_pool, move |c| {
-            crate::tables::blob_cache::record(c, &blob, &m)
-        })
-        .await
-    }
-
-    async fn embed_cache_get_many(
-        &self,
-        hashes: &[ohara_core::types::ContentHash],
-        embed_model: &str,
-    ) -> CoreResult<std::collections::HashMap<ohara_core::types::ContentHash, Vec<f32>>> {
-        let hashes = hashes.to_vec();
-        let model = embed_model.to_owned();
-        with_conn(&self.pool, move |c| {
-            crate::tables::embed_cache::get_many(c, &hashes, &model)
-        })
-        .await
-    }
-
-    async fn embed_cache_stats(&self) -> CoreResult<ohara_core::storage::EmbedCacheStats> {
-        with_conn(&self.pool, |c| crate::tables::embed_cache::stats(c)).await
-    }
-
-    async fn embed_cache_put_many(
-        &self,
-        entries: &[(ohara_core::types::ContentHash, Vec<f32>)],
-        embed_model: &str,
-    ) -> CoreResult<()> {
-        if entries.is_empty() {
-            return Ok(());
-        }
-        let entries = entries.to_vec();
-        let model = embed_model.to_owned();
-        with_conn(&self.write_pool, move |c| {
-            crate::tables::embed_cache::put_many(c, &entries, &model)
-        })
-        .await
-    }
-
+#[async_trait::async_trait]
+impl StorageExplain for SqliteStorage {
     async fn get_commit(&self, _repo_id: &RepoId, sha: &str) -> CoreResult<Option<CommitMeta>> {
         // Plan 5 / Task 2: SELECT a single commit row by sha. Returns
         // Ok(None) for SHAs that aren't yet indexed so the explain_change
@@ -434,40 +431,59 @@ impl Storage for SqliteStorage {
         )
         .await
     }
+}
 
-    async fn get_index_metadata(&self, repo_id: &RepoId) -> CoreResult<StoredIndexMetadata> {
-        let id = repo_id.as_str().to_string();
-        timed_with_conn(
-            &self.pool,
-            &self.counters.get_index_metadata,
-            |m: &StoredIndexMetadata| m.components.len() as u64,
-            move |c| crate::tables::index_metadata::get(c, &id),
-        )
-        .await
-    }
-
-    async fn put_index_metadata(
-        &self,
-        repo_id: &RepoId,
-        components: &[(String, String)],
-    ) -> CoreResult<()> {
-        let id = repo_id.as_str().to_string();
-        let comps = components.to_vec();
-        with_conn(&self.write_pool, move |c| {
-            crate::tables::index_metadata::put_many(c, &id, &comps)
+#[async_trait::async_trait]
+impl StorageCache for SqliteStorage {
+    async fn blob_was_seen(&self, blob_sha: &str, model: &str) -> CoreResult<bool> {
+        let blob = blob_sha.to_string();
+        let m = model.to_string();
+        with_conn(&self.pool, move |c| {
+            crate::tables::blob_cache::was_seen(c, &blob, &m)
         })
         .await
     }
 
-    fn metrics_snapshot(&self) -> StorageMetricsSnapshot {
-        self.counters.snapshot()
+    async fn record_blob_seen(&self, blob_sha: &str, model: &str) -> CoreResult<()> {
+        let blob = blob_sha.to_string();
+        let m = model.to_string();
+        with_conn(&self.write_pool, move |c| {
+            crate::tables::blob_cache::record(c, &blob, &m)
+        })
+        .await
     }
 
-    async fn latest_indexed_by_ulid(
+    async fn embed_cache_get_many(
         &self,
-        _repo_id: &ohara_core::types::RepoId,
-    ) -> ohara_core::Result<Option<ohara_core::types::CommitMeta>> {
-        with_conn(&self.pool, |c| crate::tables::commit::latest_by_ulid(c)).await
+        hashes: &[ohara_core::types::ContentHash],
+        embed_model: &str,
+    ) -> CoreResult<std::collections::HashMap<ohara_core::types::ContentHash, Vec<f32>>> {
+        let hashes = hashes.to_vec();
+        let model = embed_model.to_owned();
+        with_conn(&self.pool, move |c| {
+            crate::tables::embed_cache::get_many(c, &hashes, &model)
+        })
+        .await
+    }
+
+    async fn embed_cache_stats(&self) -> CoreResult<ohara_core::storage::EmbedCacheStats> {
+        with_conn(&self.pool, |c| crate::tables::embed_cache::stats(c)).await
+    }
+
+    async fn embed_cache_put_many(
+        &self,
+        entries: &[(ohara_core::types::ContentHash, Vec<f32>)],
+        embed_model: &str,
+    ) -> CoreResult<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let entries = entries.to_vec();
+        let model = embed_model.to_owned();
+        with_conn(&self.write_pool, move |c| {
+            crate::tables::embed_cache::put_many(c, &entries, &model)
+        })
+        .await
     }
 }
 
@@ -1996,7 +2012,6 @@ mod tests {
         // Plan 21 Task B.1: SqliteStorage's batched implementation must
         // return all three seeded commits in one round-trip. Uses an
         // in-memory database (":memory:" path).
-        use ohara_core::storage::Storage;
         use ohara_core::types::{CommitMeta, RepoId};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -2047,7 +2062,6 @@ mod tests {
 #[cfg(test)]
 mod metrics_tests {
     use super::*;
-    use ohara_core::storage::Storage;
     use ohara_core::types::RepoId;
 
     #[tokio::test]

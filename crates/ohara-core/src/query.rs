@@ -1,4 +1,4 @@
-use crate::storage::{HunkId, Storage};
+use crate::storage::HunkId;
 use crate::types::{Provenance, RepoId};
 use crate::worktree::{TipStore, WorktreeKey};
 use crate::Result;
@@ -117,7 +117,7 @@ pub trait CommitsBehind: Send + Sync {
 /// and the MCP `index_status_meta` call this; presentation lives at the call
 /// sites.
 pub async fn compute_index_status(
-    storage: &dyn Storage,
+    storage: &dyn crate::storage::StorageStatus,
     repo_id: &RepoId,
     behind: &dyn CommitsBehind,
 ) -> Result<IndexStatus> {
@@ -140,7 +140,7 @@ pub async fn compute_index_status(
 /// worktree whose HEAD is already covered by another worktree's index
 /// reports zero without reindexing.
 pub async fn compute_worktree_index_status(
-    storage: &dyn Storage,
+    storage: &dyn crate::storage::StorageStatus,
     tips: &dyn TipStore,
     repo_id: &RepoId,
     worktree: &WorktreeKey,
@@ -204,8 +204,7 @@ mod tests {
         assert_eq!(back.index_status.commits_behind_head, 7);
     }
 
-    use crate::storage::{CommitRecord, HunkHit, HunkRecord, Storage};
-    use crate::types::{RepoId, Symbol};
+    use crate::types::RepoId;
     use async_trait::async_trait;
 
     struct FakeStorage {
@@ -214,10 +213,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl Storage for FakeStorage {
-        async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> crate::Result<()> {
-            Ok(())
-        }
+    impl crate::storage::StorageStatus for FakeStorage {
         async fn get_index_status(&self, _: &RepoId) -> crate::Result<IndexStatus> {
             Ok(IndexStatus {
                 last_indexed_commit: self.last_sha.clone(),
@@ -225,124 +221,14 @@ mod tests {
                 indexed_at: self.indexed_at.clone(),
             })
         }
-        async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> crate::Result<()> {
-            Ok(())
-        }
-        async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> crate::Result<()> {
-            Ok(())
-        }
-        async fn commit_exists(&self, _: &str) -> crate::Result<bool> {
-            unreachable!("compute_index_status should not exercise commit_exists")
-        }
-        async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> crate::Result<()> {
-            Ok(())
-        }
-        async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> crate::Result<()> {
-            Ok(())
-        }
-        async fn knn_hunks(
-            &self,
-            _: &RepoId,
-            _: &[f32],
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> crate::Result<Vec<HunkHit>> {
-            Ok(vec![])
-        }
-        async fn bm25_hunks_by_text(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> crate::Result<Vec<HunkHit>> {
-            unreachable!("compute_index_status should not exercise bm25_hunks_by_text")
-        }
-        async fn bm25_hunks_by_semantic_text(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> crate::Result<Vec<HunkHit>> {
-            unreachable!("compute_index_status should not exercise bm25_hunks_by_semantic_text")
-        }
-        async fn bm25_hunks_by_symbol_name(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> crate::Result<Vec<HunkHit>> {
-            unreachable!("compute_index_status should not exercise bm25_hunks_by_symbol_name")
-        }
-        async fn bm25_hunks_by_historical_symbol(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> crate::Result<Vec<HunkHit>> {
-            unreachable!("compute_index_status should not exercise bm25_hunks_by_historical_symbol")
-        }
-        async fn get_hunk_symbols(
-            &self,
-            _: &RepoId,
-            _: crate::storage::HunkId,
-        ) -> crate::Result<Vec<crate::types::HunkSymbol>> {
-            unreachable!("compute_index_status should not exercise get_hunk_symbols")
-        }
-        async fn get_hunk_symbols_batch(
-            &self,
-            _: &RepoId,
-            _: &[crate::storage::HunkId],
-        ) -> crate::Result<
-            std::collections::HashMap<crate::storage::HunkId, Vec<crate::types::HunkSymbol>>,
-        > {
-            unreachable!("compute_index_status should not exercise get_hunk_symbols_batch")
-        }
-        async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
-            Ok(false)
-        }
-        async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
-            Ok(())
-        }
-        async fn get_commit(
-            &self,
-            _: &RepoId,
-            _: &str,
-        ) -> crate::Result<Option<crate::types::CommitMeta>> {
-            unreachable!("compute_index_status should not exercise get_commit")
-        }
-        async fn get_hunks_for_file_in_commit(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: &str,
-        ) -> crate::Result<Vec<crate::types::Hunk>> {
-            unreachable!("compute_index_status should not exercise get_hunks_for_file_in_commit")
-        }
-        async fn get_neighboring_file_commits(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: &str,
-            _: u8,
-            _: u8,
-        ) -> crate::Result<Vec<(u32, crate::types::CommitMeta)>> {
-            unreachable!("compute_index_status should not exercise get_neighboring_file_commits")
-        }
+
         async fn get_index_metadata(
             &self,
             _: &RepoId,
         ) -> crate::Result<crate::index_metadata::StoredIndexMetadata> {
             Ok(crate::index_metadata::StoredIndexMetadata::default())
         }
+
         async fn put_index_metadata(
             &self,
             _: &RepoId,
@@ -434,5 +320,61 @@ mod tests {
         // CommitsBehind should be called with the storage watermark.
         let seen = behind.last_seen_since.lock().unwrap().clone();
         assert_eq!(seen, Some(Some("deadbeef".to_string())));
+    }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::BTreeSet;
+
+        proptest! {
+            #[test]
+            fn rrf_conserves_exact_set_union_without_duplicates(
+                raw_lanes in proptest::collection::vec(
+                    proptest::collection::vec(1i64..=50, 0..=20),
+                    0..=6
+                ),
+                k in 1u32..=120,
+            ) {
+                let mut lanes = Vec::with_capacity(raw_lanes.len());
+                let mut expected_union = BTreeSet::new();
+                for lane in raw_lanes {
+                    let mut seen = BTreeSet::new();
+                    let deduped: Vec<HunkId> = lane
+                        .into_iter()
+                        .filter(|id| seen.insert(*id))
+                        .collect();
+                    expected_union.extend(deduped.iter().copied());
+                    lanes.push(deduped);
+                }
+
+                let fused = reciprocal_rank_fusion(&lanes, k);
+                prop_assert_eq!(fused.len(), expected_union.len());
+                let fused_set: BTreeSet<HunkId> = fused.into_iter().collect();
+                prop_assert_eq!(fused_set, expected_union);
+            }
+
+            #[test]
+            fn rrf_adding_top_appearance_in_extra_lane_never_worsens_rank(
+                lane1 in proptest::collection::btree_set(1i64..=30, 2..=15),
+                lane2 in proptest::collection::btree_set(1i64..=30, 1..=15),
+                k in 1u32..=120,
+            ) {
+                let v1: Vec<HunkId> = lane1.into_iter().collect();
+                let v2: Vec<HunkId> = lane2.into_iter().collect();
+                let target = *v1.last().unwrap();
+
+                let before = reciprocal_rank_fusion(&[v1.clone(), v2.clone()], k);
+                let pos_before = before.iter().position(|&id| id == target).unwrap();
+
+                let after = reciprocal_rank_fusion(&[v1, v2, vec![target]], k);
+                let pos_after = after.iter().position(|&id| id == target).unwrap();
+
+                prop_assert!(
+                    pos_after <= pos_before,
+                    "adding target {target} to an extra lane worsened its rank from {pos_before} to {pos_after}"
+                );
+            }
+        }
     }
 }

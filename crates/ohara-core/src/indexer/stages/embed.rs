@@ -19,7 +19,7 @@ pub struct EmbedStage {
     embedder: Arc<dyn EmbeddingProvider + Send + Sync>,
     embed_batch: usize,
     embed_mode: crate::EmbedMode,
-    cache: Option<Arc<dyn crate::Storage>>,
+    cache: Option<Arc<dyn crate::storage::StorageCache>>,
 }
 
 /// Output of the embed stage for a single commit.
@@ -60,10 +60,10 @@ impl EmbedStage {
         self
     }
 
-    /// Wire a `Storage` impl that backs the chunk embed cache. Only
-    /// consulted when `with_embed_mode` is set to Semantic or Diff.
-    /// Plan 27.
-    pub fn with_cache(mut self, storage: Arc<dyn crate::Storage>) -> Self {
+    /// Wire the [`crate::storage::StorageCache`] that backs the chunk
+    /// embed cache. Only consulted when `with_embed_mode` is set to
+    /// Semantic or Diff. Plan 27; narrowed to the cache seam in #98.
+    pub fn with_cache(mut self, storage: Arc<dyn crate::storage::StorageCache>) -> Self {
         self.cache = Some(storage);
         self
     }
@@ -390,7 +390,7 @@ mod tests {
             dim: 4,
         });
         // Use the InMemoryCacheStorage from test_helpers (added in C.2).
-        let cache: Arc<dyn crate::Storage> =
+        let cache: Arc<dyn crate::storage::StorageCache> =
             Arc::new(super::super::test_helpers::InMemoryCacheStorage::default());
         let stage = EmbedStage::new(embedder.clone())
             .with_embed_mode(crate::EmbedMode::Diff)
@@ -639,7 +639,8 @@ mod tests {
             calls: calls.clone(),
             dim: 4,
         });
-        let cache: Arc<dyn crate::Storage> = Arc::new(InMemoryCacheStorage::default());
+        let cache: Arc<dyn crate::storage::StorageCache> =
+            Arc::new(InMemoryCacheStorage::default());
         let stage = EmbedStage::new(embedder.clone())
             .with_embed_mode(crate::EmbedMode::Semantic)
             .with_cache(cache.clone());

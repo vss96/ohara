@@ -13,8 +13,10 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
 use ohara_core::query::PatternQuery;
-use ohara_engine::client::{find_or_spawn_daemon, registry_path, try_daemon_call};
-use ohara_engine::ipc::{ErrorCode, ErrorPayload, Request, RequestMethod, Response};
+use ohara_engine::client::{
+    find_or_spawn_daemon, rebuild_refusal, registry_path, try_daemon_call, DaemonRoute,
+};
+use ohara_engine::ipc::{Request, RequestMethod};
 use ohara_engine::{EngineError, FindPatternResult, RetrievalEngine};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -88,14 +90,6 @@ async fn run_standalone(
         .map_err(rebuild_aware)
 }
 
-/// Build the user-facing rebuild refusal: the daemon/engine
-/// "index needs rebuild: <reason>" message plus the command that fixes it.
-/// Mirrors the MCP `find_pattern` refusal so the CLI and agent surfaces
-/// stay consistent.
-fn rebuild_refusal(message: &str) -> String {
-    format!("{message}\nRun `ohara index --rebuild` in this repo first.")
-}
-
 /// Convert an [`EngineError`] into an `anyhow` error, surfacing the rebuild
 /// command for `NeedsRebuild` so a stale standalone query refuses loudly
 /// instead of returning wrong results (issue #78).
@@ -104,50 +98,6 @@ fn rebuild_aware(e: EngineError) -> anyhow::Error {
         return anyhow::anyhow!(rebuild_refusal(&e.to_string()));
     }
     anyhow::anyhow!(e.to_string())
-}
-
-/// What `ohara query` should do with a daemon error response.
-#[derive(Debug, PartialEq, Eq)]
-enum ErrorAction {
-    /// Surface this message to the user; do NOT fall back. The index is
-    /// definitively unusable, so the standalone path can't do better.
-    Surface(String),
-    /// Fall back to the (guarded) standalone path.
-    Fallback,
-}
-
-/// Map a daemon [`ErrorPayload`] to the CLI's next action (issue #78).
-///
-/// `NeedsRebuild` is surfaced verbatim — previously the CLI treated every
-/// daemon error as "fall back to standalone", and the standalone path
-/// bypassed the engine's rebuild guard, silently querying a stale index.
-/// Every other code falls back: the standalone path is now guarded, so it
-/// either refuses for the same reason or succeeds in-process.
-fn classify_daemon_error(err: &ErrorPayload) -> ErrorAction {
-    match err.code {
-        ErrorCode::NeedsRebuild => ErrorAction::Surface(rebuild_refusal(&err.message)),
-        _ => ErrorAction::Fallback,
-    }
-}
-
-/// Turn a daemon [`Response`] into a result, surfacing a rebuild refusal or
-/// falling back to the guarded standalone path as appropriate (issue #78).
-async fn handle_daemon_response(
-    resp: Response,
-    canonical: &Path,
-    q: PatternQuery,
-    args: &Args,
-) -> Result<FindPatternResult> {
-    if let Some(err) = resp.error {
-        return match classify_daemon_error(&err) {
-            ErrorAction::Surface(msg) => Err(anyhow::anyhow!(msg)),
-            ErrorAction::Fallback => run_standalone(canonical, q, args).await,
-        };
-    }
-    let value = resp
-        .result
-        .ok_or_else(|| anyhow::anyhow!("daemon response missing result"))?;
-    serde_json::from_value(value).map_err(|e| anyhow::anyhow!("decode FindPatternResult: {e}"))
 }
 
 pub async fn run(args: Args, no_daemon: bool) -> Result<()> {
@@ -185,9 +135,13 @@ pub async fn run(args: Args, no_daemon: bool) -> Result<()> {
     )
     .await;
 
-    let result: FindPatternResult = match daemon_resp {
-        Some(resp) => handle_daemon_response(resp, &canonical, pattern_query, &args).await?,
-        None => run_standalone(&canonical, pattern_query, &args).await?,
+    // One routing policy for every daemon outcome (issue #96): surface a
+    // NeedsRebuild refusal verbatim (issue #78), otherwise fall back to the
+    // guarded standalone path.
+    let result: FindPatternResult = match daemon_resp.route() {
+        DaemonRoute::Served(r) => r,
+        DaemonRoute::Refuse(msg) => return Err(anyhow::anyhow!(msg)),
+        DaemonRoute::Fallback => run_standalone(&canonical, pattern_query, &args).await?,
     };
 
     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -199,39 +153,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn needs_rebuild_is_surfaced_with_rebuild_command() {
-        let err = ErrorPayload {
-            code: ErrorCode::NeedsRebuild,
-            message: "index needs rebuild: embedding_model mismatch".into(),
-        };
-        match classify_daemon_error(&err) {
-            ErrorAction::Surface(msg) => {
-                assert!(msg.contains("ohara index --rebuild"), "got: {msg}");
-                assert!(msg.contains("embedding_model mismatch"), "got: {msg}");
-            }
-            ErrorAction::Fallback => {
-                panic!("NeedsRebuild must be surfaced, not silently fall back to a stale index")
-            }
-        }
-    }
-
-    #[test]
-    fn other_daemon_errors_fall_back_to_standalone() {
-        for code in [
-            ErrorCode::Internal,
-            ErrorCode::NotImplemented,
-            ErrorCode::NotIndexed,
-            ErrorCode::InvalidRequest,
-        ] {
-            let err = ErrorPayload {
-                code,
-                message: "x".into(),
-            };
-            assert_eq!(
-                classify_daemon_error(&err),
-                ErrorAction::Fallback,
-                "{code:?} should fall back to the (guarded) standalone path"
-            );
-        }
+    fn standalone_needs_rebuild_carries_the_shared_remedy() {
+        let err = rebuild_aware(EngineError::NeedsRebuild {
+            reason: "embedding_model mismatch".into(),
+        });
+        let msg = err.to_string();
+        assert!(msg.contains("embedding_model mismatch"), "got: {msg}");
+        assert!(
+            msg.contains(ohara_engine::client::REBUILD_REMEDY),
+            "got: {msg}"
+        );
     }
 }

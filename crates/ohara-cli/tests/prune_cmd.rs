@@ -4,7 +4,7 @@
 
 use ohara_core::storage::CommitRecord;
 use ohara_core::types::CommitMeta;
-use ohara_core::{CommitSha, Storage, TipStore, WorktreeKey};
+use ohara_core::{CommitSha, StorageWrite, TipStore, WorktreeKey};
 use std::path::Path;
 use std::process::Command;
 

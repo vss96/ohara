@@ -13,7 +13,7 @@
 pub mod hydrator;
 
 use crate::perf_trace::timed_phase;
-use crate::storage::Storage;
+use crate::storage::StorageExplain;
 use crate::types::{CommitMeta, Provenance, RepoId};
 use crate::Result;
 use async_trait::async_trait;
@@ -165,7 +165,7 @@ pub struct ExplainMeta {
 /// always runs the blamer; it is the engine's responsibility to short-
 /// circuit when cached ranges are available.
 pub async fn explain_change(
-    storage: &dyn Storage,
+    storage: &dyn StorageExplain,
     blamer: &dyn BlameSource,
     repo_id: &RepoId,
     query: &ExplainQuery,
@@ -177,7 +177,7 @@ pub async fn explain_change(
 /// index does not hold yet, matching what the engine (daemon) path does.
 /// Standalone callers pass their blamer (it implements [`CommitLookup`]).
 pub async fn explain_change_with_fallback(
-    storage: &dyn Storage,
+    storage: &dyn StorageExplain,
     blamer: &dyn BlameSource,
     git_fallback: Option<&dyn CommitLookup>,
     repo_id: &RepoId,

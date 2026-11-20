@@ -15,8 +15,8 @@ tokio = { workspace = true }
 tracing.workspace = true
 
 # Optional ONNX Runtime direct dep — only pulled in when a hardware
-# execution-provider feature is enabled. Pinned to fastembed 5.13's
-# transitive ort version (=2.0.0-rc.12, ONNX Runtime 1.24.2) so
+# execution-provider feature is enabled. Pinned to fastembed 7.7's
+# transitive ort version (=2.0.0-rc.15, ONNX Runtime 1.31) so
 # `ExecutionProviderDispatch` stays type-compatible with the embedder
 # session. Issue #54: the rc.9 → rc.12 bump is what unblocks the
 # Q-variant's `SkipLayerNormalization` regression
@@ -29,7 +29,7 @@ tracing.workspace = true
 # to them — `coreml` becomes a no-op there. CUDA flows independently
 # via the `cuda` feature below.
 [target.'cfg(target_os = "macos")'.dependencies]
-ort = { version = "=2.0.0-rc.12", optional = true, features = ["coreml"] }
+ort = { version = "=2.0.0-rc.15", optional = true, features = ["coreml"] }
 # Direct tokenizers dep for the CoreML fixed-shape path (plan-30):
 # fastembed hardcodes PaddingStrategy::BatchLongest, but the shape-fixed
 # model needs Fixed(512). We override via TextEmbedding's pub `tokenizer`
@@ -38,7 +38,7 @@ ort = { version = "=2.0.0-rc.12", optional = true, features = ["coreml"] }
 tokenizers = { workspace = true, optional = true }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-ort = { version = "=2.0.0-rc.12", optional = true }
+ort = { version = "=2.0.0-rc.15", optional = true }
 tokenizers = { workspace = true, optional = true }
 
 [features]
@@ -51,3 +51,6 @@ coreml = ["dep:ort", "dep:tokenizers"]
 # Enable CUDA execution provider. Requires CUDA toolkit at build time —
 # Linux x86_64 (and Windows) hosts with NVIDIA GPUs only.
 cuda = ["dep:ort", "ort/cuda"]
+
+[dev-dependencies]
+proptest.workspace = true

@@ -12,6 +12,7 @@ mod error;
 mod handle;
 mod index_service;
 pub mod ipc;
+pub mod lifecycle;
 pub mod registry;
 mod runtime_metadata;
 pub mod server;

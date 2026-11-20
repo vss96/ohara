@@ -190,4 +190,89 @@ mod tests {
         assert!(!body.contains("added_lines:"));
         assert!(body.contains("change: deleted"));
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_change_kind() -> impl Strategy<Value = ChangeKind> {
+            prop_oneof![
+                Just(ChangeKind::Added),
+                Just(ChangeKind::Modified),
+                Just(ChangeKind::Deleted),
+                Just(ChangeKind::Renamed),
+            ]
+        }
+
+        proptest! {
+            #[test]
+            fn build_preserves_section_order_and_added_line_extraction(
+                first_line in "[a-zA-Z0-9 _-]{0,40}",
+                extra_msg in "(\n[a-zA-Z0-9 _-]{0,30}){0,2}",
+                file_path in "[a-z]{1,10}(/[a-z]{1,10}){0,3}\\.[a-z]{1,4}",
+                lang in proptest::option::of("[a-z]{2,10}"),
+                sym_names in proptest::collection::vec("[a-zA-Z_][a-zA-Z0-9_]{0,15}", 0..=4),
+                change in arb_change_kind(),
+                added_lines in proptest::collection::vec("[a-zA-Z0-9_ ();={}]{1,30}", 0..=6),
+                removed_lines in proptest::collection::vec("[a-zA-Z0-9_ ();={}]{1,30}", 0..=4),
+            ) {
+                let mut diff = String::from("--- a/file\n+++ b/file\n@@ -1,3 +1,3 @@\n");
+                for r in &removed_lines {
+                    diff.push('-');
+                    diff.push_str(r);
+                    diff.push('\n');
+                }
+                for a in &added_lines {
+                    diff.push('+');
+                    diff.push_str(a);
+                    diff.push('\n');
+                }
+                let h = Hunk {
+                    commit_sha: "sha".into(),
+                    file_path,
+                    language: lang.clone(),
+                    change_kind: change,
+                    diff_text: diff,
+                };
+                let commit_message = format!("{first_line}{extra_msg}");
+                let symbols: Vec<HunkSymbol> = sym_names
+                    .iter()
+                    .map(|n| sym(n, AttributionKind::ExactSpan))
+                    .collect();
+
+                let out = build(&h, &commit_message, &symbols);
+
+                prop_assert_eq!(out.contains("commit: "), !first_line.is_empty());
+                prop_assert!(out.contains("file: "));
+                prop_assert_eq!(out.contains("language: "), lang.is_some());
+                prop_assert_eq!(out.contains("symbols: "), !symbols.is_empty());
+                prop_assert!(out.contains("change: "));
+                prop_assert_eq!(out.contains("added_lines:\n"), !added_lines.is_empty());
+                if !added_lines.is_empty() {
+                    let expected_tail = format!("added_lines:\n{}", added_lines.join("\n"));
+                    prop_assert!(
+                        out.ends_with(&expected_tail),
+                        "added_lines payload mismatch in:\n{out}"
+                    );
+                }
+                prop_assert!(!out.contains("+++ b/file"));
+
+                let headers = [
+                    "commit: ",
+                    "file: ",
+                    "language: ",
+                    "symbols: ",
+                    "change: ",
+                    "added_lines:\n",
+                ];
+                let present_offsets: Vec<usize> = headers
+                    .iter()
+                    .filter_map(|hdr| out.find(hdr))
+                    .collect();
+                for pair in present_offsets.windows(2) {
+                    prop_assert!(pair[0] < pair[1], "sections out of order in:\n{out}");
+                }
+            }
+        }
+    }
 }

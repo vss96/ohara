@@ -18,8 +18,8 @@
 
 use anyhow::{Context, Result};
 use fastembed::{
-    EmbeddingModel, InitOptions, OnnxSource, RerankInitOptions, RerankInitOptionsUserDefined,
-    RerankerModel, TextEmbedding, TextRerank, TokenizerFiles, UserDefinedRerankingModel,
+    EmbeddingModel, OnnxSource, RerankInitOptions, RerankInitOptionsUserDefined, RerankerModel,
+    TextEmbedding, TextInitOptions, TextRerank, TokenizerFiles, UserDefinedRerankingModel,
 };
 use ohara_core::embed::RerankProvider;
 use ohara_core::{EmbeddingProvider, Result as CoreResult};
@@ -139,7 +139,7 @@ impl FastEmbedProvider {
     /// downloaded on first run; size is comparable to the full-precision
     /// model since the optimized ONNX export is ~33MB.
     pub fn with_provider(provider: EmbedProvider) -> Result<Self> {
-        let opts = InitOptions::new(EmbeddingModel::BGESmallENV15Q)
+        let opts = TextInitOptions::new(EmbeddingModel::BGESmallENV15Q)
             .with_show_download_progress(false)
             .with_cache_dir(crate::cache::cache_dir());
         let opts = apply_provider_to_init(opts, provider)?;
@@ -171,8 +171,8 @@ fn execution_providers_for(
             // in scope). Both legs of the gate are needed.
             #[cfg(all(feature = "coreml", target_os = "macos"))]
             {
-                use ort::execution_providers::CoreMLExecutionProvider;
-                Ok(vec![CoreMLExecutionProvider::default().build()])
+                use ort::ep::CoreML;
+                Ok(vec![CoreML::default().build()])
             }
             #[cfg(not(all(feature = "coreml", target_os = "macos")))]
             Err(anyhow::anyhow!(
@@ -184,8 +184,8 @@ fn execution_providers_for(
         EmbedProvider::Cuda => {
             #[cfg(feature = "cuda")]
             {
-                use ort::execution_providers::CUDAExecutionProvider;
-                Ok(vec![CUDAExecutionProvider::default().build()])
+                use ort::ep::CUDA;
+                Ok(vec![CUDA::default().build()])
             }
             #[cfg(not(feature = "cuda"))]
             Err(anyhow::anyhow!(
@@ -197,7 +197,10 @@ fn execution_providers_for(
     }
 }
 
-fn apply_provider_to_init(opts: InitOptions, provider: EmbedProvider) -> Result<InitOptions> {
+fn apply_provider_to_init(
+    opts: TextInitOptions,
+    provider: EmbedProvider,
+) -> Result<TextInitOptions> {
     let eps = execution_providers_for(provider)?;
     if eps.is_empty() {
         Ok(opts)
@@ -467,7 +470,8 @@ mod tests {
     #[test]
     fn provider_coreml_without_feature_returns_actionable_message() {
         let err = execution_providers_for(EmbedProvider::CoreMl)
-            .expect_err("coreml requires --features coreml");
+            .err()
+            .expect("coreml requires --features coreml");
         let s = err.to_string();
         assert!(s.contains("coreml"), "error should name the provider: {s}");
         assert!(
@@ -480,7 +484,8 @@ mod tests {
     #[test]
     fn provider_cuda_without_feature_returns_actionable_message() {
         let err = execution_providers_for(EmbedProvider::Cuda)
-            .expect_err("cuda requires --features cuda");
+            .err()
+            .expect("cuda requires --features cuda");
         let s = err.to_string();
         assert!(s.contains("cuda"), "error should name the provider: {s}");
         assert!(
