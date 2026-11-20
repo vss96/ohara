@@ -58,6 +58,28 @@ mod tests {
     }
 
     #[test]
+    fn v9_drops_unused_blob_cache_table() {
+        // Issue #141: `blob_cache` (V1) never had a production writer;
+        // the plan-27 `chunk_embed_cache` (V5) owns embed dedup.
+        let mut c = fresh_conn();
+        run_to_version(&mut c, 8);
+        c.execute(
+            "INSERT INTO blob_cache (blob_sha, embedding_model, embedded_at) VALUES ('b', 'm', 1)",
+            [],
+        )
+        .unwrap();
+        run(&mut c).unwrap();
+        let n: i64 = c
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='blob_cache'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "V9 must drop blob_cache");
+    }
+
+    #[test]
     fn migrations_create_hunk_and_vec_hunk_tables_on_fresh_db() {
         crate::codec::pool::register_vec_auto_extension().unwrap(); // register vec extension before opening any connection
         let mut c = Connection::open_in_memory().unwrap();
