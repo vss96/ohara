@@ -543,6 +543,91 @@ mod tests {
         assert_eq!(by(ok.id).state, DecisionState::Settled);
     }
 
+    async fn settle_one_round(
+        store: &MemStore,
+        git: &Git,
+        task: &TaskRecord,
+        ckpt: &str,
+    ) -> SettleReport {
+        let rt = RuntimeName("claude".into());
+        let logs = tempfile::tempdir().unwrap();
+        settle_round(
+            store,
+            git,
+            task,
+            &Settlement {
+                round: 1,
+                checkpoint_sha: ckpt,
+                scripts: &[],
+                runtime: &rt,
+                logs: logs.path(),
+                deadline: far(),
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rejected_parent_rejects_child() {
+        let (dir, git, base) = repo();
+        let ckpt = commit_file(&dir, &git, "a.txt");
+        let task = task_record(&base);
+        let store = MemStore::default();
+        let mut old = proposed(&task, 0, vec![]);
+        old.state = DecisionState::Rejected;
+        old.rejected_reason = Some("earlier".into());
+        let bad = proposed(&task, 1, vec![argv(&["false"])]);
+        let mut under_old = proposed(&task, 1, vec![]);
+        under_old.parent_ids = vec![old.id];
+        let mut under_bad = proposed(&task, 1, vec![]);
+        under_bad.parent_ids = vec![bad.id];
+        for d in [&old, &bad, &under_old, &under_bad] {
+            store.put_decision(d).await.unwrap();
+        }
+
+        let report = settle_one_round(&store, &git, &task, &ckpt).await;
+        assert_eq!(
+            report,
+            SettleReport {
+                settled: 0,
+                rejected: 3
+            }
+        );
+        let all = store.list_decisions(&task.id).await.unwrap();
+        for id in [under_old.id, under_bad.id] {
+            let got = all.iter().find(|d| d.id == id).unwrap();
+            assert_eq!(got.state, DecisionState::Rejected);
+            assert!(got
+                .rejected_reason
+                .as_deref()
+                .unwrap()
+                .contains("not settled"));
+        }
+    }
+
+    #[tokio::test]
+    async fn parent_settled_earlier_in_same_round_is_accepted() {
+        let (dir, git, base) = repo();
+        let ckpt = commit_file(&dir, &git, "a.txt");
+        let task = task_record(&base);
+        let store = MemStore::default();
+        let parent = proposed(&task, 1, vec![]);
+        let mut child = proposed(&task, 1, vec![]);
+        child.parent_ids = vec![parent.id];
+        store.put_decision(&parent).await.unwrap();
+        store.put_decision(&child).await.unwrap();
+
+        let report = settle_one_round(&store, &git, &task, &ckpt).await;
+        assert_eq!(
+            report,
+            SettleReport {
+                settled: 2,
+                rejected: 0
+            }
+        );
+    }
+
     #[tokio::test]
     async fn overlapping_files_add_parent_edge() {
         let (dir, git, base) = repo();
