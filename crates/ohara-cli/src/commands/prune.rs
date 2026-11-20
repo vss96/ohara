@@ -9,9 +9,9 @@
 
 use crate::commands::index::daemon_route::alive_same_version_socket;
 use crate::commands::index::notify::notify_daemons_of_invalidation;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use clap::Args as ClapArgs;
-use ohara_engine::client::Client;
+use ohara_engine::client::{try_daemon_write, DaemonRoute};
 use ohara_engine::ipc::{Request, RequestMethod};
 use ohara_engine::PruneOutcome;
 use std::path::{Path, PathBuf};
@@ -56,36 +56,30 @@ pub async fn run(args: Args, no_daemon: bool) -> Result<PruneOutcome> {
     Ok(out)
 }
 
-/// Send `PruneUnreachable` for `worktree` to the daemon on `socket`.
+/// Send `PruneUnreachable` for `worktree` to the daemon on `socket`,
+/// routed by the shared write policy
+/// ([`DaemonCallResult::route_write`]) with no fallback codes.
 ///
 /// `Ok(None)` means "prune in-process" and is returned only when the
 /// socket is unreachable, so no daemon work can be in flight. Once the
 /// request was sent, any failure is an error: the daemon may still be
 /// pruning under its repo lock.
+///
+/// [`DaemonCallResult::route_write`]: ohara_engine::client::DaemonCallResult::route_write
 async fn prune_via_daemon(socket: &Path, worktree: &Path) -> Result<Option<PruneOutcome>> {
-    let client = Client::connect(socket);
-    if !client.reachable().await {
-        tracing::debug!(socket = %socket.display(), "daemon unreachable; pruning in-process");
-        return Ok(None);
-    }
     let req = Request {
         id: 1,
         repo_path: Some(worktree.to_string_lossy().into_owned()),
         method: RequestMethod::PruneUnreachable,
     };
-    let resp = client
-        .call_with_timeout(req, PRUNE_TIMEOUT)
+    match try_daemon_write(socket, req, PRUNE_TIMEOUT)
         .await
-        .map_err(|e| anyhow!("daemon did not finish ({e}); it may still be pruning"))?;
-    if let Some(err) = resp.error {
-        bail!("daemon failed to prune: {}", err.message);
+        .route_write(&[])
+    {
+        DaemonRoute::Served(out) => Ok(Some(out)),
+        DaemonRoute::Fallback => Ok(None),
+        DaemonRoute::Refuse(msg) => Err(anyhow!("prune via daemon: {msg}")),
     }
-    let value = resp
-        .result
-        .ok_or_else(|| anyhow!("daemon response had no result; it may still be pruning"))?;
-    let out = serde_json::from_value(value)
-        .map_err(|e| anyhow!("undecodable daemon response: {e}; it may still be pruning"))?;
-    Ok(Some(out))
 }
 
 #[cfg(test)]

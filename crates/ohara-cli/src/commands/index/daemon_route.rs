@@ -8,9 +8,9 @@
 
 use super::{noop_report, up_to_date, Args};
 use crate::commands::provider::ProviderArg;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use ohara_core::IndexerReport;
-use ohara_engine::client::{registry_path, Client};
+use ohara_engine::client::{registry_path, try_daemon_write, DaemonRoute};
 use ohara_engine::ipc::{ErrorCode, Request, RequestMethod};
 use ohara_engine::registry::Registry;
 use ohara_engine::EnsureIndexedOutcome;
@@ -110,59 +110,35 @@ pub(super) async fn try_route(
     Ok(Some(report))
 }
 
-/// Send `EnsureIndexed { sha: head }` for `worktree`.
+/// Send `EnsureIndexed { sha: head }` for `worktree`, routed by the shared
+/// write policy ([`DaemonCallResult::route_write`]).
 ///
 /// `Ok(None)` means "index in-process" and is returned only when no daemon
 /// work can be in flight: the socket is unreachable, or the daemon answered
-/// `NoIndex` (the first full index, which the daemon never does itself).
+/// `NotIndexed` (the first full index, which the daemon never does itself).
 ///
 /// Once the request was sent, a timeout or read/decode failure is an error:
 /// the daemon may still be indexing under its repo lock, and an in-process
 /// run would be a second writer. A `NeedsRebuild` reply is also an error, so
 /// the CLI never extends an index the daemon's live embedder refused.
+///
+/// [`DaemonCallResult::route_write`]: ohara_engine::client::DaemonCallResult::route_write
 pub(super) async fn index_via_daemon(
     socket: &Path,
     worktree: &Path,
     head: &str,
 ) -> Result<Option<EnsureIndexedOutcome>> {
-    let client = Client::connect(socket);
-    if !client.reachable().await {
-        tracing::debug!(socket = %socket.display(), "daemon unreachable; indexing in-process");
-        return Ok(None);
-    }
     let req = Request {
         id: 1,
         repo_path: Some(worktree.to_string_lossy().into_owned()),
         method: RequestMethod::EnsureIndexed { sha: head.into() },
     };
-    let resp = client
-        .call_with_timeout(req, ENSURE_INDEXED_TIMEOUT)
-        .await
-        .map_err(|e| {
-            anyhow!(
-                "daemon did not finish ({e}); it may still be indexing. \
-                 Retry, or pass --no-daemon"
-            )
-        })?;
-    if let Some(err) = resp.error {
-        return match err.code {
-            ErrorCode::NotIndexed => {
-                tracing::debug!("daemon reports no index; indexing in-process");
-                Ok(None)
-            }
-            ErrorCode::NeedsRebuild => bail!(
-                "{}\nRebuild the index with: ohara index --rebuild --yes",
-                err.message
-            ),
-            _ => bail!("daemon failed to index: {}", err.message),
-        };
+    let result = try_daemon_write(socket, req, ENSURE_INDEXED_TIMEOUT).await;
+    match result.route_write(&[ErrorCode::NotIndexed]) {
+        DaemonRoute::Served(out) => Ok(Some(out)),
+        DaemonRoute::Fallback => Ok(None),
+        DaemonRoute::Refuse(msg) => Err(anyhow!("index via daemon: {msg}")),
     }
-    let value = resp
-        .result
-        .ok_or_else(|| anyhow!("daemon response had no result; it may still be indexing"))?;
-    let out = serde_json::from_value(value)
-        .map_err(|e| anyhow!("undecodable daemon response: {e}; it may still be indexing"))?;
-    Ok(Some(out))
 }
 
 #[cfg(test)]
@@ -251,7 +227,7 @@ mod tests {
         let err = index_via_daemon(&sock, dir.path(), SHA).await.unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("index needs rebuild: x"), "{msg}");
-        assert!(msg.contains("ohara index --rebuild --yes"), "{msg}");
+        assert!(msg.contains(ohara_engine::client::REBUILD_REMEDY), "{msg}");
     }
 
     #[tokio::test]
