@@ -273,4 +273,13 @@ builders = ["codex", "claude"]     # optional: POCs of one decision rotate acros
             .unwrap_err();
         assert!(err.to_string().contains("judge"), "{err}");
     }
+
+    #[test]
+    fn roles_without_claude_runtime_must_be_listed_explicitly() {
+        let err = load_str("[runtimes.codex]\nkind = \"codex\"\n").unwrap_err();
+        assert!(err.to_string().contains("roles.contract"), "{err}");
+        let err = load_str("[runtimes.codex]\nkind = \"codex\"\n[roles]\nbuilder = [\"codex\"]\n")
+            .unwrap_err();
+        assert!(err.to_string().contains("no runtime configured"), "{err}");
+    }
 }
