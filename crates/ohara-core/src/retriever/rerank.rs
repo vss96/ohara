@@ -103,6 +103,37 @@ mod tests {
         assert_eq!(out[2].hunk_id, 101, "lowest score (1.0) must be last");
     }
 
+    /// Records every candidate passage it is asked to score.
+    struct RecordingReranker(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait]
+    impl RerankProvider for RecordingReranker {
+        async fn rerank(&self, _: &str, candidates: &[&str]) -> crate::Result<Vec<f32>> {
+            let mut seen = self.0.lock().unwrap();
+            seen.extend(candidates.iter().map(|c| c.to_string()));
+            Ok(vec![0.0; candidates.len()])
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_encode_passage_leads_with_commit_message_then_diff() {
+        // Issue #140: a hunk's diff often never says what the change is
+        // for ("retry", "backoff" live only in the commit message), so
+        // the cross-encoder must see the message. It goes first so the
+        // 512-token truncation never cuts it off.
+        let mut hit = make_hit(1, "+for attempt in 0..3 {}");
+        hit.commit.message = "add retry with exponential backoff".into();
+        let reranker = RecordingReranker(std::sync::Mutex::new(Vec::new()));
+        cross_encode(&reranker, "retry with backoff", vec![hit])
+            .await
+            .unwrap();
+        let seen = reranker.0.lock().unwrap();
+        assert_eq!(
+            seen.as_slice(),
+            ["add retry with exponential backoff\n\n+for attempt in 0..3 {}"]
+        );
+    }
+
     #[tokio::test]
     async fn cross_encode_empty_input_returns_empty() {
         let reranker = ScriptedReranker(vec![]);
