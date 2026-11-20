@@ -236,4 +236,31 @@ mod tests {
         let set2 = reachable_commit_shas(wt_path).unwrap();
         assert!(set2.contains(&fx.f1.to_string()));
     }
+
+    #[test]
+    fn any_unreachable_is_false_only_when_every_commit_is_reached_by_a_ref_or_head() {
+        let fx = fixture();
+        let dangling = commit(&fx.repo, None, Some(fx.c[1]), "dangling");
+        let path = fx.dir.path();
+        assert!(!any_unreachable(path, &[]).unwrap());
+        // c1 is an ancestor of HEAD; f1 is the `feat` branch tip.
+        assert!(!any_unreachable(path, &[sha(fx.c[0]), sha(fx.f1)]).unwrap());
+        assert!(any_unreachable(path, &[sha(fx.c[1]), sha(dangling)]).unwrap());
+        // A commit the repository does not have is unreachable.
+        let missing = CommitSha::parse(&"e".repeat(40)).unwrap();
+        assert!(any_unreachable(path, &[missing]).unwrap());
+    }
+
+    #[test]
+    fn any_unreachable_sees_a_branch_deleted_later() {
+        let fx = fixture();
+        let path = fx.dir.path();
+        assert!(!any_unreachable(path, &[sha(fx.f1)]).unwrap());
+        fx.repo
+            .find_branch("feat", git2::BranchType::Local)
+            .unwrap()
+            .delete()
+            .unwrap();
+        assert!(any_unreachable(path, &[sha(fx.f1)]).unwrap());
+    }
 }
