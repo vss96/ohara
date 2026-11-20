@@ -23,6 +23,7 @@ pub mod codec;
 pub mod metrics;
 pub mod migrations;
 pub mod storage_impl;
+mod storage_write;
 pub mod tables;
 pub mod tip_store;
 
