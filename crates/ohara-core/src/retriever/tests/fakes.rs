@@ -242,16 +242,7 @@ impl crate::storage::StorageExplain for FakeStorage {
     }
 }
 
-#[async_trait]
-impl crate::storage::StorageCache for FakeStorage {
-    async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
-        Ok(false)
-    }
-
-    async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
-        Ok(())
-    }
-}
+impl crate::storage::StorageCache for FakeStorage {}
 
 pub struct FakeEmbedder;
 

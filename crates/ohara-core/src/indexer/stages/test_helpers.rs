@@ -17,14 +17,6 @@ pub(super) struct InMemoryCacheStorage {
 
 #[async_trait]
 impl crate::storage::StorageCache for InMemoryCacheStorage {
-    async fn blob_was_seen(&self, _blob_sha: &str, _embedding_model: &str) -> crate::Result<bool> {
-        Ok(false)
-    }
-
-    async fn record_blob_seen(&self, _blob_sha: &str, _embedding_model: &str) -> crate::Result<()> {
-        Ok(())
-    }
-
     async fn embed_cache_get_many(
         &self,
         hashes: &[crate::types::ContentHash],

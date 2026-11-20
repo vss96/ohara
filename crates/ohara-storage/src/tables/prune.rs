@@ -1,7 +1,7 @@
 //! Deleting commits that are no longer reachable from any ref or worktree
 //! HEAD (plan 33).
 //!
-//! Content-addressed caches (`blob_cache`, `chunk_embed_cache`), the shared
+//! The content-addressed `chunk_embed_cache`, the shared
 //! `file_path` dictionary and the HEAD-symbol snapshot (`symbol`,
 //! `vec_symbol`, `fts_symbol*`) are not keyed by commit and are kept.
 

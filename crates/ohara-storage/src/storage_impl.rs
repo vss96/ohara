@@ -380,24 +380,6 @@ impl StorageExplain for SqliteStorage {
 
 #[async_trait::async_trait]
 impl StorageCache for SqliteStorage {
-    async fn blob_was_seen(&self, blob_sha: &str, model: &str) -> CoreResult<bool> {
-        let blob = blob_sha.to_string();
-        let m = model.to_string();
-        with_conn(&self.pool, move |c| {
-            crate::tables::blob_cache::was_seen(c, &blob, &m)
-        })
-        .await
-    }
-
-    async fn record_blob_seen(&self, blob_sha: &str, model: &str) -> CoreResult<()> {
-        let blob = blob_sha.to_string();
-        let m = model.to_string();
-        with_conn(&self.write_pool, move |c| {
-            crate::tables::blob_cache::record(c, &blob, &m)
-        })
-        .await
-    }
-
     async fn embed_cache_get_many(
         &self,
         hashes: &[ohara_core::types::ContentHash],
@@ -834,15 +816,6 @@ mod tests {
         let hits = s.knn_hunks(&id, &q, 2, None, None).await.unwrap();
         assert_eq!(hits.len(), 2);
         assert!(hits[0].hunk.file_path.ends_with("b.rs"));
-    }
-
-    #[tokio::test]
-    async fn blob_cache_round_trips() {
-        let (_dir, s, _id) = fixture_storage_with_repo().await;
-        assert!(!s.blob_was_seen("blob1", "bge-small-v1.5").await.unwrap());
-        s.record_blob_seen("blob1", "bge-small-v1.5").await.unwrap();
-        assert!(s.blob_was_seen("blob1", "bge-small-v1.5").await.unwrap());
-        assert!(!s.blob_was_seen("blob1", "voyage-code-3").await.unwrap());
     }
 
     #[tokio::test]

@@ -301,16 +301,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
-    impl crate::storage::StorageCache for RecordingStorage {
-        async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> {
-            Ok(false)
-        }
-
-        async fn record_blob_seen(&self, _: &str, _: &str) -> Result<()> {
-            Ok(())
-        }
-    }
+    impl crate::storage::StorageCache for RecordingStorage {}
 
     #[tokio::test]
     async fn persist_writes_the_commit_and_all_its_hunks_in_one_storage_call() {
