@@ -166,6 +166,17 @@ mod tests {
     }
 
     #[test]
+    fn last_indexed_commit_is_the_worktree_status_value() {
+        let st = |sha: Option<&str>| ohara_core::query::IndexStatus {
+            last_indexed_commit: sha.map(str::to_string),
+            commits_behind_head: 0,
+            indexed_at: None,
+        };
+        assert_eq!(render_last_indexed(&st(Some("abc"))), "abc");
+        assert_eq!(render_last_indexed(&st(None)), "<none>");
+    }
+
+    #[test]
     fn render_compatibility_compatible_is_one_line_no_action() {
         let s = render_compatibility(&CompatibilityStatus::Compatible);
         assert_eq!(s, "compatibility: compatible");
