@@ -476,6 +476,7 @@ mod tests {
             blame_ranges: ranges,
             query: &query,
             repo_id: &repo_id,
+            git_fallback: None,
         })
         .await
         .unwrap();
@@ -520,6 +521,7 @@ mod tests {
             blame_ranges: ranges,
             query: &query,
             repo_id: &repo_id,
+            git_fallback: None,
         })
         .await
         .unwrap();
