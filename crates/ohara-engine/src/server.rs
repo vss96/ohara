@@ -23,6 +23,19 @@ pub async fn serve_unix(
     socket_path: &Path,
     stop: CancellationToken,
 ) -> crate::Result<()> {
+    serve_unix_with_grace(engine, socket_path, stop, SHUTDOWN_GRACE).await
+}
+
+/// How long shutdown waits for in-flight requests before aborting them.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// [`serve_unix`] with an explicit shutdown grace period (test seam).
+pub(crate) async fn serve_unix_with_grace(
+    engine: Arc<RetrievalEngine>,
+    socket_path: &Path,
+    stop: CancellationToken,
+    grace: std::time::Duration,
+) -> crate::Result<()> {
     if socket_path.exists() {
         #[cfg(unix)]
         {
@@ -63,10 +76,10 @@ pub async fn serve_unix(
             }
         }
     }
-    // Drain in-flight handlers with a bounded 5-second grace period so
-    // requests that are mid-flight are not abruptly aborted.
+    // Drain in-flight handlers with a bounded grace period so requests
+    // that are mid-flight are not abruptly aborted.
     let drain = async { while handlers.join_next().await.is_some() {} };
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), drain).await;
+    let _ = tokio::time::timeout(grace, drain).await;
     let _ = std::fs::remove_file(socket_path);
     Ok(())
 }
