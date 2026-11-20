@@ -390,7 +390,7 @@ mod tests {
             dim: 4,
         });
         // Use the InMemoryCacheStorage from test_helpers (added in C.2).
-        let cache: Arc<dyn crate::Storage> =
+        let cache: Arc<dyn crate::storage::StorageCache> =
             Arc::new(super::super::test_helpers::InMemoryCacheStorage::default());
         let stage = EmbedStage::new(embedder.clone())
             .with_embed_mode(crate::EmbedMode::Diff)
@@ -639,7 +639,8 @@ mod tests {
             calls: calls.clone(),
             dim: 4,
         });
-        let cache: Arc<dyn crate::Storage> = Arc::new(InMemoryCacheStorage::default());
+        let cache: Arc<dyn crate::storage::StorageCache> =
+            Arc::new(InMemoryCacheStorage::default());
         let stage = EmbedStage::new(embedder.clone())
             .with_embed_mode(crate::EmbedMode::Semantic)
             .with_cache(cache.clone());
