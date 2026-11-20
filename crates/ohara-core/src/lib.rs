@@ -19,6 +19,7 @@ pub mod query;
 pub mod query_understanding;
 pub mod retriever;
 pub mod storage;
+pub mod task;
 pub mod types;
 pub mod visibility;
 pub mod worktree;
@@ -45,6 +46,14 @@ pub use retriever::{RankingWeights, Retriever};
 pub use storage::{
     CommitRecord, EmbedCacheStats, HunkHit, HunkId, HunkRecord, Storage, StorageCache,
     StorageExplain, StorageRead, StorageStatus, StorageWrite, Vector,
+};
+pub use task::decision::{
+    Assumption, CostIfWrong, DecisionId, DecisionRecord, DecisionState, Evidence, ScriptResult,
+    Verdict,
+};
+pub use task::{
+    ContractHash, CostCents, Deadline, Outcome, Role, RuntimeName, StepRecord, StepState, TaskId,
+    TaskRecord, TaskState, TaskStore,
 };
 pub use types::{
     ulid_for_commit, AttributionKind, ChangeKind, CommitMeta, ContentHash, Hunk, HunkSymbol,

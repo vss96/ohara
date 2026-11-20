@@ -64,7 +64,7 @@ blake3 = "1"
 tempfile = "3"
 async-trait = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
-ulid = "1"
+ulid = { version = "1", features = ["serde"] }
 num_cpus = "1"
 fs2 = "0.4"
 # Pinned to fastembed 7.7's resolved tokenizers so PaddingParams stays
