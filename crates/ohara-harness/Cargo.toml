@@ -1,0 +1,25 @@
+[package]
+name = "ohara-harness"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+ohara-core = { path = "../ohara-core" }
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+toml.workspace = true
+globset.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+
+[features]
+# Exposes `agent::fake::FakeRuntime` and `RuntimeKind::Fake` to downstream
+# test code. Never enabled in release builds.
+test-util = []
+
+[dev-dependencies]
+tempfile.workspace = true

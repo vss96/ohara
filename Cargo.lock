@@ -2525,6 +2525,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ohara-harness"
+version = "0.14.3"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "globset",
+ "ohara-core",
+ "serde",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "ohara-mcp"
 version = "0.14.3"
 dependencies = [

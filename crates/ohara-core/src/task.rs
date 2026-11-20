@@ -150,7 +150,7 @@ impl<'de> Deserialize<'de> for ContractHash {
 }
 
 /// Name of a configured agent runtime.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RuntimeName(pub String);
 
 /// One harness task.
@@ -191,7 +191,7 @@ pub struct TaskRecord {
 }
 
 /// Which part an agent plays in a step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     /// Drafts and freezes the contract.
@@ -204,6 +204,19 @@ pub enum Role {
     Judge,
     /// Reviews the round's changes.
     Reviewer,
+}
+
+impl Role {
+    /// snake_case name, matching the serde representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Contract => "contract",
+            Self::Planner => "planner",
+            Self::Builder => "builder",
+            Self::Judge => "judge",
+            Self::Reviewer => "reviewer",
+        }
+    }
 }
 
 /// Outcome of a single step.
