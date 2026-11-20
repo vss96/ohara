@@ -402,4 +402,39 @@ mod tests {
             _ => panic!("expected config error"),
         }
     }
+
+    #[tokio::test]
+    async fn running_row_is_recorded_before_runtime_returns() {
+        let store = Arc::new(MemStore::default());
+        let seen: Arc<Mutex<Vec<StepRecord>>> = Arc::default();
+        let fake = Arc::new(
+            FakeRuntime::new(name("claude"), vec![outcome(AgentStatus::Completed)]).with_edit({
+                let (store, seen) = (store.clone(), seen.clone());
+                move |_| {
+                    *seen.lock().unwrap() = store.steps.lock().unwrap().clone();
+                }
+            }),
+        );
+        let by = fake.clone();
+        let r = RoleRunner::new(&config(&["claude"]), move |_, _| {
+            by.clone() as Arc<dyn AgentRuntime>
+        })
+        .unwrap();
+        let s = step();
+        let (_, last) = r
+            .run(Role::Builder, request(), s.clone(), &*store, || Ok(()))
+            .await
+            .unwrap();
+        let during = seen.lock().unwrap().clone();
+        assert_eq!(during.len(), 1);
+        assert_eq!(during[0].state, StepState::Running);
+        assert_eq!(during[0].finished_at, None);
+        assert_eq!(during[0].seq, s.seq);
+        assert_eq!(during[0].runtime, name("claude"));
+        assert_eq!(during[0].transcript, fake.calls()[0].transcript);
+        let after = store.list_steps(&s.task_id).await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].state, StepState::Passed);
+        assert_eq!(after[0], last);
+    }
 }
