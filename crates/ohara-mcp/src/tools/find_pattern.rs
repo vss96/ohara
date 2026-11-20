@@ -12,6 +12,9 @@
 
 use crate::server::OharaServer;
 use crate::tools::explain_change::{ExplainChangeInput, EXPLAIN_TOOL_DESCRIPTION};
+use crate::tools::propose_decision::{
+    self, HarnessCtx, ProposeDecisionInput, PROPOSE_TOOL_DESCRIPTION,
+};
 use ohara_core::count_lines;
 use ohara_core::index_metadata::CompatibilityStatus;
 use ohara_core::query_understanding::{parse_query, RetrievalProfile};
@@ -122,13 +125,42 @@ fn default_k() -> u8 {
 #[derive(Clone)]
 pub struct OharaService {
     server: Arc<OharaServer>,
+    /// Set only when started with `--harness-task`; gates `propose_decision`.
+    harness: Option<HarnessCtx>,
 }
+
+/// Name of the harness-only tool.
+const PROPOSE_DECISION: &str = "propose_decision";
 
 impl OharaService {
     pub fn new(server: OharaServer) -> Self {
         Self {
             server: Arc::new(server),
+            harness: None,
         }
+    }
+
+    /// Expose `propose_decision` for the given harness task.
+    pub fn with_harness(mut self, ctx: HarnessCtx) -> Self {
+        self.harness = Some(ctx);
+        self
+    }
+
+    /// Names of the tools this service currently exposes. `propose_decision`
+    /// appears only when a harness task is attached.
+    pub fn tool_names(&self) -> Vec<String> {
+        self.visible_tools()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect()
+    }
+
+    fn visible_tools(&self) -> Vec<rmcp::model::Tool> {
+        Self::tool_box()
+            .list()
+            .into_iter()
+            .filter(|t| self.harness.is_some() || t.name != PROPOSE_DECISION)
+            .collect()
     }
 }
 
@@ -173,6 +205,24 @@ impl OharaService {
             .await
             .map_err(map_engine_error)?;
         find_pattern_body(result, &input.query)
+    }
+
+    #[tool(description = PROPOSE_TOOL_DESCRIPTION)]
+    pub async fn propose_decision(
+        &self,
+        #[tool(aggr)] input: ProposeDecisionInput,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let Some(ctx) = &self.harness else {
+            return Err(rmcp::Error::invalid_params(
+                "propose_decision is only available when the server runs with --harness-task",
+                None,
+            ));
+        };
+        let out = propose_decision::propose(ctx, input).await?;
+        let body = json!({ "decision_id": out.decision_id });
+        Ok(CallToolResult::success(vec![Content::text(
+            body.to_string(),
+        )]))
     }
 
     #[tool(description = EXPLAIN_TOOL_DESCRIPTION)]
@@ -303,8 +353,35 @@ impl OharaService {
     }
 }
 
-#[tool(tool_box)]
 impl ServerHandler for OharaService {
+    async fn list_tools(
+        &self,
+        _: rmcp::model::PaginatedRequestParam,
+        _: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, rmcp::Error> {
+        Ok(rmcp::model::ListToolsResult {
+            next_cursor: None,
+            tools: self.visible_tools(),
+        })
+    }
+
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParam,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        if self.harness.is_none() && request.name == PROPOSE_DECISION {
+            return Err(rmcp::Error::invalid_params(
+                format!(
+                    "unknown tool {PROPOSE_DECISION:?}: server was not started with --harness-task"
+                ),
+                None,
+            ));
+        }
+        let ctx = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        Self::tool_box().call(ctx).await
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             capabilities: ServerCapabilities::builder().enable_tools().build(),

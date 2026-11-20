@@ -1,6 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
+use ohara_core::task::TaskId;
 use ohara_mcp::server;
+use ohara_mcp::tools::propose_decision::HarnessCtx;
 use std::path::PathBuf;
 
 /// Daemon-mode flags. Must accept exactly what
@@ -42,9 +44,35 @@ async fn main() -> Result<()> {
         return run_serve().await;
     }
 
+    let cli = StdioCli::parse();
+    let harness = match cli.harness_task {
+        Some(raw) => Some(harness_ctx(&raw).await?),
+        None => None,
+    };
     let workdir = std::env::current_dir()?;
     let server = server::OharaServer::open(workdir)?;
-    server.serve_stdio().await
+    server.serve_stdio(harness).await
+}
+
+/// Flags of the stdio server (no `serve` subcommand).
+#[derive(Parser, Debug)]
+#[command(name = "ohara-mcp")]
+struct StdioCli {
+    /// Run as a harness agent's MCP server for this task id; enables
+    /// the `propose_decision` tool.
+    #[arg(long)]
+    harness_task: Option<String>,
+}
+
+/// Open the harness task log and bind it to `raw` (a task id).
+async fn harness_ctx(raw: &str) -> Result<HarnessCtx> {
+    let task_id: TaskId = raw
+        .parse()
+        .map_err(|e| anyhow::anyhow!("--harness-task: {e}"))?;
+    let store = ohara_storage::SqliteTaskStore::open_default()
+        .await
+        .map_err(|e| anyhow::anyhow!("open harness store: {e}"))?;
+    Ok(HarnessCtx::new(task_id, std::sync::Arc::new(store)))
 }
 
 async fn run_serve() -> Result<()> {
@@ -71,6 +99,16 @@ async fn run_serve() -> Result<()> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stdio_cli_harness_task_is_optional() {
+        assert!(StdioCli::try_parse_from(["ohara-mcp"])
+            .unwrap()
+            .harness_task
+            .is_none());
+        let cli = StdioCli::try_parse_from(["ohara-mcp", "--harness-task", "X"]).unwrap();
+        assert_eq!(cli.harness_task.as_deref(), Some("X"));
+    }
 
     #[test]
     fn serve_cli_parses_the_flag_shape_spawn_daemon_uses() {
