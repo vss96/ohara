@@ -70,7 +70,10 @@ impl CodexRuntime {
 
 /// A TOML basic string. JSON string escapes are valid TOML escapes.
 fn toml_str(s: &str) -> String {
-    serde_json::Value::String(s.to_string()).to_string()
+    // serde_json leaves DEL (0x7f) raw, which TOML basic strings forbid.
+    serde_json::Value::String(s.to_string())
+        .to_string()
+        .replace('\u{7f}', "\\u007f")
 }
 
 fn toml_key(name: &str) -> String {
@@ -104,6 +107,11 @@ fn mcp_overrides(json: &str) -> Result<Vec<String>> {
             .get("command")
             .and_then(|c| c.as_str())
             .ok_or_else(|| Error::Runtime(format!("codex: mcp server {name} has no command")))?;
+        if name.contains('.') || name.contains('=') {
+            return Err(Error::Runtime(format!(
+                "codex: mcp server name {name:?} contains '.' or '=', which `codex -c` cannot address"
+            )));
+        }
         let prefix = format!("mcp_servers.{}", toml_key(name));
         out.push("-c".to_string());
         out.push(format!("{prefix}.command={}", toml_str(command)));
@@ -112,15 +120,18 @@ fn mcp_overrides(json: &str) -> Result<Vec<String>> {
             out.push("-c".to_string());
             out.push(format!("{prefix}.args=[{}]", args.join(",")));
         }
-        let env: Vec<String> = spec
+        let mut env = Vec::new();
+        for (k, v) in spec
             .get("env")
             .and_then(|e| e.as_object())
-            .map(|e| {
-                e.iter()
-                    .filter_map(|(k, v)| Some(format!("{}={}", toml_str(k), toml_str(v.as_str()?))))
-                    .collect()
-            })
-            .unwrap_or_default();
+            .into_iter()
+            .flatten()
+        {
+            let val = v.as_str().ok_or_else(|| {
+                Error::Runtime(format!("codex: mcp server {name} env {k} is not a string"))
+            })?;
+            env.push(format!("{}={}", toml_str(k), toml_str(val)));
+        }
         if !env.is_empty() {
             out.push("-c".to_string());
             out.push(format!("{prefix}.env={{{}}}", env.join(",")));
