@@ -289,6 +289,23 @@ mod tests {
     }
 
     #[test]
+    fn prompt_starting_with_dash_follows_double_dash() {
+        let mut r = req(None);
+        r.prompt = "-x".into();
+        let a = rt(None).argv(&r, &[]);
+        assert_eq!(a[a.len() - 2..], ["--", "-x"]);
+    }
+
+    #[test]
+    fn generic_turn_failed_uses_tail_for_classification() {
+        let tail = r#"{"type":"error","message":"429 Too Many Requests: rate limit"}
+{"type":"turn.failed","error":{"message":"something went wrong"}}"#;
+        let (st, msg) = decide(parse_final(tail), Some(1), tail);
+        assert_eq!(st, AgentStatus::RateLimited);
+        assert_eq!(msg, "something went wrong");
+    }
+
+    #[test]
     fn mcp_translation() {
         let j = r#"{"mcpServers":{"ohara":{"command":"/bin/o","args":["serve","--x"],"env":{"K":"v"}}}}"#;
         assert_eq!(
