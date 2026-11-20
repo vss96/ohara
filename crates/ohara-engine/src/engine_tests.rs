@@ -634,13 +634,22 @@ async fn filter_is_skipped_when_every_tip_is_visible() {
 
 // ---- plan-33: daemon-side worktree indexing and prune ----
 
-/// Embedder that records every text it is asked to embed.
-#[derive(Default)]
+/// Embedder that records every text it is asked to embed. It reports
+/// `model` as its id; the fixtures index with the default model's
+/// metadata, so `ohara_embed::DEFAULT_MODEL_ID` is the consistent choice.
 struct RecordingEmbedder {
+    model: &'static str,
     texts: Mutex<Vec<String>>,
 }
 
 impl RecordingEmbedder {
+    fn with_model(model: &'static str) -> Self {
+        Self {
+            model,
+            texts: Mutex::new(Vec::new()),
+        }
+    }
+
     fn calls(&self) -> usize {
         self.texts.lock().unwrap().len()
     }
@@ -653,7 +662,7 @@ impl ohara_core::EmbeddingProvider for RecordingEmbedder {
     }
 
     fn model_id(&self) -> &str {
-        "recording"
+        self.model
     }
 
     async fn embed_batch(&self, texts: &[String]) -> ohara_core::Result<Vec<Vec<f32>>> {
@@ -663,7 +672,11 @@ impl ohara_core::EmbeddingProvider for RecordingEmbedder {
 }
 
 fn recording_engine() -> (Arc<RecordingEmbedder>, RetrievalEngine) {
-    let rec = Arc::new(RecordingEmbedder::default());
+    recording_engine_with_model(ohara_embed::DEFAULT_MODEL_ID)
+}
+
+fn recording_engine_with_model(model: &'static str) -> (Arc<RecordingEmbedder>, RetrievalEngine) {
+    let rec = Arc::new(RecordingEmbedder::with_model(model));
     let engine = RetrievalEngine::new(rec.clone(), Arc::new(DummyReranker));
     (rec, engine)
 }
@@ -864,4 +877,48 @@ async fn prune_deletes_commits_of_a_deleted_branch_and_its_tip() {
     let tips = handle.store.tips.indexed_tips(&id.repo_id).await.unwrap();
     assert_eq!(tips.len(), 1);
     assert!(tips[0].worktree.is_main(), "the main tip is never removed");
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn daemon_indexing_refuses_a_live_embedder_of_another_model() {
+    // Review Focus 5: same dimension (384), different model id. Stored
+    // metadata is the default model, so the binary-level check passes;
+    // only the live-embedder guard can catch this.
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (main, slot1) = repo_with_worktree().await;
+    let before = stored_commits(main.path()).await;
+    let wt_repo = git2::Repository::open(&slot1).unwrap();
+    commit_file(&wt_repo, "c.rs", "fn three() {}\n", "third");
+    let (rec, engine) = recording_engine_with_model("other-384d-model");
+    let err = engine
+        .index_worktree(&slot1)
+        .await
+        .expect_err("a live embedder of another model must refuse");
+    assert!(
+        matches!(err, EngineError::NeedsRebuild { .. }),
+        "expected NeedsRebuild, got: {err:?}"
+    );
+    assert_eq!(stored_commits(main.path()).await, before);
+    assert_eq!(rec.calls(), 0);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn daemon_indexing_accepts_an_equivalent_model() {
+    // The fp32 CoreML id is in the default model's equivalence class.
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (_main, slot1) = repo_with_worktree().await;
+    let wt_repo = git2::Repository::open(&slot1).unwrap();
+    commit_file(&wt_repo, "c.rs", "fn three() {}\n", "third");
+    let (_rec, engine) = recording_engine_with_model("bge-small-en-v1.5");
+    let out = engine
+        .index_worktree(&slot1)
+        .await
+        .expect("equivalent model");
+    assert_eq!(out.new_commits, 1);
 }

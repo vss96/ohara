@@ -7,7 +7,9 @@ use crate::engine::visibility::read_head;
 use crate::engine::RetrievalEngine;
 use crate::error::EngineError;
 use crate::handle::RepoHandle;
-use ohara_core::index_metadata::CompatibilityStatus;
+use ohara_core::index_metadata::{
+    runtime_metadata_from, CompatibilityStatus, RuntimeIndexMetadata,
+};
 use ohara_core::types::RepoId;
 use ohara_core::{CommitSha, CommitVisibility, EmbedMode, IndexedTip, Indexer, TipContext};
 use serde::{Deserialize, Serialize};
@@ -109,45 +111,69 @@ impl IndexService {
         let handle = engine.open_repo(repo_path).await?;
         let lock = self.lock_for(&handle.repo_id)?;
         let _job = lock.lock().await;
-        let tips = &handle.store.tips;
-        let (reachable, live_worktrees) = git_liveness(handle.repo_path.clone()).await?;
-        let doomed: Vec<CommitSha> = tips
-            .indexed_commit_shas(&handle.repo_id)
-            .await
-            .map_err(EngineError::from)?
-            .into_iter()
-            .filter(|c| !reachable.contains(c.as_str()))
-            .collect();
-        let mut commits_deleted = 0u64;
-        for batch in doomed.chunks(PRUNE_BATCH) {
-            commits_deleted += tips
-                .delete_commits(&handle.repo_id, batch)
-                .await
-                .map_err(EngineError::from)?;
-        }
-        let stale: Vec<IndexedTip> = tips
-            .indexed_tips(&handle.repo_id)
-            .await
-            .map_err(EngineError::from)?
-            .into_iter()
-            .filter(|t| !t.worktree.is_main() && !live_worktrees.contains(t.worktree.as_str()))
-            .collect();
-        for tip in &stale {
-            tips.remove_indexed_tip(&handle.repo_id, &tip.worktree)
-                .await
-                .map_err(EngineError::from)?;
-        }
+        let result = prune_locked(&handle).await;
+        // Refresh even on failure: earlier delete batches are already committed.
         engine.refresh_repo_caches(&handle.repo_id);
-        tracing::info!(
-            commits_deleted,
-            tips_removed = stale.len(),
-            "pruned unreachable commits"
-        );
+        let (commits_deleted, tips_removed) = result?;
+        tracing::info!(commits_deleted, tips_removed, "pruned unreachable commits");
         Ok(PruneOutcome {
             commits_deleted,
-            tips_removed: stale.len() as u64,
+            tips_removed,
         })
     }
+}
+
+/// Prune body; returns `(commits_deleted, tips_removed)`. Caller holds
+/// the repo's job lock and refreshes caches whatever the result.
+async fn prune_locked(handle: &RepoHandle) -> crate::Result<(u64, u64)> {
+    let tips = &handle.store.tips;
+    // List indexed commits BEFORE snapshotting reachability. Another process
+    // (e.g. the CLI post-commit hook) may index a new commit meanwhile; with
+    // this order that commit is never a candidate. The reverse order would
+    // see it indexed but missing from a stale reachable set, and delete it.
+    let indexed = tips
+        .indexed_commit_shas(&handle.repo_id)
+        .await
+        .map_err(EngineError::from)?;
+    let (reachable, live_worktrees) = git_liveness(handle.repo_path.clone()).await?;
+    let doomed: Vec<CommitSha> = indexed
+        .into_iter()
+        .filter(|c| !reachable.contains(c.as_str()))
+        .collect();
+    let mut commits_deleted = 0u64;
+    for batch in doomed.chunks(PRUNE_BATCH) {
+        commits_deleted += tips
+            .delete_commits(&handle.repo_id, batch)
+            .await
+            .map_err(EngineError::from)?;
+    }
+    let stale: Vec<IndexedTip> = tips
+        .indexed_tips(&handle.repo_id)
+        .await
+        .map_err(EngineError::from)?
+        .into_iter()
+        .filter(|t| !t.worktree.is_main() && !live_worktrees.contains(t.worktree.as_str()))
+        .collect();
+    for tip in &stale {
+        tips.remove_indexed_tip(&handle.repo_id, &tip.worktree)
+            .await
+            .map_err(EngineError::from)?;
+    }
+    Ok((commits_deleted, stale.len() as u64))
+}
+
+/// Metadata describing the engine's live embedder (model id, dimension)
+/// plus the current chunker / parser / reranker versions.
+fn live_runtime_metadata(engine: &RetrievalEngine, mode: EmbedMode) -> RuntimeIndexMetadata {
+    let embedder = engine.embedder();
+    runtime_metadata_from(
+        embedder.model_id(),
+        u32::try_from(embedder.dimension()).unwrap_or(u32::MAX),
+        ohara_embed::DEFAULT_RERANKER_ID,
+        ohara_parse::CHUNKER_VERSION,
+        ohara_parse::parser_versions(),
+        mode.index_metadata_value(),
+    )
 }
 
 fn outcome(indexed: bool, new_commits: u64, start: Instant) -> EnsureIndexedOutcome {
@@ -231,6 +257,18 @@ async fn index_locked(engine: &RetrievalEngine, handle: &RepoHandle) -> crate::R
         Some("diff") => EmbedMode::Diff,
         _ => EmbedMode::Semantic,
     };
+    // Review Focus 5: the live embedder (not just the binary's defaults)
+    // must match the stored model class and dimension, or its vectors
+    // would be appended to an index built with another model.
+    let runtime = live_runtime_metadata(engine, mode);
+    match CompatibilityStatus::assess(&runtime, &stored) {
+        CompatibilityStatus::Compatible => {}
+        other => {
+            return Err(EngineError::NeedsRebuild {
+                reason: format!("engine embedder does not match the index: {other:?}"),
+            })
+        }
+    }
     let head = read_head(&handle.repo_path).await?;
     let commit_source = Arc::new(
         ohara_git::GitCommitSource::open(&handle.repo_path)
@@ -241,7 +279,7 @@ async fn index_locked(engine: &RetrievalEngine, handle: &RepoHandle) -> crate::R
             .map_err(|e| EngineError::Git(format!("open symbol source: {e:#}")))?,
     );
     let indexer = Indexer::new(store.storage.clone(), engine.embedder())
-        .with_runtime_metadata(crate::current_runtime_metadata(mode))
+        .with_runtime_metadata(runtime)
         .with_atomic_symbol_extractor(Arc::new(ohara_parse::TreeSitterAtomicExtractor))
         .with_repo_root(handle.repo_path.clone())
         .with_embed_mode(mode)
