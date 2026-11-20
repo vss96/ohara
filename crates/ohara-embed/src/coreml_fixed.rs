@@ -126,7 +126,7 @@ mod imp {
     use super::{FIXED_BATCH, FIXED_SEQ};
     use anyhow::{anyhow, Context, Result};
     use fastembed::{
-        EmbeddingModel, InitOptions, InitOptionsUserDefined, Pooling, TextEmbedding,
+        EmbeddingModel, InitOptionsUserDefined, Pooling, TextEmbedding, TextInitOptions,
         TokenizerFiles, UserDefinedEmbeddingModel,
     };
     use std::path::PathBuf;
@@ -229,7 +229,7 @@ mod imp {
             return Ok(dir);
         }
         tracing::info!("downloading fp32 bge-small-en-v1.5 (~130MB, one time)");
-        let opts = InitOptions::new(EmbeddingModel::BGESmallENV15)
+        let opts = TextInitOptions::new(EmbeddingModel::BGESmallENV15)
             .with_show_download_progress(false)
             .with_cache_dir(crate::cache::cache_dir());
         drop(
