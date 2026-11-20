@@ -20,6 +20,8 @@ use crate::error::Result;
 
 const ALLOWED_TOOLS: &str = "Bash Edit Write Read Glob Grep";
 
+/// Runtime adapter that drives the `claude` CLI in headless (`-p`) mode and
+/// maps its stream-json result event to an [`AgentOutcome`].
 pub struct ClaudeCodeRuntime {
     name: RuntimeName,
     model: Option<String>,
@@ -44,6 +46,7 @@ fn classify_error_result(result: &str, tail: &str) -> AgentStatus {
 }
 
 impl ClaudeCodeRuntime {
+    /// Build a runtime registered under `name`, optionally pinning `model`.
     pub fn new(name: RuntimeName, model: Option<String>) -> Self {
         Self { name, model }
     }
