@@ -291,6 +291,53 @@ mod tests {
         assert_eq!(commits, vec![sha(3), sha(4)]);
     }
 
+    /// Returns at most `k` of its hits, like a storage lane.
+    struct TopKLane(Vec<HunkHit>);
+
+    #[async_trait]
+    impl RetrievalLane for TopKLane {
+        fn id(&self) -> LaneId {
+            LaneId::Vec
+        }
+        async fn search(
+            &self,
+            _: &PatternQuery,
+            _: &RepoId,
+            k: usize,
+        ) -> crate::Result<Vec<HunkHit>> {
+            Ok(self.0.iter().take(k).cloned().collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn invisible_hits_do_not_take_a_lanes_top_k_slots() {
+        // The lane's best two hits are invisible; with lane_top_k = 2 a
+        // lane cut before filtering would leave no visible candidate.
+        let hits: Vec<HunkHit> = (1..=6).map(|n| make_hit_on(n, sha(n as u32))).collect();
+        let lanes: Vec<Box<dyn RetrievalLane>> = vec![Box::new(TopKLane(hits))];
+        let weights = RankingWeights {
+            lane_top_k: 2,
+            ..weights_with_zero_recency()
+        };
+        let q = default_query();
+        let repo_id = RepoId::from_parts("sha", "/repo");
+        let oracle = SetOracle::new(&[3, 4, 5, 6]);
+        let h = head();
+        let scope = VisibilityScope {
+            head: &h,
+            oracle: &oracle,
+        };
+        let out = run(&lanes, &weights, None, ctx(&q, &repo_id, 20, Some(scope)))
+            .await
+            .unwrap();
+        let commits: Vec<String> = out.iter().map(|h| h.commit.commit_sha.clone()).collect();
+        assert_eq!(
+            commits,
+            vec![sha(3), sha(4)],
+            "the filtered ranking is cut back to lane_top_k visible hits"
+        );
+    }
+
     #[tokio::test]
     async fn oracle_is_asked_once_with_distinct_commits() {
         let lanes: Vec<Box<dyn RetrievalLane>> = vec![

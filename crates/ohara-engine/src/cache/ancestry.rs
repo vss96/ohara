@@ -173,3 +173,50 @@ mod tests {
         assert_eq!(calls[1], vec![sha('b')]);
     }
 }
+
+#[cfg(test)]
+mod false_verdict_tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    /// Says "not visible" until `fetched` is set, as for a commit object a
+    /// shallow clone lacks until it is fetched.
+    struct Fetchable {
+        fetched: AtomicBool,
+    }
+
+    #[async_trait]
+    impl CommitVisibility for Fetchable {
+        async fn visible(
+            &self,
+            _head: &CommitSha,
+            commits: &[CommitSha],
+        ) -> ohara_core::Result<Vec<bool>> {
+            let v = self.fetched.load(Ordering::SeqCst);
+            Ok(vec![v; commits.len()])
+        }
+    }
+
+    #[tokio::test]
+    async fn a_false_verdict_is_not_cached_because_it_can_change() {
+        let head = CommitSha::parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        let c = CommitSha::parse("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
+        let oracle = Arc::new(Fetchable {
+            fetched: AtomicBool::new(false),
+        });
+        let cached = CachedVisibility::new(oracle.clone(), Arc::new(AncestryCache::new(16)));
+        assert_eq!(
+            cached.visible(&head, &[c.clone()]).await.unwrap(),
+            vec![false]
+        );
+        oracle.fetched.store(true, Ordering::SeqCst);
+        assert_eq!(
+            cached.visible(&head, &[c.clone()]).await.unwrap(),
+            vec![true],
+            "a missing object fetched later must become visible"
+        );
+        // A true verdict never changes, so it is served from the cache.
+        oracle.fetched.store(false, Ordering::SeqCst);
+        assert_eq!(cached.visible(&head, &[c]).await.unwrap(), vec![true]);
+    }
+}
