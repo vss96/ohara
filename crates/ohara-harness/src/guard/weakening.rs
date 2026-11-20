@@ -83,29 +83,84 @@ impl TestFiles {
         after: Option<&str>,
     ) -> bool {
         self.0.is_match(path)
-            || [before, after]
-                .into_iter()
-                .flatten()
-                .any(|t| CONTENT_MARKERS.iter().any(|m| t.contains(m)))
+            || [before, after].into_iter().flatten().any(|t| {
+                let t = normalize_attrs(t);
+                CONTENT_MARKERS.iter().any(|m| t.contains(m))
+            })
     }
 }
 
-fn test_count(text: &str) -> u32 {
-    count(text, &TEST_TOKENS).saturating_sub(count(text, &DISABLED_TEST_TOKENS))
+fn test_count(path: &str, text: &str) -> u32 {
+    count(path, text, &TEST_TOKENS).saturating_sub(count(path, text, &DISABLED_TEST_TOKENS))
 }
 
-/// A single-line comment: `//`, or `#` that is not a Rust attribute or shebang.
-fn is_comment_line(line: &str) -> bool {
+/// Line-comment syntax of a file, chosen by extension. Unknown extensions
+/// strip nothing, so the guard fails toward counting.
+#[derive(Clone, Copy, PartialEq)]
+enum CommentSyntax {
+    Hash,
+    Slash,
+    None,
+}
+
+fn comment_syntax(path: &str) -> CommentSyntax {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "py" | "sh" | "bash" | "rb" | "toml" | "yaml" | "yml" => CommentSyntax::Hash,
+        "rs" | "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "java" | "kt" | "kts" | "go" | "c"
+        | "h" | "cc" | "cpp" | "hpp" | "swift" | "scala" => CommentSyntax::Slash,
+        _ => CommentSyntax::None,
+    }
+}
+
+fn is_comment_line(line: &str, syntax: CommentSyntax) -> bool {
     let t = line.trim_start();
-    t.starts_with("//") || (t.starts_with('#') && !t.starts_with("#[") && !t.starts_with("#!"))
+    match syntax {
+        CommentSyntax::Hash => t.starts_with('#'),
+        CommentSyntax::Slash => t.starts_with("//"),
+        CommentSyntax::None => false,
+    }
 }
 
-fn count(text: &str, tokens: &[&str]) -> u32 {
+/// Collapse Rust attribute spacing so `# [ignore]`, `#! [x]` and `#[ ignore]`
+/// match the same tokens as `#[ignore]`. Not handled: whitespace inside the
+/// attribute body (`#[cfg( test )]`, `#[tokio :: test]`).
+fn normalize_attrs(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find('#') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        let (bang, tail) = match after.trim_start().strip_prefix('!') {
+            Some(t) => ("!", t),
+            None => ("", after),
+        };
+        let Some(inner) = tail.trim_start().strip_prefix('[') else {
+            out.push('#');
+            rest = after;
+            continue;
+        };
+        out.push('#');
+        out.push_str(bang);
+        out.push('[');
+        rest = inner.trim_start_matches([' ', '\t']);
+    }
+    out.push_str(rest);
+    out
+}
+
+fn count(path: &str, text: &str, tokens: &[&str]) -> u32 {
+    let syntax = comment_syntax(path);
     let code = text
         .lines()
-        .filter(|l| !is_comment_line(l))
+        .filter(|l| !is_comment_line(l, syntax))
         .collect::<Vec<_>>()
         .join("\n");
+    let code = normalize_attrs(&code);
     let n: usize = tokens.iter().map(|t| code.matches(t).count()).sum();
     u32::try_from(n).unwrap_or(u32::MAX)
 }
@@ -120,7 +175,7 @@ pub(super) fn compare(
 ) -> Vec<Violation> {
     let file = Path::new(path).to_path_buf();
     let Some(before) = before else {
-        return added_ignores(file, 0, after);
+        return added_ignores(path, file, 0, after);
     };
     let Some(after) = after else {
         return match allow_removal {
@@ -128,11 +183,16 @@ pub(super) fn compare(
             false => vec![Violation::TestFileDeleted(file)],
         };
     };
-    let mut out = added_ignores(file.clone(), count(before, &IGNORE_TOKENS), Some(after));
+    let mut out = added_ignores(
+        path,
+        file.clone(),
+        count(path, before, &IGNORE_TOKENS),
+        Some(after),
+    );
     if allow_removal {
         return out;
     }
-    let (tb, ta) = (test_count(before), test_count(after));
+    let (tb, ta) = (test_count(path, before), test_count(path, after));
     if ta < tb {
         out.push(Violation::TestCountDropped {
             file: file.clone(),
@@ -140,7 +200,10 @@ pub(super) fn compare(
             after: ta,
         });
     }
-    let (ab, aa) = (count(before, &ASSERT_TOKENS), count(after, &ASSERT_TOKENS));
+    let (ab, aa) = (
+        count(path, before, &ASSERT_TOKENS),
+        count(path, after, &ASSERT_TOKENS),
+    );
     if aa < ab {
         out.push(Violation::AssertionsDropped {
             file,
@@ -151,11 +214,16 @@ pub(super) fn compare(
     out
 }
 
-fn added_ignores(file: std::path::PathBuf, before: u32, after: Option<&str>) -> Vec<Violation> {
+fn added_ignores(
+    path: &str,
+    file: std::path::PathBuf,
+    before: u32,
+    after: Option<&str>,
+) -> Vec<Violation> {
     let Some(after) = after else {
         return vec![];
     };
-    let now = count(after, &IGNORE_TOKENS);
+    let now = count(path, after, &IGNORE_TOKENS);
     match now > before {
         true => vec![Violation::TestsIgnored {
             file,
@@ -203,13 +271,20 @@ mod tests {
 
     #[test]
     fn counts_tokens_per_language() {
-        assert_eq!(count("it('a', () => { expect(1) })", &TEST_TOKENS), 1);
         assert_eq!(
-            count("@Test void a() { assertEquals(1, 1); }", &ASSERT_TOKENS),
+            count("a.js", "it('a', () => { expect(1) })", &TEST_TOKENS),
+            1
+        );
+        assert_eq!(
+            count(
+                "A.java",
+                "@Test void a() { assertEquals(1, 1); }",
+                &ASSERT_TOKENS
+            ),
             2
         );
-        assert_eq!(count("xit('a'); describe.skip(", &IGNORE_TOKENS), 2);
-        assert_eq!(test_count("xtest('a'); test('b')"), 1);
+        assert_eq!(count("a.js", "xit('a'); describe.skip(", &IGNORE_TOKENS), 2);
+        assert_eq!(test_count("a.js", "xtest('a'); test('b')"), 1);
     }
 
     #[test]
@@ -230,11 +305,11 @@ mod tests {
 
     #[test]
     fn commenting_out_assertions_drops_the_count() {
-        for (before, after) in [
-            ("assert_eq!(a, b);\n", "// assert_eq!(a, b);\n"),
-            ("assert x\n", "# assert x\n"),
+        for (path, before, after) in [
+            ("t.rs", "assert_eq!(a, b);\n", "// assert_eq!(a, b);\n"),
+            ("t.py", "assert x\n", "# assert x\n"),
         ] {
-            let v = compare("t.rs", Some(before), Some(after), false);
+            let v = compare(path, Some(before), Some(after), false);
             assert!(
                 v.iter()
                     .any(|x| matches!(x, Violation::AssertionsDropped { .. })),
@@ -246,8 +321,8 @@ mod tests {
     #[test]
     fn attributes_and_shebangs_are_still_counted() {
         let src = "#[test]\n#[tokio::test]\n#[ignore]\n#!/bin/sh\n";
-        assert_eq!(count(src, &TEST_TOKENS), 2);
-        assert_eq!(count(src, &IGNORE_TOKENS), 1);
+        assert_eq!(count("a.rs", src, &TEST_TOKENS), 2);
+        assert_eq!(count("a.rs", src, &IGNORE_TOKENS), 1);
     }
 
     #[test]
@@ -256,7 +331,8 @@ mod tests {
             let after = format!("#[test]\n{added}\nfn a() {{}}\n");
             let v = compare("t.rs", Some("#[test]\nfn a() {}\n"), Some(&after), false);
             assert!(
-                v.iter().any(|x| matches!(x, Violation::TestsIgnored { .. })),
+                v.iter()
+                    .any(|x| matches!(x, Violation::TestsIgnored { .. })),
                 "{added}"
             );
         }
