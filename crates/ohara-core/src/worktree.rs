@@ -113,4 +113,31 @@ mod tests {
         assert_eq!(k.as_str(), "slot-1");
         assert!(!k.is_main());
     }
+
+    const P: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn linked_rejects_a_slash_so_it_never_collides_with_a_retired_key() {
+        assert!(WorktreeKey::linked("a/b").is_err());
+    }
+
+    #[test]
+    fn retired_key_is_neither_main_nor_linked_and_round_trips() {
+        let sha = CommitSha::parse(P).unwrap();
+        for of in [WorktreeKey::main(), WorktreeKey::linked("slot-1").unwrap()] {
+            let r = WorktreeKey::retired(&of, &sha);
+            assert!(r.is_retired());
+            assert!(!r.is_main());
+            assert_ne!(r, of);
+            assert_eq!(WorktreeKey::from_stored(r.as_str()).unwrap(), r);
+        }
+        assert!(!WorktreeKey::main().is_retired());
+        assert!(!WorktreeKey::linked("slot-1").unwrap().is_retired());
+        assert_eq!(WorktreeKey::from_stored("").unwrap(), WorktreeKey::main());
+        assert_eq!(
+            WorktreeKey::from_stored("slot-1").unwrap(),
+            WorktreeKey::linked("slot-1").unwrap()
+        );
+        assert!(WorktreeKey::from_stored("slot-1/not-a-sha").is_err());
+    }
 }
