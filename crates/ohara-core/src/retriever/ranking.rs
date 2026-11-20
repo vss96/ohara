@@ -208,6 +208,35 @@ mod tests {
         assert!(out.is_empty());
     }
 
+    #[test]
+    fn apply_recency_does_not_overflow_on_extreme_timestamps() {
+        // Regression for #120: `now_unix - ts` overflowed i64 (panic in
+        // debug builds) for the proptest-shrunk input below.
+        let out = apply_recency(
+            vec![make_hit(1, 1_516_920_528_225_666_549, 0.5)],
+            1.0,
+            90.0,
+            -7_706_451_508_629_109_260,
+        );
+        assert_eq!(out.len(), 1);
+        assert!(out[0].similarity.is_finite());
+        let out = apply_recency(vec![make_hit(1, i64::MIN, 0.5)], 1.0, 90.0, i64::MAX);
+        // Astronomically old commit: recency factor decays to ~0.
+        assert!((out[0].similarity - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn apply_recency_zero_half_life_is_not_nan() {
+        // Regression for #120: age 0 with half_life 0 computed
+        // `exp(-0.0 / 0.0)` = NaN. A zero-age hit keeps its full boost
+        // (exp(0) = 1 for any decay rate); older hits decay instantly.
+        let now = 1_700_000_000;
+        let out = apply_recency(vec![make_hit(1, now, 0.5)], 1.0, 0.0, now);
+        assert!((out[0].similarity - 1.0).abs() < 1e-6);
+        let out = apply_recency(vec![make_hit(1, now - 86_400, 0.5)], 1.0, 0.0, now);
+        assert!((out[0].similarity - 0.5).abs() < 1e-6);
+    }
+
     mod proptests {
         use super::*;
         use proptest::prelude::*;
@@ -267,7 +296,6 @@ mod tests {
             }
 
             #[test]
-            #[ignore = "tracked in #120: apply_recency overflows i64 on (now_unix - ts) and produces NaN when recency_half_life_days == 0.0"]
             fn apply_recency_never_overflows_or_produces_nan_on_extreme_inputs(
                 ts in any::<i64>(),
                 now in any::<i64>(),
