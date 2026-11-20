@@ -249,4 +249,45 @@ mod tests {
         assert_eq!(count(src, &TEST_TOKENS), 2);
         assert_eq!(count(src, &IGNORE_TOKENS), 1);
     }
+
+    #[test]
+    fn spaced_rust_ignore_attribute_is_detected() {
+        for added in ["# [ignore]", "#[ ignore ]", "#! [ignore]"] {
+            let after = format!("#[test]\n{added}\nfn a() {{}}\n");
+            let v = compare("t.rs", Some("#[test]\nfn a() {}\n"), Some(&after), false);
+            assert!(
+                v.iter().any(|x| matches!(x, Violation::TestsIgnored { .. })),
+                "{added}"
+            );
+        }
+    }
+
+    #[test]
+    fn spaced_rust_test_attribute_is_counted() {
+        let before = "# [test]\nfn a() {}\n";
+        let v = compare("t.rs", Some(before), Some("fn a() {}\n"), false);
+        assert!(v
+            .iter()
+            .any(|x| matches!(x, Violation::TestCountDropped { .. })));
+    }
+
+    #[test]
+    fn hash_is_not_a_comment_in_rust_files() {
+        let v = compare("t.rs", Some("assert x\n"), Some("# assert x\n"), false);
+        assert!(!v
+            .iter()
+            .any(|x| matches!(x, Violation::AssertionsDropped { .. })));
+    }
+
+    #[test]
+    fn python_hash_comment_still_dropped() {
+        let v = compare("t.py", Some("assert x\n"), Some("# assert x\n"), false);
+        assert!(v
+            .iter()
+            .any(|x| matches!(x, Violation::AssertionsDropped { .. })));
+        let v = compare("a.unknown", Some("assert x\n"), Some("# assert x\n"), false);
+        assert!(!v
+            .iter()
+            .any(|x| matches!(x, Violation::AssertionsDropped { .. })));
+    }
 }
