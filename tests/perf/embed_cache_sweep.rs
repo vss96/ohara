@@ -38,7 +38,7 @@ fn embed_cache_sweep() {
         fixture.display()
     );
 
-    let bin = workspace_root().join("target/release/ohara");
+    let bin = ohara_perf_tests::release_ohara_bin(env!("CARGO_TARGET_TMPDIR"));
     assert!(
         bin.exists(),
         "release binary missing — run `cargo build --release -p ohara-cli` first"

@@ -148,7 +148,7 @@ fn parse_time_rss(stderr: &str) -> Option<u64> {
 fn index_bench_emits_run_report() {
     let fixture = ensure_medium_fixture();
     let root = workspace_root();
-    let bin = root.join("target/release/ohara");
+    let bin = ohara_perf_tests::release_ohara_bin(env!("CARGO_TARGET_TMPDIR"));
     assert!(
         bin.exists(),
         "release binary missing — run `cargo build --release -p ohara-cli` first"

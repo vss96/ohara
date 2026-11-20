@@ -21,6 +21,19 @@ pub fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Path to the release `ohara` binary, wherever Cargo's target dir is.
+///
+/// Pass `env!("CARGO_TARGET_TMPDIR")` from the calling `[[test]]`
+/// (Cargo only sets it for integration tests): it is `<target-dir>/tmp`,
+/// so this honours a shared `build.target-dir` / `CARGO_TARGET_DIR`
+/// instead of assuming `<workspace>/target` (issue #139).
+pub fn release_ohara_bin(cargo_target_tmpdir: &str) -> PathBuf {
+    let target_dir = Path::new(cargo_target_tmpdir)
+        .parent()
+        .expect("invariant: CARGO_TARGET_TMPDIR is <target-dir>/tmp");
+    target_dir.join("release").join("ohara")
+}
+
 /// Ensure `fixtures/medium/repo` is built (calling
 /// `fixtures/build_medium.sh`) and return its path. Panics on
 /// failure — operators want loud failures.
