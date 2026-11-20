@@ -163,14 +163,16 @@ async fn find_pattern_meta_cached_within_ttl() {
     );
 }
 
+// Hold `env_lock` for the whole test: OHARA_HOME is read lazily inside
+// `find_pattern`, and another test may repoint it at a TempDir it is about
+// to delete (seen as a SQLite "disk I/O error" on open).
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn find_pattern_returns_empty_hits_on_empty_index() {
+    let _g = env_lock();
     let ohara_home = tempfile::tempdir().unwrap();
     let tmp = tempfile::tempdir().unwrap();
-    {
-        let _g = env_lock();
-        std::env::set_var("OHARA_HOME", ohara_home.path());
-    }
+    std::env::set_var("OHARA_HOME", ohara_home.path());
     build_test_repo(tmp.path());
     let engine = make_test_engine();
     let q = ohara_core::query::PatternQuery {
@@ -191,16 +193,15 @@ async fn find_pattern_returns_empty_hits_on_empty_index() {
     );
 }
 
+// `env_lock` serialises tests that mutate OHARA_HOME (process-global). It is
+// held for the whole test because `open_repo` reads OHARA_HOME lazily.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn open_repo_caches_handle_by_repo_id() {
-    // `env_lock` serialises tests that mutate OHARA_HOME (process-global).
-    // Drop the guard before the first await to satisfy clippy::await_holding_lock.
+    let _g = env_lock();
     let ohara_home = tempfile::tempdir().unwrap();
     let tmp = tempfile::tempdir().unwrap();
-    {
-        let _g = env_lock();
-        std::env::set_var("OHARA_HOME", ohara_home.path());
-    }
+    std::env::set_var("OHARA_HOME", ohara_home.path());
     build_test_repo(tmp.path());
 
     let engine = make_test_engine();
