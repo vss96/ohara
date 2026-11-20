@@ -90,4 +90,12 @@ mod tests {
         assert_eq!(classify_failure("segfault"), AgentStatus::Crashed);
         assert_eq!(classify_failure(""), AgentStatus::Crashed);
     }
+
+    #[test]
+    fn crash_mentioning_login_code_is_not_auth_failure() {
+        assert_eq!(
+            classify_failure("test auth::add_basic_login ... FAILED\npanicked"),
+            AgentStatus::Crashed
+        );
+    }
 }
