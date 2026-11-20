@@ -20,6 +20,7 @@ pub mod query_understanding;
 pub mod retriever;
 pub mod storage;
 pub mod types;
+pub mod worktree;
 
 pub use diff_text::{count_lines, truncate_diff, DIFF_EXCERPT_MAX_LINES};
 pub use embed::{EmbedMode, EmbeddingProvider};
