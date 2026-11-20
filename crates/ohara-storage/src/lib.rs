@@ -24,5 +24,6 @@ pub mod metrics;
 pub mod migrations;
 pub mod storage_impl;
 pub mod tables;
+pub mod tip_store;
 
 pub use storage_impl::SqliteStorage;
