@@ -255,59 +255,13 @@ pub trait StorageExplain: Send + Sync {
     ) -> Result<Vec<(u32, CommitMeta)>>;
 }
 
+/// Retrieval-lane queries: vector KNN, the BM25 lanes, and hunk symbol
+/// attribution lookups used to annotate hits.
+///
+/// Split out of [`Storage`] (issue #98) so each retrieval lane and the
+/// [`crate::Retriever`], and their test fakes, depend only on this seam.
 #[async_trait]
-pub trait Storage: StorageCache + StorageExplain + Send + Sync {
-    // --- Repo lifecycle ---
-
-    /// Register a repository in the index. Idempotent on `repo_id`:
-    /// re-calling with the same id updates `path` / `first_commit_sha`
-    /// without dropping previously indexed rows.
-    async fn open_repo(&self, repo_id: &RepoId, path: &str, first_commit_sha: &str) -> Result<()>;
-
-    /// Return the current index watermark for `repo_id`. A fresh repo
-    /// returns `IndexStatus { last_indexed_commit: None, .. }`.
-    async fn get_index_status(&self, repo_id: &RepoId) -> Result<IndexStatus>;
-
-    /// Advance the watermark to `sha`. The indexer calls this after
-    /// every commit it successfully indexes; it must be monotonic in
-    /// caller-visible terms (callers always pass the newest commit
-    /// they've persisted).
-    async fn set_last_indexed_commit(&self, repo_id: &RepoId, sha: &str) -> Result<()>;
-
-    // --- Write path ---
-
-    /// Persist a commit's metadata + message embedding. Idempotent on
-    /// `record.meta.commit_sha` (INSERT OR REPLACE).
-    async fn put_commit(&self, repo_id: &RepoId, record: &CommitRecord) -> Result<()>;
-
-    /// Cheap "is this commit already indexed?" check used by the indexer's
-    /// per-commit short-circuit on resume.
-    ///
-    /// The watermark only excludes a commit and its strict ancestor chain
-    /// (`git2::Revwalk::hide`). Commits reachable via a non-watermark-ancestor
-    /// path — merge from a feature branch, octopus merge, history rewrite —
-    /// would otherwise be re-walked and re-embedded even though their
-    /// `commit_record` row already exists. Implementations should answer
-    /// from the primary-key index on `commit_record.sha` so this stays
-    /// sub-millisecond per commit. See plan-9 / RFC v0.6.3.
-    async fn commit_exists(&self, sha: &str) -> Result<bool>;
-
-    /// Persist a batch of hunks with their diff embeddings. Idempotent
-    /// at the (commit_sha, file_path) grain — re-calling with the same
-    /// hunk replaces the row rather than appending a duplicate.
-    async fn put_hunks(&self, repo_id: &RepoId, records: &[HunkRecord]) -> Result<()>;
-
-    /// Persist HEAD-snapshot symbols extracted by the AST chunker.
-    /// Caller is responsible for deciding whether to clear the previous
-    /// snapshot first (see `clear_head_symbols`).
-    async fn put_head_symbols(&self, repo_id: &RepoId, symbols: &[Symbol]) -> Result<()>;
-
-    /// Drop all HEAD symbol rows for `repo_id` (and the matching
-    /// `vec_symbol` / `fts_symbol_name` rows). Used by `ohara index
-    /// --force` before re-extracting symbols so the AST sibling-merge
-    /// chunker can repopulate without duplicates.
-    async fn clear_head_symbols(&self, repo_id: &RepoId) -> Result<()>;
-
+pub trait StorageRead: Send + Sync {
     // --- Read lanes (retrieval) ---
 
     /// Vector KNN over hunk diff embeddings. Ordered best-first.
@@ -399,6 +353,60 @@ pub trait Storage: StorageCache + StorageExplain + Send + Sync {
         repo_id: &RepoId,
         hunk_ids: &[HunkId],
     ) -> Result<std::collections::HashMap<HunkId, Vec<HunkSymbol>>>;
+}
+
+#[async_trait]
+pub trait Storage: StorageCache + StorageExplain + StorageRead + Send + Sync {
+    // --- Repo lifecycle ---
+
+    /// Register a repository in the index. Idempotent on `repo_id`:
+    /// re-calling with the same id updates `path` / `first_commit_sha`
+    /// without dropping previously indexed rows.
+    async fn open_repo(&self, repo_id: &RepoId, path: &str, first_commit_sha: &str) -> Result<()>;
+
+    /// Return the current index watermark for `repo_id`. A fresh repo
+    /// returns `IndexStatus { last_indexed_commit: None, .. }`.
+    async fn get_index_status(&self, repo_id: &RepoId) -> Result<IndexStatus>;
+
+    /// Advance the watermark to `sha`. The indexer calls this after
+    /// every commit it successfully indexes; it must be monotonic in
+    /// caller-visible terms (callers always pass the newest commit
+    /// they've persisted).
+    async fn set_last_indexed_commit(&self, repo_id: &RepoId, sha: &str) -> Result<()>;
+
+    // --- Write path ---
+
+    /// Persist a commit's metadata + message embedding. Idempotent on
+    /// `record.meta.commit_sha` (INSERT OR REPLACE).
+    async fn put_commit(&self, repo_id: &RepoId, record: &CommitRecord) -> Result<()>;
+
+    /// Cheap "is this commit already indexed?" check used by the indexer's
+    /// per-commit short-circuit on resume.
+    ///
+    /// The watermark only excludes a commit and its strict ancestor chain
+    /// (`git2::Revwalk::hide`). Commits reachable via a non-watermark-ancestor
+    /// path — merge from a feature branch, octopus merge, history rewrite —
+    /// would otherwise be re-walked and re-embedded even though their
+    /// `commit_record` row already exists. Implementations should answer
+    /// from the primary-key index on `commit_record.sha` so this stays
+    /// sub-millisecond per commit. See plan-9 / RFC v0.6.3.
+    async fn commit_exists(&self, sha: &str) -> Result<bool>;
+
+    /// Persist a batch of hunks with their diff embeddings. Idempotent
+    /// at the (commit_sha, file_path) grain — re-calling with the same
+    /// hunk replaces the row rather than appending a duplicate.
+    async fn put_hunks(&self, repo_id: &RepoId, records: &[HunkRecord]) -> Result<()>;
+
+    /// Persist HEAD-snapshot symbols extracted by the AST chunker.
+    /// Caller is responsible for deciding whether to clear the previous
+    /// snapshot first (see `clear_head_symbols`).
+    async fn put_head_symbols(&self, repo_id: &RepoId, symbols: &[Symbol]) -> Result<()>;
+
+    /// Drop all HEAD symbol rows for `repo_id` (and the matching
+    /// `vec_symbol` / `fts_symbol_name` rows). Used by `ohara index
+    /// --force` before re-extracting symbols so the AST sibling-merge
+    /// chunker can repopulate without duplicates.
+    async fn clear_head_symbols(&self, repo_id: &RepoId) -> Result<()>;
 
     // --- Index metadata (plan 13) ---
 

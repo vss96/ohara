@@ -101,6 +101,19 @@ impl crate::Storage for FakeStorage {
     async fn clear_head_symbols(&self, _: &RepoId) -> crate::Result<()> {
         unreachable!("retriever tests should not exercise clear_head_symbols")
     }
+    async fn get_index_metadata(
+        &self,
+        _: &RepoId,
+    ) -> crate::Result<crate::index_metadata::StoredIndexMetadata> {
+        Ok(crate::index_metadata::StoredIndexMetadata::default())
+    }
+    async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> crate::Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl crate::storage::StorageRead for FakeStorage {
     async fn knn_hunks(
         &self,
         _: &RepoId,
@@ -112,6 +125,7 @@ impl crate::Storage for FakeStorage {
         self.calls.lock().unwrap().push("knn");
         Ok(self.knn.clone())
     }
+
     async fn bm25_hunks_by_text(
         &self,
         _: &RepoId,
@@ -123,6 +137,7 @@ impl crate::Storage for FakeStorage {
         self.calls.lock().unwrap().push("fts_text");
         Ok(self.fts_text.clone())
     }
+
     async fn bm25_hunks_by_semantic_text(
         &self,
         _: &RepoId,
@@ -138,6 +153,7 @@ impl crate::Storage for FakeStorage {
         self.calls.lock().unwrap().push("fts_semantic");
         Ok(self.fts_semantic.clone())
     }
+
     async fn bm25_hunks_by_symbol_name(
         &self,
         _: &RepoId,
@@ -149,6 +165,7 @@ impl crate::Storage for FakeStorage {
         self.calls.lock().unwrap().push("fts_sym");
         Ok(self.fts_sym.clone())
     }
+
     async fn bm25_hunks_by_historical_symbol(
         &self,
         _: &RepoId,
@@ -163,6 +180,7 @@ impl crate::Storage for FakeStorage {
         self.calls.lock().unwrap().push("fts_hist_sym");
         Ok(Vec::new())
     }
+
     async fn get_hunk_symbols(
         &self,
         _: &RepoId,
@@ -174,6 +192,7 @@ impl crate::Storage for FakeStorage {
         self.calls.lock().unwrap().push("get_hunk_symbols");
         Ok(Vec::new())
     }
+
     async fn get_hunk_symbols_batch(
         &self,
         _: &RepoId,
@@ -185,15 +204,6 @@ impl crate::Storage for FakeStorage {
         // asserts the retriever issues exactly one batch round-trip.
         *self.batch_calls.lock().unwrap() += 1;
         Ok(std::collections::HashMap::new())
-    }
-    async fn get_index_metadata(
-        &self,
-        _: &RepoId,
-    ) -> crate::Result<crate::index_metadata::StoredIndexMetadata> {
-        Ok(crate::index_metadata::StoredIndexMetadata::default())
-    }
-    async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> crate::Result<()> {
-        Ok(())
     }
 }
 

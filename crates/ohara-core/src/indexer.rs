@@ -593,71 +593,6 @@ mod phase_timing_tests {
         async fn clear_head_symbols(&self, _: &RepoId) -> Result<()> {
             Ok(())
         }
-        async fn knn_hunks(
-            &self,
-            _: &RepoId,
-            _: &[f32],
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> Result<Vec<crate::HunkHit>> {
-            Ok(vec![])
-        }
-        async fn bm25_hunks_by_text(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> Result<Vec<crate::HunkHit>> {
-            Ok(vec![])
-        }
-        async fn bm25_hunks_by_semantic_text(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> Result<Vec<crate::HunkHit>> {
-            Ok(vec![])
-        }
-        async fn bm25_hunks_by_symbol_name(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> Result<Vec<crate::HunkHit>> {
-            Ok(vec![])
-        }
-        async fn bm25_hunks_by_historical_symbol(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> Result<Vec<crate::HunkHit>> {
-            Ok(vec![])
-        }
-        async fn get_hunk_symbols(
-            &self,
-            _: &RepoId,
-            _: crate::storage::HunkId,
-        ) -> Result<Vec<crate::types::HunkSymbol>> {
-            Ok(vec![])
-        }
-        async fn get_hunk_symbols_batch(
-            &self,
-            _: &RepoId,
-            _: &[crate::storage::HunkId],
-        ) -> Result<std::collections::HashMap<crate::storage::HunkId, Vec<crate::types::HunkSymbol>>>
-        {
-            Ok(std::collections::HashMap::new())
-        }
         async fn get_index_metadata(
             &self,
             _: &RepoId,
@@ -671,6 +606,81 @@ mod phase_timing_tests {
         ) -> Result<()> {
             *self.last_metadata.lock().unwrap() = Some(components.to_vec());
             Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl crate::storage::StorageRead for FakeStorage {
+        async fn knn_hunks(
+            &self,
+            _: &RepoId,
+            _: &[f32],
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<Vec<crate::HunkHit>> {
+            Ok(vec![])
+        }
+
+        async fn bm25_hunks_by_text(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<Vec<crate::HunkHit>> {
+            Ok(vec![])
+        }
+
+        async fn bm25_hunks_by_semantic_text(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<Vec<crate::HunkHit>> {
+            Ok(vec![])
+        }
+
+        async fn bm25_hunks_by_symbol_name(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<Vec<crate::HunkHit>> {
+            Ok(vec![])
+        }
+
+        async fn bm25_hunks_by_historical_symbol(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: u8,
+            _: Option<&str>,
+            _: Option<i64>,
+        ) -> Result<Vec<crate::HunkHit>> {
+            Ok(vec![])
+        }
+
+        async fn get_hunk_symbols(
+            &self,
+            _: &RepoId,
+            _: crate::storage::HunkId,
+        ) -> Result<Vec<crate::types::HunkSymbol>> {
+            Ok(vec![])
+        }
+
+        async fn get_hunk_symbols_batch(
+            &self,
+            _: &RepoId,
+            _: &[crate::storage::HunkId],
+        ) -> Result<std::collections::HashMap<crate::storage::HunkId, Vec<crate::types::HunkSymbol>>>
+        {
+            Ok(std::collections::HashMap::new())
         }
     }
 
@@ -1436,72 +1446,6 @@ mod plan_26_repo_root_tests {
             async fn clear_head_symbols(&self, _: &RepoId) -> crate::Result<()> {
                 Ok(())
             }
-            async fn knn_hunks(
-                &self,
-                _: &RepoId,
-                _: &[f32],
-                _: u8,
-                _: Option<&str>,
-                _: Option<i64>,
-            ) -> crate::Result<Vec<crate::HunkHit>> {
-                Ok(vec![])
-            }
-            async fn bm25_hunks_by_text(
-                &self,
-                _: &RepoId,
-                _: &str,
-                _: u8,
-                _: Option<&str>,
-                _: Option<i64>,
-            ) -> crate::Result<Vec<crate::HunkHit>> {
-                Ok(vec![])
-            }
-            async fn bm25_hunks_by_semantic_text(
-                &self,
-                _: &RepoId,
-                _: &str,
-                _: u8,
-                _: Option<&str>,
-                _: Option<i64>,
-            ) -> crate::Result<Vec<crate::HunkHit>> {
-                Ok(vec![])
-            }
-            async fn bm25_hunks_by_symbol_name(
-                &self,
-                _: &RepoId,
-                _: &str,
-                _: u8,
-                _: Option<&str>,
-                _: Option<i64>,
-            ) -> crate::Result<Vec<crate::HunkHit>> {
-                Ok(vec![])
-            }
-            async fn bm25_hunks_by_historical_symbol(
-                &self,
-                _: &RepoId,
-                _: &str,
-                _: u8,
-                _: Option<&str>,
-                _: Option<i64>,
-            ) -> crate::Result<Vec<crate::HunkHit>> {
-                Ok(vec![])
-            }
-            async fn get_hunk_symbols(
-                &self,
-                _: &RepoId,
-                _: crate::storage::HunkId,
-            ) -> crate::Result<Vec<crate::types::HunkSymbol>> {
-                Ok(vec![])
-            }
-            async fn get_hunk_symbols_batch(
-                &self,
-                _: &RepoId,
-                _: &[crate::storage::HunkId],
-            ) -> crate::Result<
-                std::collections::HashMap<crate::storage::HunkId, Vec<crate::types::HunkSymbol>>,
-            > {
-                Ok(std::collections::HashMap::new())
-            }
             async fn get_index_metadata(
                 &self,
                 _: &RepoId,
@@ -1514,6 +1458,82 @@ mod plan_26_repo_root_tests {
                 _: &[(String, String)],
             ) -> crate::Result<()> {
                 Ok(())
+            }
+        }
+
+        #[async_trait]
+        impl crate::storage::StorageRead for MinStorage {
+            async fn knn_hunks(
+                &self,
+                _: &RepoId,
+                _: &[f32],
+                _: u8,
+                _: Option<&str>,
+                _: Option<i64>,
+            ) -> crate::Result<Vec<crate::HunkHit>> {
+                Ok(vec![])
+            }
+
+            async fn bm25_hunks_by_text(
+                &self,
+                _: &RepoId,
+                _: &str,
+                _: u8,
+                _: Option<&str>,
+                _: Option<i64>,
+            ) -> crate::Result<Vec<crate::HunkHit>> {
+                Ok(vec![])
+            }
+
+            async fn bm25_hunks_by_semantic_text(
+                &self,
+                _: &RepoId,
+                _: &str,
+                _: u8,
+                _: Option<&str>,
+                _: Option<i64>,
+            ) -> crate::Result<Vec<crate::HunkHit>> {
+                Ok(vec![])
+            }
+
+            async fn bm25_hunks_by_symbol_name(
+                &self,
+                _: &RepoId,
+                _: &str,
+                _: u8,
+                _: Option<&str>,
+                _: Option<i64>,
+            ) -> crate::Result<Vec<crate::HunkHit>> {
+                Ok(vec![])
+            }
+
+            async fn bm25_hunks_by_historical_symbol(
+                &self,
+                _: &RepoId,
+                _: &str,
+                _: u8,
+                _: Option<&str>,
+                _: Option<i64>,
+            ) -> crate::Result<Vec<crate::HunkHit>> {
+                Ok(vec![])
+            }
+
+            async fn get_hunk_symbols(
+                &self,
+                _: &RepoId,
+                _: crate::storage::HunkId,
+            ) -> crate::Result<Vec<crate::types::HunkSymbol>> {
+                Ok(vec![])
+            }
+
+            async fn get_hunk_symbols_batch(
+                &self,
+                _: &RepoId,
+                _: &[crate::storage::HunkId],
+            ) -> crate::Result<
+                std::collections::HashMap<crate::storage::HunkId, Vec<crate::types::HunkSymbol>>,
+            > {
+                Ok(std::collections::HashMap::new())
             }
         }
 
@@ -1647,72 +1667,6 @@ mod plan_28_workers_tests {
             async fn clear_head_symbols(&self, _: &crate::types::RepoId) -> crate::Result<()> {
                 Ok(())
             }
-            async fn knn_hunks(
-                &self,
-                _: &crate::types::RepoId,
-                _: &[f32],
-                _: u8,
-                _: Option<&str>,
-                _: Option<i64>,
-            ) -> crate::Result<Vec<crate::HunkHit>> {
-                Ok(vec![])
-            }
-            async fn bm25_hunks_by_text(
-                &self,
-                _: &crate::types::RepoId,
-                _: &str,
-                _: u8,
-                _: Option<&str>,
-                _: Option<i64>,
-            ) -> crate::Result<Vec<crate::HunkHit>> {
-                Ok(vec![])
-            }
-            async fn bm25_hunks_by_semantic_text(
-                &self,
-                _: &crate::types::RepoId,
-                _: &str,
-                _: u8,
-                _: Option<&str>,
-                _: Option<i64>,
-            ) -> crate::Result<Vec<crate::HunkHit>> {
-                Ok(vec![])
-            }
-            async fn bm25_hunks_by_symbol_name(
-                &self,
-                _: &crate::types::RepoId,
-                _: &str,
-                _: u8,
-                _: Option<&str>,
-                _: Option<i64>,
-            ) -> crate::Result<Vec<crate::HunkHit>> {
-                Ok(vec![])
-            }
-            async fn bm25_hunks_by_historical_symbol(
-                &self,
-                _: &crate::types::RepoId,
-                _: &str,
-                _: u8,
-                _: Option<&str>,
-                _: Option<i64>,
-            ) -> crate::Result<Vec<crate::HunkHit>> {
-                Ok(vec![])
-            }
-            async fn get_hunk_symbols(
-                &self,
-                _: &crate::types::RepoId,
-                _: crate::storage::HunkId,
-            ) -> crate::Result<Vec<crate::types::HunkSymbol>> {
-                Ok(vec![])
-            }
-            async fn get_hunk_symbols_batch(
-                &self,
-                _: &crate::types::RepoId,
-                _: &[crate::storage::HunkId],
-            ) -> crate::Result<
-                std::collections::HashMap<crate::storage::HunkId, Vec<crate::types::HunkSymbol>>,
-            > {
-                Ok(std::collections::HashMap::new())
-            }
             async fn get_index_metadata(
                 &self,
                 _: &crate::types::RepoId,
@@ -1725,6 +1679,82 @@ mod plan_28_workers_tests {
                 _: &[(String, String)],
             ) -> crate::Result<()> {
                 Ok(())
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl crate::storage::StorageRead for MinStorage {
+            async fn knn_hunks(
+                &self,
+                _: &crate::types::RepoId,
+                _: &[f32],
+                _: u8,
+                _: Option<&str>,
+                _: Option<i64>,
+            ) -> crate::Result<Vec<crate::HunkHit>> {
+                Ok(vec![])
+            }
+
+            async fn bm25_hunks_by_text(
+                &self,
+                _: &crate::types::RepoId,
+                _: &str,
+                _: u8,
+                _: Option<&str>,
+                _: Option<i64>,
+            ) -> crate::Result<Vec<crate::HunkHit>> {
+                Ok(vec![])
+            }
+
+            async fn bm25_hunks_by_semantic_text(
+                &self,
+                _: &crate::types::RepoId,
+                _: &str,
+                _: u8,
+                _: Option<&str>,
+                _: Option<i64>,
+            ) -> crate::Result<Vec<crate::HunkHit>> {
+                Ok(vec![])
+            }
+
+            async fn bm25_hunks_by_symbol_name(
+                &self,
+                _: &crate::types::RepoId,
+                _: &str,
+                _: u8,
+                _: Option<&str>,
+                _: Option<i64>,
+            ) -> crate::Result<Vec<crate::HunkHit>> {
+                Ok(vec![])
+            }
+
+            async fn bm25_hunks_by_historical_symbol(
+                &self,
+                _: &crate::types::RepoId,
+                _: &str,
+                _: u8,
+                _: Option<&str>,
+                _: Option<i64>,
+            ) -> crate::Result<Vec<crate::HunkHit>> {
+                Ok(vec![])
+            }
+
+            async fn get_hunk_symbols(
+                &self,
+                _: &crate::types::RepoId,
+                _: crate::storage::HunkId,
+            ) -> crate::Result<Vec<crate::types::HunkSymbol>> {
+                Ok(vec![])
+            }
+
+            async fn get_hunk_symbols_batch(
+                &self,
+                _: &crate::types::RepoId,
+                _: &[crate::storage::HunkId],
+            ) -> crate::Result<
+                std::collections::HashMap<crate::storage::HunkId, Vec<crate::types::HunkSymbol>>,
+            > {
+                Ok(std::collections::HashMap::new())
             }
         }
 
