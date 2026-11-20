@@ -1,6 +1,7 @@
 //! `RetrievalEngine` — long-lived holder of the embedder, reranker,
 //! and per-repo handles.
 
+use crate::cache::AncestryCache;
 use crate::cache::BlameCache;
 use crate::cache::EmbeddingCache;
 use crate::cache::MetaCache;
@@ -20,6 +21,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 mod open;
+mod visibility;
 
 /// Result returned by [`RetrievalEngine::find_pattern`].
 ///
@@ -56,6 +58,10 @@ pub struct RetrievalEngine {
     meta_cache: MetaCache,
     blame_cache: BlameCache,
     meta_hit_count: AtomicU64,
+    /// One ancestry cache for every repo (keys hold full SHAs).
+    ancestry: Arc<AncestryCache>,
+    /// Counts `find_pattern` calls that needed the ancestry filter.
+    ancestry_filtered_count: AtomicU64,
     /// Plan 21 E.1: counts BlameCache hits in `explain_change`.
     blame_cache_hit_count: AtomicU64,
     /// Unix-second timestamp of the last dispatched request.
@@ -79,6 +85,8 @@ impl RetrievalEngine {
             meta_cache: MetaCache::new(Duration::from_secs(5)),
             blame_cache: BlameCache::new(64),
             meta_hit_count: AtomicU64::new(0),
+            ancestry: Arc::new(AncestryCache::default()),
+            ancestry_filtered_count: AtomicU64::new(0),
             blame_cache_hit_count: AtomicU64::new(0),
             last_request_at: AtomicU64::new(now_unix),
         }
@@ -203,12 +211,7 @@ impl RetrievalEngine {
             });
         }
         let now_unix = chrono::Utc::now().timestamp();
-        let (hits, _profile) = handle
-            .store
-            .retriever
-            .find_pattern_with_profile(&handle.repo_id, &query, now_unix)
-            .await
-            .map_err(EngineError::from)?;
+        let hits = self.retrieve_visible(&handle, &query, now_unix).await?;
         Ok(FindPatternResult { hits, meta })
     }
 

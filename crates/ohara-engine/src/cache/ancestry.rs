@@ -1,3 +1,111 @@
+use async_trait::async_trait;
+use lru::LruCache;
+use ohara_core::{CommitSha, CommitVisibility, OhraError};
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+/// Default number of `(head, commit)` verdicts kept.
+const DEFAULT_CAPACITY: usize = 65_536;
+
+/// LRU of `(head, commit) -> visible`. Ancestry between two commits never
+/// changes, so entries are never invalidated.
+///
+/// Thread-safe: the map sits behind a [`Mutex`] so one cache can be shared
+/// by every repo of an engine (keys hold full SHAs).
+pub struct AncestryCache {
+    inner: Mutex<LruCache<(CommitSha, CommitSha), bool>>,
+    hits: AtomicU64,
+}
+
+impl AncestryCache {
+    /// Create a cache holding at most `capacity` verdicts (minimum 1).
+    pub fn new(capacity: usize) -> Self {
+        let cap = NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::MIN);
+        Self {
+            inner: Mutex::new(LruCache::new(cap)),
+            hits: AtomicU64::new(0),
+        }
+    }
+
+    /// Number of commit lookups answered from the cache so far.
+    pub fn hits(&self) -> u64 {
+        self.hits.load(Ordering::Relaxed)
+    }
+
+    /// Cached verdicts for `commits` as seen from `head`; `None` marks a miss.
+    fn lookup(&self, head: &CommitSha, commits: &[CommitSha]) -> Vec<Option<bool>> {
+        let Ok(mut g) = self.inner.lock() else {
+            return vec![None; commits.len()];
+        };
+        let found: Vec<Option<bool>> = commits
+            .iter()
+            .map(|c| g.get(&(head.clone(), c.clone())).copied())
+            .collect();
+        let n = found.iter().flatten().count() as u64;
+        self.hits.fetch_add(n, Ordering::Relaxed);
+        found
+    }
+
+    /// Record verdicts; silently no-ops on a poisoned lock.
+    fn store(&self, head: &CommitSha, commits: &[CommitSha], verdicts: &[bool]) {
+        if let Ok(mut g) = self.inner.lock() {
+            for (c, v) in commits.iter().zip(verdicts) {
+                g.put((head.clone(), c.clone()), *v);
+            }
+        }
+    }
+}
+
+impl Default for AncestryCache {
+    fn default() -> Self {
+        Self::new(DEFAULT_CAPACITY)
+    }
+}
+
+/// Decorator over a [`CommitVisibility`] oracle: answers from the cache and
+/// asks `inner` once, for the misses only.
+pub struct CachedVisibility {
+    inner: Arc<dyn CommitVisibility>,
+    cache: Arc<AncestryCache>,
+}
+
+impl CachedVisibility {
+    /// Wrap `inner` with `cache`.
+    pub fn new(inner: Arc<dyn CommitVisibility>, cache: Arc<AncestryCache>) -> Self {
+        Self { inner, cache }
+    }
+}
+
+#[async_trait]
+impl CommitVisibility for CachedVisibility {
+    async fn visible(
+        &self,
+        head: &CommitSha,
+        commits: &[CommitSha],
+    ) -> ohara_core::Result<Vec<bool>> {
+        let mut out = self.cache.lookup(head, commits);
+        let miss_idx: Vec<usize> = (0..out.len()).filter(|i| out[*i].is_none()).collect();
+        if miss_idx.is_empty() {
+            return Ok(out.into_iter().flatten().collect());
+        }
+        let misses: Vec<CommitSha> = miss_idx.iter().map(|i| commits[*i].clone()).collect();
+        let answers = self.inner.visible(head, &misses).await?;
+        if answers.len() != misses.len() {
+            return Err(OhraError::Git(format!(
+                "visibility oracle returned {} answers for {} commits",
+                answers.len(),
+                misses.len()
+            )));
+        }
+        self.cache.store(head, &misses, &answers);
+        for (i, v) in miss_idx.into_iter().zip(answers) {
+            out[i] = Some(v);
+        }
+        Ok(out.into_iter().flatten().collect())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

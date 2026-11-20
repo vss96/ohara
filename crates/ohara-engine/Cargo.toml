@@ -11,6 +11,7 @@ ohara-storage = { path = "../ohara-storage" }
 ohara-embed = { path = "../ohara-embed" }
 ohara-git = { path = "../ohara-git" }
 ohara-parse = { path = "../ohara-parse" }
+async-trait.workspace = true
 blake3.workspace = true
 chrono.workspace = true
 git2.workspace = true
@@ -26,7 +27,6 @@ libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-async-trait.workspace = true
 
 [features]
 default = []

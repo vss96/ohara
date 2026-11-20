@@ -1,0 +1,78 @@
+//! Worktree-scoped retrieval (plan-33): hide commits that the querying
+//! worktree's HEAD cannot reach.
+
+use super::RetrievalEngine;
+use crate::cache::CachedVisibility;
+use crate::error::EngineError;
+use crate::handle::RepoHandle;
+use ohara_core::query::{PatternHit, PatternQuery};
+use ohara_core::{CommitSha, CommitVisibility, VisibilityScope};
+use std::path::Path;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+
+/// HEAD commit of the checkout at `repo_path`, read off the async executor.
+async fn read_head(repo_path: &Path) -> crate::Result<CommitSha> {
+    let path = repo_path.to_path_buf();
+    let hex = tokio::task::spawn_blocking(move || -> crate::Result<String> {
+        let repo = git2::Repository::open(&path)
+            .map_err(|e| EngineError::Git(format!("open {}: {e}", path.display())))?;
+        let commit = repo
+            .head()
+            .and_then(|h| h.peel_to_commit())
+            .map_err(|e| EngineError::Git(format!("read HEAD: {e}")))?;
+        Ok(commit.id().to_string())
+    })
+    .await
+    .map_err(|e| EngineError::Internal(format!("head task: {e}")))??;
+    CommitSha::parse(&hex).map_err(EngineError::from)
+}
+
+impl RetrievalEngine {
+    /// Number of `find_pattern` calls that needed the ancestry filter
+    /// (some indexed tip was not reachable from the querying HEAD).
+    pub fn ancestry_filtered_queries(&self) -> u64 {
+        self.ancestry_filtered_count.load(Ordering::Relaxed)
+    }
+
+    /// Run the retriever for `handle`, filtering to commits visible from
+    /// the worktree's HEAD. When every indexed tip is visible (or none
+    /// exist) the unfiltered fast path is taken.
+    pub(super) async fn retrieve_visible(
+        &self,
+        handle: &RepoHandle,
+        query: &PatternQuery,
+        now_unix: i64,
+    ) -> crate::Result<Vec<PatternHit>> {
+        let head = read_head(&handle.repo_path).await?;
+        let tips = handle
+            .store
+            .tips
+            .indexed_tips(&handle.repo_id)
+            .await
+            .map_err(EngineError::from)?;
+        let git = ohara_git::GitVisibility::open(&handle.repo_path)
+            .map_err(|e| EngineError::Git(format!("open visibility oracle: {e:#}")))?;
+        let oracle = CachedVisibility::new(Arc::new(git), self.ancestry.clone());
+        let tip_shas: Vec<CommitSha> = tips.into_iter().map(|t| t.sha).collect();
+        let verdicts = oracle
+            .visible(&head, &tip_shas)
+            .await
+            .map_err(EngineError::from)?;
+        let all_visible = verdicts.iter().all(|v| *v);
+        let scope = (!all_visible).then_some(VisibilityScope {
+            head: &head,
+            oracle: &oracle,
+        });
+        if scope.is_some() {
+            self.ancestry_filtered_count.fetch_add(1, Ordering::Relaxed);
+        }
+        let (hits, _profile) = handle
+            .store
+            .retriever
+            .find_pattern_scoped(&handle.repo_id, query, now_unix, scope)
+            .await
+            .map_err(EngineError::from)?;
+        Ok(hits)
+    }
+}
