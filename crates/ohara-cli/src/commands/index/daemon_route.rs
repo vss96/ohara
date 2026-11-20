@@ -102,6 +102,9 @@ pub(super) async fn try_route(
         "indexed {} commit(s) via daemon in {} ms",
         out.new_commits, out.elapsed_ms
     );
+    if out.indexed {
+        super::notify::notify_daemons_of_invalidation(&id.worktree_path, Some(&socket)).await;
+    }
     let mut report = noop_report();
     report.new_commits = usize::try_from(out.new_commits).unwrap_or(usize::MAX);
     Ok(Some(report))

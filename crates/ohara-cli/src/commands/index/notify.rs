@@ -1,10 +1,14 @@
 //! Tell live `ohara serve` daemons that an index changed under them.
 
-/// Best-effort: notify every alive daemon that `repo_path` was re-indexed.
+use std::path::{Path, PathBuf};
+
+/// Best-effort: notify every alive daemon that `repo_path` was re-indexed,
+/// except `skip` (the daemon that ran a routed index already refreshed
+/// its own caches).
 ///
 /// Failures at any step (registry missing, daemon down, IPC error) are
 /// silently discarded — the next `list_alive` call prunes stale records.
-pub(super) async fn notify_daemons_of_invalidation(repo_path: &std::path::Path) {
+pub(super) async fn notify_daemons_of_invalidation(repo_path: &Path, skip: Option<&Path>) {
     use ohara_engine::client::{registry_path, Client};
     use ohara_engine::ipc::{Request, RequestMethod};
     use ohara_engine::registry::Registry;
@@ -18,21 +22,29 @@ pub(super) async fn notify_daemons_of_invalidation(repo_path: &std::path::Path) 
     let Ok(alive) = reg.list_alive() else {
         return;
     };
-    for d in alive {
+    let sockets = sockets_to_notify(alive.into_iter().map(|d| d.socket_path).collect(), skip);
+    for socket in sockets {
         let req = Request {
             id: 1,
             repo_path: Some(repo_path.to_string_lossy().to_string()),
             method: RequestMethod::InvalidateRepo,
         };
         // Best-effort. Daemon down → next list_alive prunes it.
-        let _ = Client::connect(&d.socket_path).call(req).await;
+        let _ = Client::connect(&socket).call(req).await;
     }
+}
+
+/// Every socket in `alive` except `skip`.
+fn sockets_to_notify(alive: Vec<PathBuf>, skip: Option<&Path>) -> Vec<PathBuf> {
+    alive
+        .into_iter()
+        .filter(|s| Some(s.as_path()) != skip)
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::{Path, PathBuf};
 
     #[test]
     fn the_routing_daemon_is_not_notified_again() {

@@ -440,7 +440,7 @@ pub async fn run(args: Args, no_daemon: bool) -> Result<IndexerReport> {
     if let Some(notice) = failed_commits_notice(report.commits_failed as u64) {
         eprintln!("{notice}");
     }
-    notify::notify_daemons_of_invalidation(&canonical).await;
+    notify::notify_daemons_of_invalidation(&canonical, None).await;
     Ok(report)
 }
 
