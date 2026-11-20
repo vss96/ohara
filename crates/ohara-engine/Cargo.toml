@@ -32,3 +32,5 @@ tempfile.workspace = true
 default = []
 coreml = ["ohara-embed/coreml"]
 cuda = ["ohara-embed/cuda"]
+# Exposes `RetrievalEngine::set_visibility_bypass` for tests/perf harnesses.
+perf-hooks = []

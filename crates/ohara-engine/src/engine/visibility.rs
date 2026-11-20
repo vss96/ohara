@@ -40,6 +40,15 @@ impl RetrievalEngine {
         self.ancestry_filtered_count.load(Ordering::Relaxed)
     }
 
+    /// Perf-harness only (`perf-hooks` feature): skip the whole visibility
+    /// step (HEAD read, tip check and post-filter) so a benchmark can
+    /// measure what the filter adds. Never enabled by the shipped binaries.
+    #[cfg(feature = "perf-hooks")]
+    #[doc(hidden)]
+    pub fn set_visibility_bypass(&self, bypass: bool) {
+        self.visibility_bypass.store(bypass, Ordering::Relaxed);
+    }
+
     /// Run the retriever for `handle`, filtering to commits visible from
     /// the worktree's HEAD. When every indexed tip is visible (or none
     /// exist) the unfiltered fast path is taken.
@@ -49,6 +58,15 @@ impl RetrievalEngine {
         query: &PatternQuery,
         now_unix: i64,
     ) -> crate::Result<Vec<PatternHit>> {
+        if self.visibility_bypass.load(Ordering::Relaxed) {
+            let (hits, _profile) = handle
+                .store
+                .retriever
+                .find_pattern_scoped(&handle.repo_id, query, now_unix, None)
+                .await
+                .map_err(EngineError::from)?;
+            return Ok(hits);
+        }
         let head = read_head(&handle.repo_path).await?;
         let tips = handle
             .store

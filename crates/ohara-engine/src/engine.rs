@@ -17,7 +17,7 @@ use ohara_core::CommitSha;
 use ohara_core::EmbeddingProvider;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -64,6 +64,8 @@ pub struct RetrievalEngine {
     ancestry: Arc<AncestryCache>,
     /// Counts `find_pattern` calls that needed the ancestry filter.
     ancestry_filtered_count: AtomicU64,
+    /// Perf-harness switch: when set, `find_pattern` skips visibility.
+    visibility_bypass: AtomicBool,
     /// Plan 21 E.1: counts BlameCache hits in `explain_change`.
     blame_cache_hit_count: AtomicU64,
     /// Unix-second timestamp of the last dispatched request.
@@ -91,6 +93,7 @@ impl RetrievalEngine {
             meta_hit_count: AtomicU64::new(0),
             ancestry: Arc::new(AncestryCache::default()),
             ancestry_filtered_count: AtomicU64::new(0),
+            visibility_bypass: AtomicBool::new(false),
             blame_cache_hit_count: AtomicU64::new(0),
             last_request_at: AtomicU64::new(now_unix),
             index_service: IndexService::default(),
