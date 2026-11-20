@@ -8,10 +8,10 @@
 
 use super::{noop_report, up_to_date, Args};
 use crate::commands::provider::ProviderArg;
-use anyhow::Result;
+use anyhow::{anyhow, bail, Result};
 use ohara_core::IndexerReport;
 use ohara_engine::client::{registry_path, Client};
-use ohara_engine::ipc::{Request, RequestMethod};
+use ohara_engine::ipc::{ErrorCode, Request, RequestMethod};
 use ohara_engine::registry::Registry;
 use ohara_engine::EnsureIndexedOutcome;
 use ohara_git::RepoIdentity;
@@ -72,7 +72,8 @@ fn alive_same_version_socket() -> Option<PathBuf> {
 }
 
 /// Run the incremental pass on a live daemon when [`choose_route`] says so.
-/// `Ok(None)` means the caller indexes in-process.
+/// `Ok(None)` means the caller indexes in-process; `Err` means the daemon
+/// refused or may still be working, so nothing may run in-process.
 pub(super) async fn try_route(
     args: &Args,
     no_daemon: bool,
@@ -106,45 +107,59 @@ pub(super) async fn try_route(
     Ok(Some(report))
 }
 
-/// Send `EnsureIndexed { sha: head }` for `worktree`. `Ok(None)` means
-/// "fall back in-process": the daemon was unreachable, timed out, refused
-/// (`NeedsRebuild`, no index, `NotImplemented`, ...) or answered garbage.
-/// The in-process path then runs and reports the problem as it always has.
+/// Send `EnsureIndexed { sha: head }` for `worktree`.
+///
+/// `Ok(None)` means "index in-process" and is returned only when no daemon
+/// work can be in flight: the socket is unreachable, or the daemon answered
+/// `NoIndex` (the first full index, which the daemon never does itself).
+///
+/// Once the request was sent, a timeout or read/decode failure is an error:
+/// the daemon may still be indexing under its repo lock, and an in-process
+/// run would be a second writer. A `NeedsRebuild` reply is also an error, so
+/// the CLI never extends an index the daemon's live embedder refused.
 pub(super) async fn index_via_daemon(
     socket: &Path,
     worktree: &Path,
     head: &str,
 ) -> Result<Option<EnsureIndexedOutcome>> {
+    let client = Client::connect(socket);
+    if !client.reachable().await {
+        tracing::debug!(socket = %socket.display(), "daemon unreachable; indexing in-process");
+        return Ok(None);
+    }
     let req = Request {
         id: 1,
         repo_path: Some(worktree.to_string_lossy().into_owned()),
         method: RequestMethod::EnsureIndexed { sha: head.into() },
     };
-    let resp = match Client::connect(socket)
+    let resp = client
         .call_with_timeout(req, ENSURE_INDEXED_TIMEOUT)
         .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "daemon unreachable; indexing in-process");
-            return Ok(None);
-        }
-    };
+        .map_err(|e| {
+            anyhow!(
+                "daemon did not finish ({e}); it may still be indexing. \
+                 Retry, or pass --no-daemon"
+            )
+        })?;
     if let Some(err) = resp.error {
-        tracing::warn!(code = ?err.code, message = %err.message, "daemon declined to index; indexing in-process");
-        return Ok(None);
+        return match err.code {
+            ErrorCode::NotIndexed => {
+                tracing::debug!("daemon reports no index; indexing in-process");
+                Ok(None)
+            }
+            ErrorCode::NeedsRebuild => bail!(
+                "{}\nRebuild the index with: ohara index --rebuild --yes",
+                err.message
+            ),
+            _ => bail!("daemon failed to index: {}", err.message),
+        };
     }
-    let Some(value) = resp.result else {
-        tracing::warn!("daemon response had no result; indexing in-process");
-        return Ok(None);
-    };
-    match serde_json::from_value(value) {
-        Ok(out) => Ok(Some(out)),
-        Err(e) => {
-            tracing::warn!(error = %e, "undecodable daemon response; indexing in-process");
-            Ok(None)
-        }
-    }
+    let value = resp
+        .result
+        .ok_or_else(|| anyhow!("daemon response had no result; it may still be indexing"))?;
+    let out = serde_json::from_value(value)
+        .map_err(|e| anyhow!("undecodable daemon response: {e}; it may still be indexing"))?;
+    Ok(Some(out))
 }
 
 #[cfg(test)]
@@ -189,5 +204,84 @@ mod tests {
             choose_route(true, false, false, false, false, None),
             Route::InProcess
         ));
+    }
+
+    /// Serve a fresh socket: read a request frame, then
+    /// write `reply` (a JSON body) back. Returns the socket path.
+    fn fake_daemon(dir: &Path, reply: serde_json::Value) -> PathBuf {
+        let sock = dir.join("fake.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        tokio::spawn(async move {
+            // The reachability probe connects and hangs up first; only a
+            // connection that sends a request frame gets the reply.
+            while let Ok((mut conn, _)) = listener.accept().await {
+                if ohara_engine::ipc::read_frame(&mut conn).await.is_err() {
+                    continue;
+                }
+                let body = serde_json::to_vec(&reply).unwrap();
+                let _ = ohara_engine::ipc::write_frame(&mut conn, &body).await;
+            }
+        });
+        sock
+    }
+
+    fn error_reply(code: &str, message: &str) -> serde_json::Value {
+        serde_json::json!({"id": 1, "error": {"code": code, "message": message}})
+    }
+
+    const SHA: &str = "0123456789012345678901234567890123456789";
+
+    #[tokio::test]
+    async fn unreachable_socket_falls_back_in_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = index_via_daemon(&dir.path().join("absent.sock"), dir.path(), SHA).await;
+        assert!(matches!(out, Ok(None)), "got {out:?}");
+    }
+
+    #[tokio::test]
+    async fn needs_rebuild_reply_is_an_error_not_a_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = fake_daemon(
+            dir.path(),
+            error_reply("needs_rebuild", "index needs rebuild: x"),
+        );
+        let err = index_via_daemon(&sock, dir.path(), SHA).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("index needs rebuild: x"), "{msg}");
+        assert!(msg.contains("ohara index --rebuild --yes"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn no_index_reply_falls_back_in_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = fake_daemon(
+            dir.path(),
+            error_reply("not_indexed", "repo not indexed: x"),
+        );
+        let out = index_via_daemon(&sock, dir.path(), SHA).await;
+        assert!(matches!(out, Ok(None)), "got {out:?}");
+    }
+
+    #[tokio::test]
+    async fn other_error_reply_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = fake_daemon(dir.path(), error_reply("internal", "boom"));
+        let err = index_via_daemon(&sock, dir.path(), SHA).await.unwrap_err();
+        assert!(err.to_string().contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn connection_dropped_after_send_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("drop.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        tokio::spawn(async move {
+            // Accept (probe, then request) and drop without replying.
+            while let Ok((conn, _)) = listener.accept().await {
+                drop(conn);
+            }
+        });
+        let err = index_via_daemon(&sock, dir.path(), SHA).await.unwrap_err();
+        assert!(err.to_string().contains("did not finish"), "{err}");
     }
 }
