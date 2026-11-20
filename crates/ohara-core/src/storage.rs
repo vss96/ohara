@@ -393,6 +393,24 @@ pub trait StorageWrite: Send + Sync {
     /// hunk replaces the row rather than appending a duplicate.
     async fn put_hunks(&self, repo_id: &RepoId, records: &[HunkRecord]) -> Result<()>;
 
+    /// Persist one commit and all of its hunks as a single unit: either
+    /// the commit row and every hunk land, or nothing does. The indexer's
+    /// resume skip treats a stored commit row as "done", so a commit row
+    /// without its hunks would never be repaired.
+    ///
+    /// The default calls [`Self::put_commit`] then [`Self::put_hunks`] and
+    /// is NOT atomic; it exists for in-memory test fakes. Durable backends
+    /// MUST override it with one transaction.
+    async fn put_commit_with_hunks(
+        &self,
+        repo_id: &RepoId,
+        commit: &CommitRecord,
+        hunks: &[HunkRecord],
+    ) -> Result<()> {
+        self.put_commit(repo_id, commit).await?;
+        self.put_hunks(repo_id, hunks).await
+    }
+
     /// Replace the repo's HEAD-symbol snapshot with `symbols` (extracted
     /// by the AST chunker). Deleting the previous snapshot (and its FTS
     /// mirrors) and inserting the new set happen in one transaction, so

@@ -70,3 +70,93 @@ impl StorageWrite for SqliteStorage {
         .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::SqliteStorage;
+    use ohara_core::storage::{CommitRecord, HunkRecord, StorageWrite};
+    use ohara_core::types::{ChangeKind, CommitMeta, Hunk, RepoId};
+
+    const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const MISSING: &str = "ffffffffffffffffffffffffffffffffffffffff";
+
+    async fn setup() -> (tempfile::TempDir, SqliteStorage, RepoId) {
+        let dir = tempfile::tempdir().unwrap();
+        let s = SqliteStorage::open(dir.path().join("i.sqlite"))
+            .await
+            .unwrap();
+        let id = RepoId::from_parts("first", "/repo");
+        s.open_repo(&id, "/repo", "first").await.unwrap();
+        (dir, s, id)
+    }
+
+    fn commit(sha: &str) -> CommitRecord {
+        CommitRecord {
+            meta: CommitMeta {
+                commit_sha: sha.into(),
+                parent_sha: None,
+                is_merge: false,
+                author: None,
+                ts: 1,
+                message: format!("commit {sha}"),
+            },
+            message_emb: vec![0.0; 384],
+            ulid: String::new(),
+        }
+    }
+
+    fn hunk(commit_sha: &str) -> HunkRecord {
+        HunkRecord::legacy(
+            Hunk {
+                commit_sha: commit_sha.into(),
+                file_path: "src/a.rs".into(),
+                language: Some("rust".into()),
+                change_kind: ChangeKind::Added,
+                diff_text: "+fn a() {}\n".into(),
+            },
+            vec![0.5; 384],
+        )
+    }
+
+    async fn hunk_count(s: &SqliteStorage, sha: &'static str) -> i64 {
+        s.pool()
+            .get()
+            .await
+            .unwrap()
+            .interact(move |c| {
+                c.query_row(
+                    "SELECT count(*) FROM hunk WHERE commit_sha = ?1",
+                    [sha],
+                    |r| r.get(0),
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    /// A hunk write that fails after the commit row went in must leave no
+    /// commit row behind: the indexer's resume skip treats a stored commit
+    /// row as done, so a lone commit row would never get its hunks.
+    #[tokio::test]
+    async fn failed_hunk_write_leaves_no_commit_row_and_a_retry_stores_the_hunks() {
+        let (_d, s, id) = setup().await;
+        // The second hunk names a commit that has no row: the foreign key
+        // fails mid-write, standing in for a crash or SQLITE_BUSY.
+        let interrupted = s
+            .put_commit_with_hunks(&id, &commit(A), &[hunk(A), hunk(MISSING)])
+            .await;
+        assert!(interrupted.is_err(), "the foreign key must fail the write");
+        assert!(
+            !s.commit_exists(A).await.unwrap(),
+            "a failed write must not leave a commit row the resume skip would trust"
+        );
+        assert_eq!(hunk_count(&s, A).await, 0);
+
+        s.put_commit_with_hunks(&id, &commit(A), &[hunk(A), hunk(A)])
+            .await
+            .unwrap();
+        assert!(s.commit_exists(A).await.unwrap());
+        assert_eq!(hunk_count(&s, A).await, 2);
+    }
+}
