@@ -2,6 +2,7 @@ pub mod coordinator;
 pub mod stages;
 mod tip_context;
 
+use tip_context::HeadSymbols;
 pub use tip_context::TipContext;
 
 use crate::index_metadata::RuntimeIndexMetadata;
@@ -311,18 +312,23 @@ impl Indexer {
         );
         self.progress.phase_symbols();
 
-        // HEAD symbol extraction (outside coordinator scope). A linked
-        // worktree never owns the shared HEAD-symbol snapshot.
+        // HEAD symbol extraction (outside coordinator scope). See
+        // `TipContext::head_symbols` for which worktree owns the snapshot.
         let symbols_start = Instant::now();
-        let owns_symbols = self
-            .tip_context
-            .as_ref()
-            .is_none_or(TipContext::owns_head_symbols);
-        let symbols = match owns_symbols {
-            true => symbol_source.extract_head_symbols().await?,
-            false => Vec::new(),
+        let head_symbols = match self.tip_context.as_ref() {
+            Some(ctx) => ctx.head_symbols(repo_id).await?,
+            None => HeadSymbols::Write,
         };
-        if owns_symbols {
+        if head_symbols == HeadSymbols::Replace {
+            self.storage.clear_head_symbols(repo_id).await?;
+        }
+        let symbols = match head_symbols {
+            HeadSymbols::Skip => Vec::new(),
+            HeadSymbols::Write | HeadSymbols::Replace => {
+                symbol_source.extract_head_symbols().await?
+            }
+        };
+        if head_symbols != HeadSymbols::Skip {
             self.storage.put_head_symbols(repo_id, &symbols).await?;
         }
         timings.head_symbols_ms = symbols_start.elapsed().as_millis() as u64;
@@ -1518,7 +1524,7 @@ mod phase_timing_tests {
     #[async_trait]
     impl SymbolSource for PanickingSymbolSource {
         async fn extract_head_symbols(&self) -> Result<Vec<Symbol>> {
-            panic!("extract_head_symbols must not be called for a linked worktree");
+            panic!("extract_head_symbols must not be called once main has a tip");
         }
     }
 
@@ -1645,11 +1651,7 @@ mod phase_timing_tests {
         let indexer = tip_indexer(zero_storage(), tips.clone(), slot1.clone());
         let repo_id = RepoId::from_parts("first", "/tmp/r");
         indexer
-            .run(
-                &repo_id,
-                Arc::new(HidingSource::new(vec![])),
-                Arc::new(PanickingSymbolSource),
-            )
+            .run(&repo_id, Arc::new(HidingSource::new(vec![])), no_symbols())
             .await
             .expect("run");
         assert_eq!(
@@ -1670,7 +1672,7 @@ mod phase_timing_tests {
         let indexer = tip_indexer(zero_storage(), tips.clone(), slot1);
         let repo_id = RepoId::from_parts("first", "/tmp/r");
         let report = indexer
-            .run(&repo_id, Arc::new(source), Arc::new(PanickingSymbolSource))
+            .run(&repo_id, Arc::new(source), no_symbols())
             .await
             .expect("run");
         assert_eq!(report.commits_failed, 1);

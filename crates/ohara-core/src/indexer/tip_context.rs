@@ -2,7 +2,7 @@
 
 use crate::types::RepoId;
 use crate::visibility::CommitVisibility;
-use crate::worktree::{CommitSha, TipStore, WorktreeKey};
+use crate::worktree::{main_needs_first_run, CommitSha, TipStore, WorktreeKey};
 use crate::Result;
 use std::sync::Arc;
 
@@ -72,10 +72,32 @@ impl TipContext {
         self.tips.set_indexed_tip(repo_id, &key, &prev.sha).await
     }
 
-    /// Only the main checkout owns the HEAD-symbol snapshot.
-    pub(crate) fn owns_head_symbols(&self) -> bool {
-        self.worktree.is_main()
+    /// What this run does with the shared HEAD-symbol snapshot. Main owns
+    /// it; until main has a tip, whichever worktree indexes writes it, so
+    /// a linked-first or bare-repo index still has head symbols. Main's
+    /// first run replaces whatever a linked worktree wrote.
+    pub(crate) async fn head_symbols(&self, repo_id: &RepoId) -> Result<HeadSymbols> {
+        let tips = self.tips.indexed_tips(repo_id).await?;
+        if main_needs_first_run(&self.worktree, &tips) {
+            return Ok(HeadSymbols::Replace);
+        }
+        let main_has_tip = tips.iter().any(|t| t.worktree.is_main());
+        match self.worktree.is_main() || !main_has_tip {
+            true => Ok(HeadSymbols::Write),
+            false => Ok(HeadSymbols::Skip),
+        }
     }
+}
+
+/// How an index run treats the shared HEAD-symbol snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeadSymbols {
+    /// Leave it alone (a linked worktree once main has a tip).
+    Skip,
+    /// Extract and write HEAD symbols.
+    Write,
+    /// Clear the snapshot, then extract and write (main's first run).
+    Replace,
 }
 
 #[cfg(test)]

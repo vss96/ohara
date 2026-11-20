@@ -11,7 +11,9 @@ use ohara_core::index_metadata::{
     runtime_metadata_from, CompatibilityStatus, RuntimeIndexMetadata,
 };
 use ohara_core::types::RepoId;
-use ohara_core::{CommitSha, CommitVisibility, EmbedMode, Indexer, TipContext};
+use ohara_core::{
+    main_needs_first_run, CommitSha, CommitVisibility, EmbedMode, Indexer, TipContext,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -260,7 +262,9 @@ fn outcome(indexed: bool, new_commits: u64, start: Instant) -> EnsureIndexedOutc
 }
 
 /// Whether some indexed tip `t` has `visible(t, sha)`. No tips at all is
-/// [`EngineError::NoIndex`]: the daemon never indexes from scratch.
+/// [`EngineError::NoIndex`]: the daemon never indexes from scratch. The
+/// main checkout is never covered before it has its own tip, so its first
+/// pass runs and takes over the HEAD-symbol snapshot.
 async fn covered(
     engine: &RetrievalEngine,
     handle: &RepoHandle,
@@ -274,6 +278,9 @@ async fn covered(
         .map_err(EngineError::from)?;
     if tips.is_empty() {
         return Err(no_index(handle));
+    }
+    if main_needs_first_run(&handle.worktree, &tips) {
+        return Ok(false);
     }
     let git = ohara_git::GitVisibility::open(&handle.repo_path)
         .map_err(|e| EngineError::Git(format!("open visibility oracle: {e:#}")))?;

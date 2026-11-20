@@ -107,6 +107,13 @@ pub struct IndexedTip {
     pub sha: CommitSha,
 }
 
+/// True when `worktree` is the main checkout and `tips` holds no main tip
+/// yet. Main must then run (record its tip and take over the HEAD-symbol
+/// snapshot) even when linked worktrees' tips already cover its HEAD.
+pub fn main_needs_first_run(worktree: &WorktreeKey, tips: &[IndexedTip]) -> bool {
+    worktree.is_main() && !tips.iter().any(|t| t.worktree.is_main())
+}
+
 /// Persistence of per-worktree indexed tips and commit pruning.
 #[async_trait]
 pub trait TipStore: Send + Sync {
