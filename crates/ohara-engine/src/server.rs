@@ -79,10 +79,31 @@ pub(crate) async fn serve_unix_with_grace(
     // Drain in-flight handlers with a bounded grace period so requests
     // that are mid-flight are not abruptly aborted.
     let drain = async { while handlers.join_next().await.is_some() {} };
-    let _ = tokio::time::timeout(grace, drain).await;
+    if tokio::time::timeout(grace, drain).await.is_err() {
+        drain_running_jobs(&mut handlers, &engine).await;
+    }
     let _ = std::fs::remove_file(socket_path);
     Ok(())
 }
+
+/// Past the grace period, keep draining while an index or prune job runs.
+/// Aborting its handler would drop the job lock and the indexer future while
+/// the job's spawned workers keep writing; letting the job finish ends them
+/// cleanly. Handlers left once no job runs are aborted with the set.
+async fn drain_running_jobs(handlers: &mut tokio::task::JoinSet<()>, engine: &RetrievalEngine) {
+    if engine.has_running_job() {
+        info!("waiting for a running index or prune job before shutting down");
+    }
+    while engine.has_running_job() {
+        let next = tokio::time::timeout(JOB_POLL, handlers.join_next()).await;
+        if let Ok(None) = next {
+            return;
+        }
+    }
+}
+
+/// How often shutdown re-checks whether a job is still running.
+const JOB_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
 #[cfg(unix)]
 fn set_socket_perms(path: &Path) -> crate::Result<()> {

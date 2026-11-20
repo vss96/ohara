@@ -59,6 +59,10 @@ pub(crate) struct IndexService {
     active: AtomicUsize,
     /// Full prunes run by the auto-prune step after an index job.
     auto_prunes: AtomicUsize,
+    /// Job admission. Holds `true` once the idle watchdog decided to shut
+    /// down; jobs start and end under this lock, and the watchdog decides
+    /// under it, so no job can start between "idle" and "stop".
+    shutting_down: std::sync::Mutex<bool>,
     queue: IndexQueue,
 }
 
@@ -91,9 +95,7 @@ impl IndexQueue {
 
     /// Queue `path` unless it is already waiting. `false` when coalesced.
     fn push(&self, path: PathBuf) -> bool {
-        // Canonicalise so `/a/../a` and `/a` coalesce; a path that cannot
-        // be resolved is queued as given and fails in its job.
-        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        let path = queue_key(path);
         if !self.pending().insert(path.clone()) {
             return false;
         }
@@ -107,28 +109,69 @@ impl IndexQueue {
     }
 }
 
+/// The worktree root containing `path`, so `/wt` and `/wt/src` coalesce.
+/// Canonicalised so `/a/../a` and `/a` coalesce too; a path that cannot be
+/// resolved is queued as given and fails in its job.
+fn queue_key(path: PathBuf) -> PathBuf {
+    let path = std::fs::canonicalize(&path).unwrap_or(path);
+    let root = git2::Repository::discover(&path)
+        .ok()
+        .and_then(|r| r.workdir().map(Path::to_path_buf));
+    match root {
+        Some(root) => std::fs::canonicalize(&root).unwrap_or(root),
+        None => path,
+    }
+}
+
 /// Marks a job as running so the idle watchdog never sees the daemon as
 /// idle mid-job; touches the engine's activity clock at start and end.
 struct JobGuard<'a> {
-    active: &'a AtomicUsize,
+    service: &'a IndexService,
     engine: &'a RetrievalEngine,
 }
 
 impl Drop for JobGuard<'_> {
     fn drop(&mut self) {
-        self.active.fetch_sub(1, Ordering::SeqCst);
+        // Touch before the job count drops, under the admission lock, so the
+        // watchdog never sees "no job" with a stale activity clock.
+        let _admission = self.service.admission();
         self.engine.touch();
+        self.service.active.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
 impl IndexService {
-    fn begin_job<'a>(&'a self, engine: &'a RetrievalEngine) -> JobGuard<'a> {
+    fn admission(&self) -> std::sync::MutexGuard<'_, bool> {
+        // A plain flag: a panic while holding it cannot leave it inconsistent.
+        self.shutting_down.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Start a job, unless the idle watchdog already decided to shut down.
+    fn begin_job<'a>(&'a self, engine: &'a RetrievalEngine) -> crate::Result<JobGuard<'a>> {
+        let admission = self.admission();
+        if *admission {
+            return Err(EngineError::Internal(
+                "daemon is shutting down; retry once it has stopped".into(),
+            ));
+        }
         self.active.fetch_add(1, Ordering::SeqCst);
         engine.touch();
-        JobGuard {
-            active: &self.active,
+        Ok(JobGuard {
+            service: self,
             engine,
+        })
+    }
+
+    /// Decide on an idle shutdown under the admission lock: when
+    /// `idle_enough()` holds, no further job is admitted. See
+    /// [`RetrievalEngine::begin_idle_shutdown`].
+    pub(crate) fn decide_shutdown(&self, idle_enough: impl FnOnce() -> bool) -> bool {
+        let mut admission = self.admission();
+        if *admission {
+            return true;
         }
+        *admission = idle_enough();
+        *admission
     }
 
     /// Full prunes the auto-prune step has run (test seam).
@@ -202,7 +245,7 @@ impl IndexService {
         sha: &CommitSha,
     ) -> crate::Result<EnsureIndexedOutcome> {
         let start = Instant::now();
-        let _busy = self.begin_job(engine);
+        let _busy = self.begin_job(engine)?;
         let handle = engine.open_repo(repo_path).await?;
         if covered(engine, &handle, sha).await? {
             return Ok(outcome(false, 0, start));
@@ -230,7 +273,7 @@ impl IndexService {
         repo_path: &Path,
     ) -> crate::Result<EnsureIndexedOutcome> {
         let start = Instant::now();
-        let _busy = self.begin_job(engine);
+        let _busy = self.begin_job(engine)?;
         let handle = engine.open_repo(repo_path).await?;
         let lock = self.lock_for(&handle.repo_id)?;
         let _job = lock.lock().await;
@@ -248,7 +291,7 @@ impl IndexService {
         engine: &RetrievalEngine,
         repo_path: &Path,
     ) -> crate::Result<PruneOutcome> {
-        let _busy = self.begin_job(engine);
+        let _busy = self.begin_job(engine)?;
         let handle = engine.open_repo(repo_path).await?;
         let lock = self.lock_for(&handle.repo_id)?;
         let _job = lock.lock().await;

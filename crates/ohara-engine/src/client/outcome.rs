@@ -110,7 +110,8 @@ impl DaemonCallResult {
                 DaemonRoute::Refuse(format!("daemon failed: {}", err.message))
             }
             Self::Interrupted(e) => DaemonRoute::Refuse(format!(
-                "daemon did not finish ({e}); it may still be working. Retry, or pass --no-daemon"
+                "daemon did not finish ({e}); it may still be working. Wait for it \
+                 (see `ohara status`) and retry; use --no-daemon only once it has finished"
             )),
             Self::Unavailable | Self::ConnectFailed(_) => DaemonRoute::Fallback,
         }

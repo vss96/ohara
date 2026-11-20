@@ -122,10 +122,19 @@ impl RetrievalEngine {
         Duration::from_secs(now.saturating_sub(last))
     }
 
+    /// Whether an index or prune job is running.
+    pub(crate) fn has_running_job(&self) -> bool {
+        self.index_service.is_busy()
+    }
+
     /// The idle watchdog's decision: `true` when the engine has been idle
-    /// for at least `idle`, in which case the daemon shuts down.
+    /// for at least `idle`, in which case the daemon shuts down. Decided
+    /// under the job admission lock; once `true`, every index or prune job
+    /// that tries to start is refused, so none starts between the decision
+    /// and the stop.
     pub fn begin_idle_shutdown(&self, idle: Duration) -> bool {
-        self.idle_for() >= idle
+        self.index_service
+            .decide_shutdown(|| self.idle_for() >= idle)
     }
 
     /// Returns the number of times `find_pattern` served `ResponseMeta`
