@@ -18,6 +18,10 @@ pub enum RuntimeKind {
     Agy,
     #[serde(rename = "generic")]
     Generic,
+    /// Scripted test runtime; absent from release builds.
+    #[cfg(any(test, feature = "test-util"))]
+    #[serde(rename = "fake")]
+    Fake,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

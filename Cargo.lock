@@ -2528,6 +2528,8 @@ dependencies = [
 name = "ohara-harness"
 version = "0.14.3"
 dependencies = [
+ "async-trait",
+ "chrono",
  "globset",
  "ohara-core",
  "serde",

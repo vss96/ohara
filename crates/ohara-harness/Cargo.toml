@@ -13,6 +13,13 @@ serde.workspace = true
 toml.workspace = true
 globset.workspace = true
 tokio.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+
+[features]
+# Exposes `agent::fake::FakeRuntime` and `RuntimeKind::Fake` to downstream
+# test code. Never enabled in release builds.
+test-util = []
 
 [dev-dependencies]
 tempfile.workspace = true
