@@ -44,6 +44,27 @@ pub fn fuse_to_pool(
         .collect()
 }
 
+/// Exp-decay recency factor in `[0, 1]`: `exp(-age_days / half_life_days)`
+/// where `age_days` is `now_unix - commit_ts` (floored at 0).
+///
+/// Total over all inputs:
+/// - the age subtraction saturates instead of overflowing `i64`;
+/// - a zero-age commit always gets `1.0` (`exp(0)` for any decay rate);
+/// - a non-positive or NaN `half_life_days` is treated as its `0+`
+///   limit — instant decay — so older commits get `0.0` instead of
+///   `NaN` (`-0.0 / 0.0`) or an exploding `exp(+x)` for negatives.
+pub(crate) fn recency_factor(commit_ts: i64, now_unix: i64, half_life_days: f32) -> f32 {
+    let age_secs = now_unix.saturating_sub(commit_ts).max(0);
+    if age_secs == 0 {
+        return 1.0;
+    }
+    if half_life_days.is_nan() || half_life_days <= 0.0 {
+        return 0.0;
+    }
+    let age_days = age_secs as f32 / 86_400.0;
+    (-age_days / half_life_days).exp()
+}
+
 /// Apply the exp-decay recency multiplier:
 /// `final = similarity * (1.0 + recency_weight * exp(-age_days / half_life_days))`.
 ///
@@ -63,8 +84,7 @@ pub fn apply_recency(
     let mut scored: Vec<(HunkHit, f32)> = hits
         .into_iter()
         .map(|mut h| {
-            let age_days = ((now_unix - h.commit.ts).max(0) as f32) / 86_400.0;
-            let recency = (-age_days / recency_half_life_days).exp();
+            let recency = recency_factor(h.commit.ts, now_unix, recency_half_life_days);
             let combined = h.similarity * (1.0 + recency_weight * recency);
             h.similarity = combined;
             (h, combined)
