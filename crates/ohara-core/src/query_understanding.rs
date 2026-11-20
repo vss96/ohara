@@ -295,29 +295,55 @@ fn extract_path_terms(query: &str, rules: &mut Vec<String>) -> Vec<String> {
     out
 }
 
+/// `c` opens a quoted span unless it is a `'` glued to a preceding word
+/// character (an apostrophe, e.g. the `'` in `what's`).
+fn is_quote_opener(c: char, prev: Option<char>) -> bool {
+    match c {
+        '`' | '"' => true,
+        '\'' => !prev.is_some_and(char::is_alphanumeric),
+        _ => false,
+    }
+}
+
+/// `c` closes a span opened by the same char unless it is a `'` glued
+/// to a following word character (an apostrophe inside the span).
+fn is_quote_closer(c: char, next: Option<char>) -> bool {
+    match c {
+        '\'' => !next.is_some_and(char::is_alphanumeric),
+        _ => true,
+    }
+}
+
 fn extract_quoted_symbols(query: &str, rules: &mut Vec<String>) -> Vec<String> {
     // Anything inside backticks, single-quotes, or double-quotes is
     // treated as an identifier hint. Strings with whitespace are
     // skipped — those are usually phrases, not symbol names.
+    //
+    // A `'` flanked by a word character on the relevant side is an
+    // apostrophe (`what's`, `don't`), not a quote delimiter, and an
+    // unclosed opener is ignored rather than swallowing the rest of
+    // the query (#119).
+    let chars: Vec<char> = query.chars().collect();
     let mut out = Vec::new();
-    let mut chars = query.chars().peekable();
-    while let Some(c) = chars.next() {
-        let opener = match c {
-            '`' | '\'' | '"' => c,
-            _ => continue,
-        };
-        let mut buf = String::new();
-        let mut closed = false;
-        for c in chars.by_ref() {
-            if c == opener {
-                closed = true;
-                break;
-            }
-            buf.push(c);
+    let mut i = 0;
+    while i < chars.len() {
+        let opener = chars[i];
+        let prev = i.checked_sub(1).map(|p| chars[p]);
+        if !is_quote_opener(opener, prev) {
+            i += 1;
+            continue;
         }
-        if closed && !buf.is_empty() && !buf.contains(char::is_whitespace) {
+        let close = (i + 1..chars.len())
+            .find(|&j| chars[j] == opener && is_quote_closer(opener, chars.get(j + 1).copied()));
+        let Some(close) = close else {
+            i += 1;
+            continue;
+        };
+        let buf: String = chars[i + 1..close].iter().collect();
+        if !buf.is_empty() && !buf.contains(char::is_whitespace) {
             out.push(buf);
         }
+        i = close + 1;
     }
     if !out.is_empty() {
         rules.push("quoted_symbols".into());
@@ -569,6 +595,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_query_extracts_backtick_symbol_after_apostrophe() {
+        // Regression for #119: the apostrophe in a contraction opened a
+        // `'`-quoted span that swallowed the rest of the query.
+        let pq = parse_query("what's the caller of `__A`");
+        assert_eq!(pq.symbol_terms, vec!["__A".to_string()]);
+        let pq = parse_query("don't touch 'cfg' or `Aa0`");
+        assert_eq!(pq.symbol_terms, vec!["cfg".to_string(), "Aa0".to_string()]);
+        // An unclosed quote must not swallow later quoted symbols.
+        let pq = parse_query("\"oops `fetch`");
+        assert_eq!(pq.symbol_terms, vec!["fetch".to_string()]);
+    }
+
+    #[test]
     fn parse_query_high_confidence_for_phrase_match_medium_for_keyword_only() {
         // Plan 12 Task 1.2 Step 3: confidence reflects the strength
         // of the matching rule. Phrase patterns are High; topic
@@ -704,7 +743,6 @@ mod tests {
             }
 
             #[test]
-            #[ignore = "tracked in #119: apostrophe in contraction before backtick-quoted symbol swallows the symbol in extract_quoted_symbols"]
             fn parse_query_extracts_backtick_symbol_after_contraction(
                 contraction in prop_oneof![Just("what's"), Just("don't"), Just(" where's"), Just("isn't")],
                 symbol in "[a-zA-Z_][a-zA-Z0-9_]{2,15}",
