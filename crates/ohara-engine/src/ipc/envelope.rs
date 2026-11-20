@@ -14,6 +14,18 @@ pub enum RequestMethod {
     InvalidateRepo,
     IndexStatus,
     Metrics,
+    /// Block until `sha` is covered by an indexed tip (plan-33). Result:
+    /// [`crate::EnsureIndexedOutcome`].
+    EnsureIndexed {
+        /// Full 40-hex commit SHA.
+        sha: String,
+    },
+    /// Queue this worktree's HEAD for background indexing. Result:
+    /// `{"queued": true}`; returns before any indexing runs.
+    IndexTip,
+    /// Delete indexed commits nothing reaches any more. Result:
+    /// [`crate::PruneOutcome`].
+    PruneUnreachable,
 }
 
 /// A single IPC request frame.

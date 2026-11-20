@@ -1,6 +1,7 @@
 //! Unix-socket listener + per-request dispatch for the `ohara serve` daemon.
 
-use std::path::Path;
+use ohara_core::CommitSha;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
 use tokio_util::sync::CancellationToken;
@@ -100,74 +101,76 @@ async fn handle_connection(
 
 async fn dispatch(engine: &RetrievalEngine, req: Request) -> Response {
     let id = req.id;
+    let repo_path = req.repo_path;
     let result: crate::Result<serde_json::Value> = match req.method {
         RequestMethod::Ping => Ok(serde_json::json!({"pong": true})),
         RequestMethod::Shutdown => Ok(serde_json::json!({"shutting_down": true})),
         RequestMethod::FindPattern(q) => {
-            let path = match req.repo_path {
-                Some(p) => p,
-                None => {
-                    return error_response(
-                        id,
-                        ErrorCode::Internal,
-                        "find_pattern requires repo_path",
-                    )
-                }
+            let path = match require_repo_path(id, repo_path, "find_pattern") {
+                Ok(p) => p,
+                Err(resp) => return resp,
             };
-            match engine.find_pattern(&path, q).await {
-                Ok(r) => serde_json::to_value(&r).map_err(|e| EngineError::Internal(e.to_string())),
-                Err(e) => Err(e),
-            }
+            engine.find_pattern(&path, q).await.and_then(to_value)
         }
         RequestMethod::ExplainChange(q) => {
-            let path = match req.repo_path {
-                Some(p) => p,
-                None => {
-                    return error_response(
-                        id,
-                        ErrorCode::Internal,
-                        "explain_change requires repo_path",
-                    )
-                }
+            let path = match require_repo_path(id, repo_path, "explain_change") {
+                Ok(p) => p,
+                Err(resp) => return resp,
             };
-            match engine.explain_change(&path, q).await {
-                Ok(r) => serde_json::to_value(&r).map_err(|e| EngineError::Internal(e.to_string())),
-                Err(e) => Err(e),
-            }
+            engine.explain_change(&path, q).await.and_then(to_value)
         }
         RequestMethod::InvalidateRepo => {
-            let path = match req.repo_path {
-                Some(p) => p,
-                None => {
-                    return error_response(
-                        id,
-                        ErrorCode::Internal,
-                        "invalidate_repo requires repo_path",
-                    )
-                }
+            let path = match require_repo_path(id, repo_path, "invalidate_repo") {
+                Ok(p) => p,
+                Err(resp) => return resp,
             };
-            match engine.invalidate_repo(&path).await {
-                Ok(()) => Ok(serde_json::json!({"invalidated": true})),
-                Err(e) => Err(e),
-            }
+            engine
+                .invalidate_repo(&path)
+                .await
+                .map(|()| serde_json::json!({"invalidated": true}))
         }
         RequestMethod::IndexStatus => {
-            let path = match req.repo_path {
-                Some(p) => p,
-                None => {
-                    return error_response(
-                        id,
-                        ErrorCode::Internal,
-                        "index_status requires repo_path",
-                    )
-                }
+            let path = match require_repo_path(id, repo_path, "index_status") {
+                Ok(p) => p,
+                Err(resp) => return resp,
             };
-            match engine.index_status(&path).await {
-                Ok(m) => serde_json::to_value(&m).map_err(|e| EngineError::Internal(e.to_string())),
-                Err(e) => Err(e),
-            }
+            engine.index_status(&path).await.and_then(to_value)
         }
         RequestMethod::Metrics => Err(EngineError::NotImplemented { method: "metrics" }),
+        RequestMethod::EnsureIndexed { sha } => {
+            let path = match require_repo_path(id, repo_path, "ensure_indexed") {
+                Ok(p) => p,
+                Err(resp) => return resp,
+            };
+            let sha = match CommitSha::parse(&sha) {
+                Ok(s) => s,
+                Err(e) => {
+                    let msg = format!("ensure_indexed: invalid sha: {e}");
+                    return error_response(id, ErrorCode::InvalidRequest, &msg);
+                }
+            };
+            let out = engine.ensure_indexed(&path, &sha).await;
+            // The job may have run for minutes; restart the idle clock.
+            engine.touch();
+            out.and_then(to_value)
+        }
+        RequestMethod::IndexTip => {
+            let path = match require_repo_path(id, repo_path, "index_tip") {
+                Ok(p) => p,
+                Err(resp) => return resp,
+            };
+            engine.enqueue_index_tip(PathBuf::from(path));
+            Ok(serde_json::json!({"queued": true}))
+        }
+        RequestMethod::PruneUnreachable => {
+            let path = match require_repo_path(id, repo_path, "prune_unreachable") {
+                Ok(p) => p,
+                Err(resp) => return resp,
+            };
+            let out = engine.prune_unreachable(&path).await;
+            engine.touch();
+            out.and_then(to_value)
+        }
     };
     match result {
         Ok(v) => Response {
@@ -181,6 +184,23 @@ async fn dispatch(engine: &RetrievalEngine, req: Request) -> Response {
             error: Some(engine_error_to_payload(e)),
         },
     }
+}
+
+/// The request's `repo_path`, or the error response for a method that
+/// needs one.
+fn require_repo_path(id: u64, repo_path: Option<String>, method: &str) -> Result<String, Response> {
+    match repo_path {
+        Some(p) => Ok(p),
+        None => Err(error_response(
+            id,
+            ErrorCode::Internal,
+            &format!("{method} requires repo_path"),
+        )),
+    }
+}
+
+fn to_value<T: serde::Serialize>(v: T) -> crate::Result<serde_json::Value> {
+    serde_json::to_value(v).map_err(|e| EngineError::Internal(e.to_string()))
 }
 
 fn error_response(id: u64, code: ErrorCode, msg: &str) -> Response {

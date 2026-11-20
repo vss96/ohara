@@ -111,8 +111,12 @@ impl RetrievalEngine {
 
     /// Return the duration since the last request was dispatched.
     ///
-    /// Saturates at zero if the clock appears to have gone backwards.
+    /// Zero while an index or prune job runs, so the idle watchdog never
+    /// exits mid-job. Saturates at zero if the clock went backwards.
     pub fn idle_for(&self) -> Duration {
+        if self.index_service.is_busy() {
+            return Duration::ZERO;
+        }
         let last = self.last_request_at.load(Ordering::Relaxed);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -261,6 +265,20 @@ impl RetrievalEngine {
         self.index_service
             .prune_unreachable(self, repo_path.as_ref())
             .await
+    }
+
+    /// Queue this worktree's HEAD for indexing. Never blocks on indexing.
+    /// A worktree already waiting in the queue is not queued twice.
+    /// Returns `false` when coalesced with a waiting entry.
+    pub fn enqueue_index_tip(&self, repo_path: PathBuf) -> bool {
+        self.index_service.enqueue(repo_path)
+    }
+
+    /// Drain the queue until `stop` is cancelled. One job at a time; a
+    /// failed job is logged once and dropped. A started job runs to
+    /// completion — `stop` is only observed between jobs.
+    pub async fn run_index_queue(self: Arc<Self>, stop: tokio_util::sync::CancellationToken) {
+        self.index_service.run_queue(&self, stop).await
     }
 
     /// Ask the reranker to drop its session when idle for at least `idle`.

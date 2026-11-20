@@ -77,6 +77,10 @@ pub async fn run_daemon_with_engine(
         .map_err(|e| EngineError::Internal(format!("write readiness file: {e}")))?;
     info!(socket = ?opts.socket, pid_file = ?opts.pid_file, "ohara daemon ready");
 
+    // Background index worker (plan-33). Stops with the listener; a job in
+    // progress finishes before it exits.
+    let index_worker = tokio::spawn(engine.clone().run_index_queue(stop.clone()));
+
     if let Some(reg_path) = &opts.registry_path {
         if let Some(daemon_root) = reg_path.parent().and_then(|p| p.parent()) {
             let root = daemon_root.to_path_buf();
@@ -146,7 +150,13 @@ pub async fn run_daemon_with_engine(
 
     let listener_result = listener
         .await
-        .map_err(|e| EngineError::Internal(format!("listener join: {e}")))?;
+        .map_err(|e| EngineError::Internal(format!("listener join: {e}")));
+    // The listener also exits on error without cancelling; stop the worker.
+    stop.cancel();
+    if let Err(e) = index_worker.await {
+        tracing::warn!(error = %e, "index worker join");
+    }
+    let listener_result = listener_result?;
     let _ = std::fs::remove_file(&opts.pid_file);
     let _ = std::fs::remove_file(&opts.readiness_file);
     listener_result

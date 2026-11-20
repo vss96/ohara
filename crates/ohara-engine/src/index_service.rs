@@ -15,8 +15,11 @@ use ohara_core::{CommitSha, CommitVisibility, EmbedMode, IndexedTip, Indexer, Ti
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 /// Commits deleted per `TipStore::delete_commits` call (one transaction each).
 const PRUNE_BATCH: usize = 500;
@@ -42,14 +45,119 @@ pub struct PruneOutcome {
     pub tips_removed: u64,
 }
 
-/// Serialises index and prune jobs per repository. Owned by
-/// [`RetrievalEngine`].
+/// Serialises index and prune jobs per repository and owns the background
+/// index queue. Owned by [`RetrievalEngine`].
 #[derive(Default)]
 pub(crate) struct IndexService {
     locks: std::sync::Mutex<HashMap<RepoId, Arc<tokio::sync::Mutex<()>>>>,
+    /// Index / prune jobs currently running (any repo).
+    active: AtomicUsize,
+    queue: IndexQueue,
+}
+
+/// Worktree paths waiting for a background index pass. A path is in
+/// `pending` from enqueue until its job *starts*, so a commit made while
+/// the job runs queues the worktree again.
+struct IndexQueue {
+    tx: mpsc::UnboundedSender<PathBuf>,
+    rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<PathBuf>>,
+    pending: std::sync::Mutex<HashSet<PathBuf>>,
+}
+
+impl Default for IndexQueue {
+    fn default() -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        Self {
+            tx,
+            rx: tokio::sync::Mutex::new(rx),
+            pending: std::sync::Mutex::new(HashSet::new()),
+        }
+    }
+}
+
+impl IndexQueue {
+    fn pending(&self) -> std::sync::MutexGuard<'_, HashSet<PathBuf>> {
+        // The set is only ever inserted into / removed from; a panic while
+        // holding it cannot leave it inconsistent.
+        self.pending.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Queue `path` unless it is already waiting. `false` when coalesced.
+    fn push(&self, path: PathBuf) -> bool {
+        // Canonicalise so `/a/../a` and `/a` coalesce; a path that cannot
+        // be resolved is queued as given and fails in its job.
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        if !self.pending().insert(path.clone()) {
+            return false;
+        }
+        if let Err(e) = self.tx.send(path) {
+            // Unreachable while `self` owns the receiver; undo the mark.
+            self.pending().remove(&e.0);
+            tracing::warn!(worktree = %e.0.display(), "index queue closed");
+            return false;
+        }
+        true
+    }
+}
+
+/// Marks a job as running so the idle watchdog never sees the daemon as
+/// idle mid-job; touches the engine's activity clock at start and end.
+struct JobGuard<'a> {
+    active: &'a AtomicUsize,
+    engine: &'a RetrievalEngine,
+}
+
+impl Drop for JobGuard<'_> {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        self.engine.touch();
+    }
 }
 
 impl IndexService {
+    fn begin_job<'a>(&'a self, engine: &'a RetrievalEngine) -> JobGuard<'a> {
+        self.active.fetch_add(1, Ordering::SeqCst);
+        engine.touch();
+        JobGuard {
+            active: &self.active,
+            engine,
+        }
+    }
+
+    /// Whether any index or prune job is running.
+    pub(crate) fn is_busy(&self) -> bool {
+        self.active.load(Ordering::SeqCst) > 0
+    }
+
+    /// See [`RetrievalEngine::enqueue_index_tip`].
+    pub(crate) fn enqueue(&self, repo_path: PathBuf) -> bool {
+        self.queue.push(repo_path)
+    }
+
+    /// See [`RetrievalEngine::run_index_queue`]. A job that has started
+    /// always runs to completion; `stop` is only observed between jobs.
+    pub(crate) async fn run_queue(&self, engine: &RetrievalEngine, stop: CancellationToken) {
+        let mut rx = tokio::select! {
+            biased;
+            _ = stop.cancelled() => return,
+            rx = self.queue.rx.lock() => rx,
+        };
+        loop {
+            let path = tokio::select! {
+                biased;
+                _ = stop.cancelled() => return,
+                next = rx.recv() => match next {
+                    Some(p) => p,
+                    None => return,
+                },
+            };
+            self.queue.pending().remove(&path);
+            if let Err(e) = self.index_worktree(engine, &path).await {
+                tracing::warn!(worktree = %path.display(), error = %e, "background index job failed");
+            }
+        }
+    }
+
     /// The job lock for `repo_id`, created on first use.
     fn lock_for(&self, repo_id: &RepoId) -> crate::Result<Arc<tokio::sync::Mutex<()>>> {
         let mut map = self
@@ -67,6 +175,7 @@ impl IndexService {
         sha: &CommitSha,
     ) -> crate::Result<EnsureIndexedOutcome> {
         let start = Instant::now();
+        let _busy = self.begin_job(engine);
         let handle = engine.open_repo(repo_path).await?;
         if covered(engine, &handle, sha).await? {
             return Ok(outcome(false, 0, start));
@@ -94,6 +203,7 @@ impl IndexService {
         repo_path: &Path,
     ) -> crate::Result<EnsureIndexedOutcome> {
         let start = Instant::now();
+        let _busy = self.begin_job(engine);
         let handle = engine.open_repo(repo_path).await?;
         let lock = self.lock_for(&handle.repo_id)?;
         let _job = lock.lock().await;
@@ -108,6 +218,7 @@ impl IndexService {
         engine: &RetrievalEngine,
         repo_path: &Path,
     ) -> crate::Result<PruneOutcome> {
+        let _busy = self.begin_job(engine);
         let handle = engine.open_repo(repo_path).await?;
         let lock = self.lock_for(&handle.repo_id)?;
         let _job = lock.lock().await;
