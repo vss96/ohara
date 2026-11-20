@@ -62,7 +62,7 @@ fn explicit_tuning(args: &Args) -> bool {
 
 /// Socket of a live daemon built from this binary's version, if any.
 /// Registry trouble counts as "none": indexing then proceeds in-process.
-fn alive_same_version_socket() -> Option<PathBuf> {
+pub(crate) fn alive_same_version_socket() -> Option<PathBuf> {
     let reg = Registry::open(registry_path().ok()?).ok()?;
     reg.list_alive()
         .ok()?

@@ -5,9 +5,10 @@ use super::PruneOutcome;
 use crate::engine::RetrievalEngine;
 use crate::error::EngineError;
 use crate::handle::RepoHandle;
-use ohara_core::{CommitSha, IndexedTip, WorktreeKey};
+use ohara_core::types::RepoId;
+use ohara_core::{CommitSha, IndexedTip, TipStore, WorktreeKey};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Commits deleted per `TipStore::delete_commits` call (one transaction each).
 const PRUNE_BATCH: usize = 500;
@@ -18,10 +19,42 @@ pub(super) async fn prune_and_refresh(
     engine: &RetrievalEngine,
     handle: &RepoHandle,
 ) -> crate::Result<PruneOutcome> {
-    let result = prune_locked(handle).await;
+    let result = prune_locked(
+        handle.store.tips.as_ref(),
+        &handle.repo_id,
+        &handle.repo_path,
+    )
+    .await;
     // Refresh even on failure: earlier delete batches are already committed.
     engine.refresh_repo_caches(&handle.repo_id);
     let (commits_deleted, tips_removed) = result?;
+    tracing::info!(commits_deleted, tips_removed, "pruned unreachable commits");
+    Ok(PruneOutcome {
+        commits_deleted,
+        tips_removed,
+    })
+}
+
+/// Prune the shared store of the repository containing `repo_path`
+/// without a [`RetrievalEngine`]: prune needs only the SQLite index and
+/// git, so no embedding or rerank model loads. For `ohara prune` when no
+/// daemon is reachable; it takes no job lock, so callers must not run it
+/// while a reachable daemon may be writing the same store.
+pub async fn prune_unreachable_in_process(repo_path: &Path) -> crate::Result<PruneOutcome> {
+    let identity = ohara_git::RepoIdentity::resolve(repo_path)
+        .map_err(|e| EngineError::Git(format!("resolve repo identity: {e}")))?;
+    let db_path = ohara_core::paths::index_db_path(&identity.repo_id)
+        .map_err(|e| EngineError::Internal(format!("index_db_path: {e}")))?;
+    if !db_path.is_file() {
+        return Err(EngineError::NoIndex {
+            path: identity.worktree_path.display().to_string(),
+        });
+    }
+    let storage = ohara_storage::SqliteStorage::open(&db_path)
+        .await
+        .map_err(|e| EngineError::Storage(format!("open: {e}")))?;
+    let (commits_deleted, tips_removed) =
+        prune_locked(&storage, &identity.repo_id, &identity.worktree_path).await?;
     tracing::info!(commits_deleted, tips_removed, "pruned unreachable commits");
     Ok(PruneOutcome {
         commits_deleted,
@@ -49,19 +82,23 @@ pub(super) async fn prune_retired_after_index(engine: &RetrievalEngine, handle: 
     }
 }
 
-/// Prune body; returns `(commits_deleted, tips_removed)`. Caller holds
-/// the repo's job lock and refreshes caches whatever the result.
-pub(super) async fn prune_locked(handle: &RepoHandle) -> crate::Result<(u64, u64)> {
-    let tips = &handle.store.tips;
+/// Prune body over the store of `repo_id`, with git liveness read from
+/// `repo_path`; returns `(commits_deleted, tips_removed)`. Callers
+/// serialise it with other writers and refresh caches whatever the result.
+async fn prune_locked(
+    tips: &dyn TipStore,
+    repo_id: &RepoId,
+    repo_path: &Path,
+) -> crate::Result<(u64, u64)> {
     // List indexed commits BEFORE snapshotting reachability. Another process
     // (e.g. the CLI post-commit hook) may index a new commit meanwhile; with
     // this order that commit is never a candidate. The reverse order would
     // see it indexed but missing from a stale reachable set, and delete it.
     let indexed = tips
-        .indexed_commit_shas(&handle.repo_id)
+        .indexed_commit_shas(repo_id)
         .await
         .map_err(EngineError::from)?;
-    let (reachable, live_worktrees) = git_liveness(handle.repo_path.clone()).await?;
+    let (reachable, live_worktrees) = git_liveness(repo_path.to_path_buf()).await?;
     let doomed: Vec<CommitSha> = indexed
         .into_iter()
         .filter(|c| !reachable.contains(c.as_str()))
@@ -69,13 +106,13 @@ pub(super) async fn prune_locked(handle: &RepoHandle) -> crate::Result<(u64, u64
     let mut commits_deleted = 0u64;
     for batch in doomed.chunks(PRUNE_BATCH) {
         commits_deleted += tips
-            .delete_commits(&handle.repo_id, batch)
+            .delete_commits(repo_id, batch)
             .await
             .map_err(EngineError::from)?;
     }
     let mut tips_removed = 0u64;
     let all = tips
-        .indexed_tips(&handle.repo_id)
+        .indexed_tips(repo_id)
         .await
         .map_err(EngineError::from)?;
     for tip in all {
@@ -85,11 +122,11 @@ pub(super) async fn prune_locked(handle: &RepoHandle) -> crate::Result<(u64, u64
         }
         if fate == TipFate::Retire {
             let key = WorktreeKey::retired(&tip.worktree, &tip.sha);
-            tips.set_indexed_tip(&handle.repo_id, &key, &tip.sha)
+            tips.set_indexed_tip(repo_id, &key, &tip.sha)
                 .await
                 .map_err(EngineError::from)?;
         }
-        tips.remove_indexed_tip(&handle.repo_id, &tip.worktree)
+        tips.remove_indexed_tip(repo_id, &tip.worktree)
             .await
             .map_err(EngineError::from)?;
         tips_removed += 1;

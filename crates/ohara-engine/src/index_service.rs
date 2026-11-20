@@ -24,6 +24,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 mod prune;
+pub use prune::prune_unreachable_in_process;
 use prune::{prune_and_refresh, prune_retired_after_index};
 
 /// Result of [`RetrievalEngine::ensure_indexed`] and

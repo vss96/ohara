@@ -2,13 +2,14 @@
 
 use std::path::{Path, PathBuf};
 
-/// Best-effort: notify every alive daemon that `repo_path` was re-indexed,
+/// Best-effort: notify every alive daemon that `repo_path` was re-indexed
+/// (or pruned),
 /// except `skip` (the daemon that ran a routed index already refreshed
 /// its own caches).
 ///
 /// Failures at any step (registry missing, daemon down, IPC error) are
 /// silently discarded — the next `list_alive` call prunes stale records.
-pub(super) async fn notify_daemons_of_invalidation(repo_path: &Path, skip: Option<&Path>) {
+pub(crate) async fn notify_daemons_of_invalidation(repo_path: &Path, skip: Option<&Path>) {
     use ohara_engine::client::{registry_path, Client};
     use ohara_engine::ipc::{Request, RequestMethod};
     use ohara_engine::registry::Registry;

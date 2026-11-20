@@ -45,6 +45,8 @@ enum Cmd {
     Query(commands::query::Args),
     /// Print index status for a repo.
     Status(commands::status::Args),
+    /// Remove index rows for commits no branch, tag or worktree reaches.
+    Prune(commands::prune::Args),
     /// Explain why a file/range looks the way it does (Plan 5).
     Explain(commands::explain::Args),
     /// Self-update the ohara binary by checking GitHub Releases.
@@ -84,6 +86,7 @@ async fn main() -> Result<()> {
         Cmd::Plan(a) => commands::plan::run(a).await,
         Cmd::Query(a) => commands::query::run(a, no_daemon).await,
         Cmd::Status(a) => commands::status::run(a).await,
+        Cmd::Prune(a) => commands::prune::run(a, no_daemon).await.map(|_| ()),
         Cmd::Explain(a) => commands::explain::run(a, no_daemon).await,
         Cmd::Update(a) => commands::update::run(a).await,
         Cmd::Serve(a) => commands::serve::run(a).await,

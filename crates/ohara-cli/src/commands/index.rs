@@ -8,9 +8,9 @@ use std::sync::Arc;
 use super::provider::{resolve_provider, ProviderArg};
 use crate::resources::{apply_intensity, detect_host, pick_resources, ResourcePlan, ResourcesArg};
 
-mod daemon_route;
+pub(crate) mod daemon_route;
 mod force;
-mod notify;
+pub(crate) mod notify;
 mod rebuild;
 mod summary;
 mod up_to_date;
