@@ -179,10 +179,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl Storage for FakeStorage {
-        async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> crate::Result<()> {
-            Ok(())
-        }
+    impl crate::storage::StorageStatus for FakeStorage {
         async fn get_index_status(&self, _: &RepoId) -> crate::Result<IndexStatus> {
             Ok(IndexStatus {
                 last_indexed_commit: self.last_sha.clone(),
@@ -190,153 +187,19 @@ mod tests {
                 indexed_at: self.indexed_at.clone(),
             })
         }
-        async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> crate::Result<()> {
-            Ok(())
-        }
-        async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> crate::Result<()> {
-            Ok(())
-        }
-        async fn commit_exists(&self, _: &str) -> crate::Result<bool> {
-            unreachable!("compute_index_status should not exercise commit_exists")
-        }
-        async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> crate::Result<()> {
-            Ok(())
-        }
-        async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> crate::Result<()> {
-            Ok(())
-        }
-        async fn clear_head_symbols(&self, _: &RepoId) -> crate::Result<()> {
-            unreachable!("compute_index_status should not exercise clear_head_symbols")
-        }
+
         async fn get_index_metadata(
             &self,
             _: &RepoId,
         ) -> crate::Result<crate::index_metadata::StoredIndexMetadata> {
             Ok(crate::index_metadata::StoredIndexMetadata::default())
         }
+
         async fn put_index_metadata(
             &self,
             _: &RepoId,
             _: &[(String, String)],
         ) -> crate::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[async_trait]
-    impl crate::storage::StorageRead for FakeStorage {
-        async fn knn_hunks(
-            &self,
-            _: &RepoId,
-            _: &[f32],
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> crate::Result<Vec<HunkHit>> {
-            Ok(vec![])
-        }
-
-        async fn bm25_hunks_by_text(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> crate::Result<Vec<HunkHit>> {
-            unreachable!("compute_index_status should not exercise bm25_hunks_by_text")
-        }
-
-        async fn bm25_hunks_by_semantic_text(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> crate::Result<Vec<HunkHit>> {
-            unreachable!("compute_index_status should not exercise bm25_hunks_by_semantic_text")
-        }
-
-        async fn bm25_hunks_by_symbol_name(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> crate::Result<Vec<HunkHit>> {
-            unreachable!("compute_index_status should not exercise bm25_hunks_by_symbol_name")
-        }
-
-        async fn bm25_hunks_by_historical_symbol(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> crate::Result<Vec<HunkHit>> {
-            unreachable!("compute_index_status should not exercise bm25_hunks_by_historical_symbol")
-        }
-
-        async fn get_hunk_symbols(
-            &self,
-            _: &RepoId,
-            _: crate::storage::HunkId,
-        ) -> crate::Result<Vec<crate::types::HunkSymbol>> {
-            unreachable!("compute_index_status should not exercise get_hunk_symbols")
-        }
-
-        async fn get_hunk_symbols_batch(
-            &self,
-            _: &RepoId,
-            _: &[crate::storage::HunkId],
-        ) -> crate::Result<
-            std::collections::HashMap<crate::storage::HunkId, Vec<crate::types::HunkSymbol>>,
-        > {
-            unreachable!("compute_index_status should not exercise get_hunk_symbols_batch")
-        }
-    }
-
-    #[async_trait]
-    impl crate::storage::StorageExplain for FakeStorage {
-        async fn get_commit(
-            &self,
-            _: &RepoId,
-            _: &str,
-        ) -> crate::Result<Option<crate::types::CommitMeta>> {
-            unreachable!("compute_index_status should not exercise get_commit")
-        }
-
-        async fn get_hunks_for_file_in_commit(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: &str,
-        ) -> crate::Result<Vec<crate::types::Hunk>> {
-            unreachable!("compute_index_status should not exercise get_hunks_for_file_in_commit")
-        }
-
-        async fn get_neighboring_file_commits(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: &str,
-            _: u8,
-            _: u8,
-        ) -> crate::Result<Vec<(u32, crate::types::CommitMeta)>> {
-            unreachable!("compute_index_status should not exercise get_neighboring_file_commits")
-        }
-    }
-
-    #[async_trait]
-    impl crate::storage::StorageCache for FakeStorage {
-        async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
-            Ok(false)
-        }
-
-        async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
             Ok(())
         }
     }
