@@ -27,6 +27,12 @@ pub const MAX_ATTRIBUTABLE_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 pub trait CommitSource: Send + Sync {
     /// Yield commits in parents-first order, optionally starting after `since`.
     async fn list_commits(&self, since: Option<&str>) -> Result<Vec<CommitMeta>>;
+    /// Commits reachable from HEAD but from none of the `hide` tips, oldest
+    /// first. Default falls back to the first hide entry as a watermark so
+    /// single-tip fakes keep working.
+    async fn list_commits_hiding(&self, hide: &[String]) -> Result<Vec<CommitMeta>> {
+        self.list_commits(hide.first().map(String::as_str)).await
+    }
     /// Yield the per-file hunks of a single commit.
     async fn hunks_for_commit(&self, sha: &str) -> Result<Vec<Hunk>>;
 

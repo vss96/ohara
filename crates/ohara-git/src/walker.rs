@@ -58,19 +58,7 @@ impl GitWalker {
         for oid in walk {
             let oid = oid?;
             let c = self.repo.find_commit(oid)?;
-            let parent_sha = if c.parent_count() > 0 {
-                c.parent(0).ok().map(|p| p.id().to_string())
-            } else {
-                None
-            };
-            let meta = CommitMeta {
-                commit_sha: oid.to_string(),
-                parent_sha: parent_sha.clone(),
-                is_merge: c.parent_count() > 1,
-                author: Some(c.author().name().unwrap_or("").to_string()).filter(|s| !s.is_empty()),
-                ts: c.time().seconds(),
-                message: c.message().unwrap_or("").to_string(),
-            };
+            let meta = commit_meta(&c);
 
             paths_buf.clear();
             collect_changed_paths(&self.repo, &c, &mut paths_buf)?;
@@ -79,34 +67,53 @@ impl GitWalker {
         Ok(())
     }
 
+    /// Commits reachable from HEAD, oldest first, excluding `since` and
+    /// its ancestors when given.
     pub fn list_commits(&self, since: Option<&str>) -> Result<Vec<CommitMeta>> {
+        if let Some(s) = since {
+            // Preserve the historical contract: a malformed watermark is an error.
+            git2::Oid::from_str(s)?;
+        }
+        self.list_commits_hiding(since.as_slice())
+    }
+
+    /// Commits reachable from HEAD and from none of `hide`, oldest first.
+    /// A hide entry that is not a valid oid or whose object is missing is skipped.
+    pub fn list_commits_hiding(&self, hide: &[&str]) -> Result<Vec<CommitMeta>> {
         let mut walk = self.repo.revwalk()?;
         walk.set_sorting(Sort::TOPOLOGICAL | Sort::REVERSE)?;
         walk.push_head()?;
-        if let Some(s) = since {
-            // Hide the watermark and its ancestors so we get only newer commits.
-            let oid = git2::Oid::from_str(s)?;
+        for s in hide {
+            let Ok(oid) = git2::Oid::from_str(s) else {
+                continue;
+            };
+            if self.repo.find_commit(oid).is_err() {
+                continue;
+            }
             walk.hide(oid)?;
         }
         let mut out = Vec::new();
         for oid in walk {
-            let oid = oid?;
-            let c = self.repo.find_commit(oid)?;
-            let parent_sha = if c.parent_count() > 0 {
-                c.parent(0).ok().map(|p| p.id().to_string())
-            } else {
-                None
-            };
-            out.push(CommitMeta {
-                commit_sha: oid.to_string(),
-                parent_sha,
-                is_merge: c.parent_count() > 1,
-                author: Some(c.author().name().unwrap_or("").to_string()).filter(|s| !s.is_empty()),
-                ts: c.time().seconds(),
-                message: c.message().unwrap_or("").to_string(),
-            });
+            let c = self.repo.find_commit(oid?)?;
+            out.push(commit_meta(&c));
         }
         Ok(out)
+    }
+}
+
+fn commit_meta(c: &git2::Commit<'_>) -> CommitMeta {
+    let parent_sha = if c.parent_count() > 0 {
+        c.parent(0).ok().map(|p| p.id().to_string())
+    } else {
+        None
+    };
+    CommitMeta {
+        commit_sha: c.id().to_string(),
+        parent_sha,
+        is_merge: c.parent_count() > 1,
+        author: Some(c.author().name().unwrap_or("").to_string()).filter(|s| !s.is_empty()),
+        ts: c.time().seconds(),
+        message: c.message().unwrap_or("").to_string(),
     }
 }
 
@@ -274,7 +281,7 @@ mod tests {
     fn branched_fixture(dir: &std::path::Path) -> (String, String, String, String) {
         let repo = Repository::init(dir).unwrap();
         let sig = Signature::now("a", "a@a").unwrap();
-        let mut commit_file = |name: &str, parent: Option<git2::Oid>, refname: &str| {
+        let commit_file = |name: &str, parent: Option<git2::Oid>, refname: &str| {
             fs::write(dir.join(name), name).unwrap();
             let mut idx = repo.index().unwrap();
             idx.add_path(std::path::Path::new(name)).unwrap();

@@ -104,6 +104,11 @@ pub fn reciprocal_rank_fusion(rankings: &[Vec<HunkId>], k: u32) -> Vec<HunkId> {
 #[async_trait]
 pub trait CommitsBehind: Send + Sync {
     async fn count_since(&self, since: Option<&str>) -> Result<u64>;
+    /// Count commits reachable from HEAD but from none of the `hide` tips.
+    /// Default falls back to the first hide entry as a watermark.
+    async fn count_hiding(&self, hide: &[String]) -> Result<u64> {
+        self.count_since(hide.first().map(String::as_str)).await
+    }
 }
 
 /// Combine the storage-side index status with the git-side commits-behind

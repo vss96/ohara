@@ -87,6 +87,22 @@ impl CommitSource for GitCommitSource {
     }
 
     #[tracing::instrument(skip(self), fields(repo = %self.repo_path.display()))]
+    async fn list_commits_hiding(&self, hide: &[String]) -> ohara_core::Result<Vec<CommitMeta>> {
+        let hide = hide.to_vec();
+        let path = self.repo_path.clone();
+        tokio::task::spawn_blocking(move || -> ohara_core::Result<Vec<CommitMeta>> {
+            let w = GitWalker::open(&path).map_err(|e| {
+                ohara_core::OhraError::Git(format!("list_commits_hiding: open: {e}"))
+            })?;
+            let hide: Vec<&str> = hide.iter().map(String::as_str).collect();
+            w.list_commits_hiding(&hide)
+                .map_err(|e| ohara_core::OhraError::Git(format!("list_commits_hiding: {e}")))
+        })
+        .await
+        .map_err(|e| ohara_core::OhraError::Git(format!("list_commits_hiding: join: {e}")))?
+    }
+
+    #[tracing::instrument(skip(self), fields(repo = %self.repo_path.display()))]
     async fn hunks_for_commit(&self, sha: &str) -> ohara_core::Result<Vec<Hunk>> {
         let sha = sha.to_string();
         let repo = self.repo.clone();
@@ -190,6 +206,22 @@ impl CommitsBehind for GitCommitsBehind {
         })
         .await
         .map_err(|e| ohara_core::OhraError::Git(format!("count_since: join: {e}")))?
+    }
+
+    async fn count_hiding(&self, hide: &[String]) -> ohara_core::Result<u64> {
+        let hide = hide.to_vec();
+        let path = self.repo_path.clone();
+        tokio::task::spawn_blocking(move || -> ohara_core::Result<u64> {
+            let w = GitWalker::open(&path)
+                .map_err(|e| ohara_core::OhraError::Git(format!("count_hiding: open: {e}")))?;
+            let hide: Vec<&str> = hide.iter().map(String::as_str).collect();
+            let cs = w
+                .list_commits_hiding(&hide)
+                .map_err(|e| ohara_core::OhraError::Git(format!("count_hiding: {e}")))?;
+            Ok(cs.len() as u64)
+        })
+        .await
+        .map_err(|e| ohara_core::OhraError::Git(format!("count_hiding: join: {e}")))?
     }
 }
 
