@@ -214,7 +214,7 @@ pub async fn run(args: Args, no_daemon: bool) -> Result<IndexerReport> {
     // sidecars; then fall through to the normal index flow, which
     // will re-run migrations and rebuild every row from scratch.
     if args.rebuild {
-        rebuild::drop_index(args.yes, &db_path)?;
+        rebuild::drop_index(args.yes, &db_path, &id.worktree)?;
     }
 
     // Resolve the resource plan up front so the chosen values are

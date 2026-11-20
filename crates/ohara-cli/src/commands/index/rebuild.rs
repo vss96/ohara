@@ -3,12 +3,28 @@
 //! then removes the index DB and its advisory WAL/SHM sidecars.
 
 use anyhow::{bail, Result};
+use ohara_core::WorktreeKey;
 use std::path::{Path, PathBuf};
+
+/// One-line warning when `--rebuild` runs from a linked worktree: the DB
+/// it drops is shared by the main clone and every linked worktree.
+pub(super) fn shared_rebuild_warning(worktree: &WorktreeKey) -> Option<String> {
+    if worktree.is_main() {
+        return None;
+    }
+    Some(format!(
+        "warning: --rebuild from linked worktree '{}' drops the index shared by all worktrees of this clone",
+        worktree.as_str()
+    ))
+}
 
 /// `--rebuild`: refuse without `--yes`, check the DB lives under
 /// `OHARA_HOME`, then delete the DB and its sidecars so the normal index
 /// flow re-runs migrations and rebuilds every row from scratch.
-pub(super) fn drop_index(yes: bool, db_path: &Path) -> Result<()> {
+pub(super) fn drop_index(yes: bool, db_path: &Path, worktree: &WorktreeKey) -> Result<()> {
+    if let Some(warning) = shared_rebuild_warning(worktree) {
+        eprintln!("{warning}");
+    }
     if !yes {
         bail!(
             "refusing to --rebuild without --yes: would delete {}.\n\
@@ -66,7 +82,6 @@ pub fn delete_index_files(db_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod rebuild_safety_tests {
     use super::*;
-    use ohara_core::WorktreeKey;
 
     #[test]
     fn rebuild_from_a_linked_worktree_warns_about_the_shared_index() {
