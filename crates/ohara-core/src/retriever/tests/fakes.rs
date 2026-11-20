@@ -186,12 +186,6 @@ impl crate::Storage for FakeStorage {
         *self.batch_calls.lock().unwrap() += 1;
         Ok(std::collections::HashMap::new())
     }
-    async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
-        Ok(false)
-    }
-    async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
-        Ok(())
-    }
     async fn get_commit(&self, _: &RepoId, _: &str) -> crate::Result<Option<CommitMeta>> {
         unreachable!("retriever tests should not exercise get_commit")
     }
@@ -220,6 +214,17 @@ impl crate::Storage for FakeStorage {
         Ok(crate::index_metadata::StoredIndexMetadata::default())
     }
     async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> crate::Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl crate::storage::StorageCache for FakeStorage {
+    async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
+        Ok(false)
+    }
+
+    async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
         Ok(())
     }
 }

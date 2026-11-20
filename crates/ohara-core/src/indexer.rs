@@ -658,12 +658,6 @@ mod phase_timing_tests {
         {
             Ok(std::collections::HashMap::new())
         }
-        async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> {
-            Ok(false)
-        }
-        async fn record_blob_seen(&self, _: &str, _: &str) -> Result<()> {
-            Ok(())
-        }
         async fn get_commit(&self, _: &RepoId, _: &str) -> Result<Option<CommitMeta>> {
             Ok(None)
         }
@@ -697,6 +691,17 @@ mod phase_timing_tests {
             components: &[(String, String)],
         ) -> Result<()> {
             *self.last_metadata.lock().unwrap() = Some(components.to_vec());
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl crate::storage::StorageCache for FakeStorage {
+        async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn record_blob_seen(&self, _: &str, _: &str) -> Result<()> {
             Ok(())
         }
     }
@@ -1491,12 +1496,6 @@ mod plan_26_repo_root_tests {
             > {
                 Ok(std::collections::HashMap::new())
             }
-            async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
-                Ok(false)
-            }
-            async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
-                Ok(())
-            }
             async fn get_commit(&self, _: &RepoId, _: &str) -> crate::Result<Option<CommitMeta>> {
                 Ok(None)
             }
@@ -1529,6 +1528,17 @@ mod plan_26_repo_root_tests {
                 _: &RepoId,
                 _: &[(String, String)],
             ) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        #[async_trait]
+        impl crate::storage::StorageCache for MinStorage {
+            async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
+                Ok(false)
+            }
+
+            async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
                 Ok(())
             }
         }
@@ -1691,12 +1701,6 @@ mod plan_28_workers_tests {
             > {
                 Ok(std::collections::HashMap::new())
             }
-            async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
-                Ok(false)
-            }
-            async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
-                Ok(())
-            }
             async fn get_commit(
                 &self,
                 _: &crate::types::RepoId,
@@ -1733,6 +1737,17 @@ mod plan_28_workers_tests {
                 _: &crate::types::RepoId,
                 _: &[(String, String)],
             ) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl crate::storage::StorageCache for MinStorage {
+            async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
+                Ok(false)
+            }
+
+            async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
                 Ok(())
             }
         }

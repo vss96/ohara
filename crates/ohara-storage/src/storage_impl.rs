@@ -7,7 +7,9 @@ use deadpool_sqlite::Pool;
 use ohara_core::{
     index_metadata::StoredIndexMetadata,
     query::IndexStatus,
-    storage::{CommitRecord, HunkHit, HunkId, HunkRecord, Storage, StorageMetricsSnapshot},
+    storage::{
+        CommitRecord, HunkHit, HunkId, HunkRecord, Storage, StorageCache, StorageMetricsSnapshot,
+    },
     types::{CommitMeta, Hunk, HunkSymbol, RepoId, Symbol},
     Result as CoreResult,
 };
@@ -280,57 +282,6 @@ impl Storage for SqliteStorage {
         .await
     }
 
-    async fn blob_was_seen(&self, blob_sha: &str, model: &str) -> CoreResult<bool> {
-        let blob = blob_sha.to_string();
-        let m = model.to_string();
-        with_conn(&self.pool, move |c| {
-            crate::tables::blob_cache::was_seen(c, &blob, &m)
-        })
-        .await
-    }
-
-    async fn record_blob_seen(&self, blob_sha: &str, model: &str) -> CoreResult<()> {
-        let blob = blob_sha.to_string();
-        let m = model.to_string();
-        with_conn(&self.write_pool, move |c| {
-            crate::tables::blob_cache::record(c, &blob, &m)
-        })
-        .await
-    }
-
-    async fn embed_cache_get_many(
-        &self,
-        hashes: &[ohara_core::types::ContentHash],
-        embed_model: &str,
-    ) -> CoreResult<std::collections::HashMap<ohara_core::types::ContentHash, Vec<f32>>> {
-        let hashes = hashes.to_vec();
-        let model = embed_model.to_owned();
-        with_conn(&self.pool, move |c| {
-            crate::tables::embed_cache::get_many(c, &hashes, &model)
-        })
-        .await
-    }
-
-    async fn embed_cache_stats(&self) -> CoreResult<ohara_core::storage::EmbedCacheStats> {
-        with_conn(&self.pool, |c| crate::tables::embed_cache::stats(c)).await
-    }
-
-    async fn embed_cache_put_many(
-        &self,
-        entries: &[(ohara_core::types::ContentHash, Vec<f32>)],
-        embed_model: &str,
-    ) -> CoreResult<()> {
-        if entries.is_empty() {
-            return Ok(());
-        }
-        let entries = entries.to_vec();
-        let model = embed_model.to_owned();
-        with_conn(&self.write_pool, move |c| {
-            crate::tables::embed_cache::put_many(c, &entries, &model)
-        })
-        .await
-    }
-
     async fn get_commit(&self, _repo_id: &RepoId, sha: &str) -> CoreResult<Option<CommitMeta>> {
         // Plan 5 / Task 2: SELECT a single commit row by sha. Returns
         // Ok(None) for SHAs that aren't yet indexed so the explain_change
@@ -471,6 +422,60 @@ impl Storage for SqliteStorage {
         _repo_id: &ohara_core::types::RepoId,
     ) -> ohara_core::Result<Option<ohara_core::types::CommitMeta>> {
         with_conn(&self.pool, |c| crate::tables::commit::latest_by_ulid(c)).await
+    }
+}
+
+#[async_trait::async_trait]
+impl StorageCache for SqliteStorage {
+    async fn blob_was_seen(&self, blob_sha: &str, model: &str) -> CoreResult<bool> {
+        let blob = blob_sha.to_string();
+        let m = model.to_string();
+        with_conn(&self.pool, move |c| {
+            crate::tables::blob_cache::was_seen(c, &blob, &m)
+        })
+        .await
+    }
+
+    async fn record_blob_seen(&self, blob_sha: &str, model: &str) -> CoreResult<()> {
+        let blob = blob_sha.to_string();
+        let m = model.to_string();
+        with_conn(&self.write_pool, move |c| {
+            crate::tables::blob_cache::record(c, &blob, &m)
+        })
+        .await
+    }
+
+    async fn embed_cache_get_many(
+        &self,
+        hashes: &[ohara_core::types::ContentHash],
+        embed_model: &str,
+    ) -> CoreResult<std::collections::HashMap<ohara_core::types::ContentHash, Vec<f32>>> {
+        let hashes = hashes.to_vec();
+        let model = embed_model.to_owned();
+        with_conn(&self.pool, move |c| {
+            crate::tables::embed_cache::get_many(c, &hashes, &model)
+        })
+        .await
+    }
+
+    async fn embed_cache_stats(&self) -> CoreResult<ohara_core::storage::EmbedCacheStats> {
+        with_conn(&self.pool, |c| crate::tables::embed_cache::stats(c)).await
+    }
+
+    async fn embed_cache_put_many(
+        &self,
+        entries: &[(ohara_core::types::ContentHash, Vec<f32>)],
+        embed_model: &str,
+    ) -> CoreResult<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let entries = entries.to_vec();
+        let model = embed_model.to_owned();
+        with_conn(&self.write_pool, move |c| {
+            crate::tables::embed_cache::put_many(c, &entries, &model)
+        })
+        .await
     }
 }
 
