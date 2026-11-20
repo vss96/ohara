@@ -167,3 +167,49 @@ async fn malformed_assumption_check_is_tool_error() {
     let at_cap: Vec<String> = (0..64).map(|_| "a".to_string()).collect();
     assert!(svc.propose_decision(with_check(at_cap)).await.is_ok());
 }
+
+#[tokio::test]
+async fn proposal_size_caps_are_tool_errors() {
+    let (_d, store, task, svc) = fixture(1, TaskState::Running).await;
+
+    let mut q = input();
+    q.question = "q".repeat(2 * 1024 + 1);
+    assert!(svc.propose_decision(q).await.is_err());
+
+    let mut o = input();
+    o.options = vec!["a".repeat(513), "b".into()];
+    o.chosen = "b".into();
+    assert!(svc.propose_decision(o).await.is_err());
+
+    let mut n = input();
+    n.options = (0..9).map(|i| format!("o{i}")).collect();
+    n.chosen = "o0".into();
+    assert!(svc.propose_decision(n).await.is_err());
+
+    let assumption = |i: usize| AssumptionInput {
+        text: format!("a{i}"),
+        check: None,
+    };
+    let mut many = input();
+    many.assumptions = (0..9).map(assumption).collect();
+    assert!(svc.propose_decision(many).await.is_err());
+    assert!(store.list_decisions(&task.id).await.unwrap().is_empty());
+
+    // Boundaries are inclusive.
+    let mut ok = input();
+    ok.question = "q".repeat(2 * 1024);
+    ok.options = (0..8).map(|i| format!("{i}{}", "x".repeat(511))).collect();
+    ok.chosen = ok.options[0].clone();
+    ok.assumptions = (0..8).map(assumption).collect();
+    assert!(svc.propose_decision(ok).await.is_ok());
+}
+
+#[tokio::test]
+async fn proposed_decisions_per_round_are_capped() {
+    let (_d, store, task, svc) = fixture(1, TaskState::Running).await;
+    for _ in 0..16 {
+        svc.propose_decision(input()).await.unwrap();
+    }
+    assert!(svc.propose_decision(input()).await.is_err());
+    assert_eq!(store.list_decisions(&task.id).await.unwrap().len(), 16);
+}
