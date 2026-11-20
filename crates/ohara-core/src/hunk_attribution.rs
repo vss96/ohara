@@ -233,6 +233,19 @@ mod tests {
     use crate::types::AttributionKind;
 
     #[test]
+    fn byte_span_to_line_span_clamps_eof_offset_after_trailing_newline() {
+        // Regression for #122: an offset at EOF of a newline-terminated
+        // file must map to the last real line, not a phantom line
+        // `count_lines(source) + 1`.
+        assert_eq!(byte_span_to_line_span(2, 0, "A\n"), (1, 1));
+        assert_eq!(byte_span_to_line_span(2, 2, "A\n"), (1, 1));
+        assert_eq!(byte_span_to_line_span(4, 4, "A\nB\n"), (2, 2));
+        // Unterminated last line and empty source are unaffected.
+        assert_eq!(byte_span_to_line_span(3, 3, "A\nB"), (2, 2));
+        assert_eq!(byte_span_to_line_span(0, 0, ""), (1, 1));
+    }
+
+    #[test]
     fn parse_post_image_ranges_extracts_start_and_count() {
         let diff = "@@ -1,3 +1,5 @@\n+a\n+b\n@@ -10,2 +12,4 @@ ctx\n+c\n";
         assert_eq!(parse_post_image_ranges(diff), vec![(1, 5), (12, 4)]);
@@ -547,7 +560,6 @@ mod tests {
             }
 
             #[test]
-            #[ignore = "tracked in #122: byte_span_to_line_span returns count_lines(source) + 1 for empty span at EOF after trailing newline"]
             fn byte_span_to_line_span_never_exceeds_count_lines(
                 lines in proptest::collection::vec("[a-zA-Z0-9_ ]{1,20}", 1..=10),
                 span_start in 0u32..=250,
