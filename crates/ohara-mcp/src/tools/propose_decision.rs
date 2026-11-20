@@ -143,6 +143,17 @@ pub const MAX_CHECK_ARGS: usize = 64;
 /// Most total bytes an assumption `check` argv may have.
 pub const MAX_CHECK_BYTES: usize = 8 * 1024;
 
+/// Most bytes in the question.
+pub const MAX_QUESTION_BYTES: usize = 2 * 1024;
+/// Most bytes in one option.
+pub const MAX_OPTION_BYTES: usize = 512;
+/// Most options per decision.
+pub const MAX_OPTIONS: usize = 8;
+/// Most assumptions per decision.
+pub const MAX_ASSUMPTIONS: usize = 8;
+/// Most `Proposed` decisions a round may hold; bounds settlement work.
+pub const MAX_PROPOSED_PER_ROUND: usize = 16;
+
 fn validate_check(text: &str, argv: &[String]) -> Result<(), ProposeError> {
     let bad = |why: &str| ProposeError::Invalid(format!("assumption {text:?} check: {why}"));
     match argv.first() {
@@ -164,6 +175,26 @@ fn validate(input: &ProposeDecisionInput) -> Result<(), ProposeError> {
         return Err(ProposeError::Invalid(
             "options: a decision needs at least 2 options".into(),
         ));
+    }
+    if input.question.len() > MAX_QUESTION_BYTES {
+        return Err(ProposeError::Invalid(format!(
+            "question: longer than {MAX_QUESTION_BYTES} bytes"
+        )));
+    }
+    if input.options.len() > MAX_OPTIONS {
+        return Err(ProposeError::Invalid(format!(
+            "options: more than {MAX_OPTIONS} options"
+        )));
+    }
+    if input.options.iter().any(|o| o.len() > MAX_OPTION_BYTES) {
+        return Err(ProposeError::Invalid(format!(
+            "options: an option is longer than {MAX_OPTION_BYTES} bytes"
+        )));
+    }
+    if input.assumptions.len() > MAX_ASSUMPTIONS {
+        return Err(ProposeError::Invalid(format!(
+            "assumptions: more than {MAX_ASSUMPTIONS} assumptions"
+        )));
     }
     if !input.options.contains(&input.chosen) {
         return Err(ProposeError::Invalid(format!(
@@ -201,6 +232,19 @@ pub async fn propose(
             "task {} is {}, not running; decisions can only be proposed while it runs",
             ctx.task_id,
             task.state.as_str()
+        )));
+    }
+    let pending = ctx
+        .store
+        .list_decisions(&ctx.task_id)
+        .await?
+        .iter()
+        .filter(|d| d.round == task.round && d.state == DecisionState::Proposed)
+        .count();
+    if pending >= MAX_PROPOSED_PER_ROUND {
+        return Err(ProposeError::Invalid(format!(
+            "round {} already has {MAX_PROPOSED_PER_ROUND} proposed decisions",
+            task.round
         )));
     }
     let id = DecisionId::new();
