@@ -121,12 +121,11 @@ impl Storage for SqliteStorage {
     }
 
     async fn put_head_symbols(&self, _repo_id: &RepoId, symbols: &[Symbol]) -> CoreResult<()> {
-        // Plan 3 / Track A: persist symbols + mirror into fts_symbol_name so
-        // the BM25-by-symbol-name lane has rows to match against. Track C
-        // wires `Symbol::sibling_names` through this path.
+        // Replace the whole snapshot (symbols + FTS/vec mirrors) in one
+        // transaction; see `tables::symbol::replace_all`.
         let syms = symbols.to_vec();
         with_conn(&self.write_pool, move |c| {
-            crate::tables::symbol::put_many(c, &syms)
+            crate::tables::symbol::replace_all(c, &syms)
         })
         .await
     }

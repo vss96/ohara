@@ -114,6 +114,14 @@ pub fn main_needs_first_run(worktree: &WorktreeKey, tips: &[IndexedTip]) -> bool
     worktree.is_main() && !tips.iter().any(|t| t.worktree.is_main())
 }
 
+/// True when an index run of `worktree` owns the shared HEAD-symbol
+/// snapshot: main always does; until main has a tip, whichever worktree
+/// indexes does, so a linked-first or bare-repo index still has head
+/// symbols.
+pub fn owns_head_symbols(worktree: &WorktreeKey, tips: &[IndexedTip]) -> bool {
+    worktree.is_main() || !tips.iter().any(|t| t.worktree.is_main())
+}
+
 /// Persistence of per-worktree indexed tips and commit pruning.
 #[async_trait]
 pub trait TipStore: Send + Sync {

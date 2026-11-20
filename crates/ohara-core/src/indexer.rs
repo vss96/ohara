@@ -2,7 +2,6 @@ pub mod coordinator;
 pub mod stages;
 mod tip_context;
 
-use tip_context::HeadSymbols;
 pub use tip_context::TipContext;
 
 use crate::index_metadata::RuntimeIndexMetadata;
@@ -324,22 +323,20 @@ impl Indexer {
         self.progress.phase_symbols();
 
         // HEAD symbol extraction (outside coordinator scope). See
-        // `TipContext::head_symbols` for which worktree owns the snapshot.
+        // `TipContext::owns_head_symbols` for which worktree owns the
+        // snapshot. Extract first, then replace the snapshot in one
+        // storage transaction: a failed extraction leaves the previous
+        // snapshot intact, and queries never see it empty.
         let symbols_start = Instant::now();
-        let head_symbols = match self.tip_context.as_ref() {
-            Some(ctx) => ctx.head_symbols(repo_id).await?,
-            None => HeadSymbols::Write,
+        let owns_head_symbols = match self.tip_context.as_ref() {
+            Some(ctx) => ctx.owns_head_symbols(repo_id).await?,
+            None => true,
         };
-        if head_symbols == HeadSymbols::Replace {
-            self.storage.clear_head_symbols(repo_id).await?;
-        }
-        let symbols = match head_symbols {
-            HeadSymbols::Skip => Vec::new(),
-            HeadSymbols::Write | HeadSymbols::Replace => {
-                symbol_source.extract_head_symbols().await?
-            }
+        let symbols = match owns_head_symbols {
+            true => symbol_source.extract_head_symbols().await?,
+            false => Vec::new(),
         };
-        if head_symbols != HeadSymbols::Skip {
+        if owns_head_symbols {
             self.storage.put_head_symbols(repo_id, &symbols).await?;
         }
         timings.head_symbols_ms = symbols_start.elapsed().as_millis() as u64;

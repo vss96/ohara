@@ -48,4 +48,6 @@ pub use types::{
     Provenance, RepoId, Symbol, SymbolKind,
 };
 pub use visibility::{CommitVisibility, VisibilityScope};
-pub use worktree::{main_needs_first_run, CommitSha, IndexedTip, TipStore, WorktreeKey};
+pub use worktree::{
+    main_needs_first_run, owns_head_symbols, CommitSha, IndexedTip, TipStore, WorktreeKey,
+};

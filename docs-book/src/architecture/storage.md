@@ -84,8 +84,10 @@ duplicating data:
   commit produces exactly the same row count.
 - **`put_head_symbols`** — replaces the entire `symbol` /
   `vec_symbol` / `fts_symbol` / `fts_symbol_name` content for the
-  repo. HEAD is a snapshot, not history; partial updates would leak
-  stale symbols across commits.
+  repo: the DELETE and the INSERTs share one transaction, so repeated
+  runs never accumulate duplicates and readers never see an empty
+  snapshot. HEAD is a snapshot, not history; partial updates would
+  leak stale symbols across commits.
 
 ## Indexed tips + abort safety
 

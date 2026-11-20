@@ -46,10 +46,12 @@ A full pass, in order:
    from a linked worktree, or a bare repo with only linked
    worktrees) whichever worktree indexes writes it, so the lane is
    never empty.
-6. **`put_head_symbols`.** Writes the `symbol` / `vec_symbol` /
+6. **`put_head_symbols`.** Replaces the `symbol` / `vec_symbol` /
    `fts_symbol` / `fts_symbol_name` content for the repo (HEAD is a
-   snapshot, not history). The main checkout's first pass clears
-   whatever a linked worktree wrote before taking it over.
+   snapshot, not history) in one transaction, after extraction has
+   finished: a failed extraction leaves the previous snapshot intact,
+   and queries never see an empty lane mid-run. The main checkout's
+   first pass replaces whatever a linked worktree wrote.
 7. **Record the tip.** When every commit indexed cleanly, set this
    worktree's row in `indexed_tip` to the `HEAD` the pass started
    from (the walk in step 3 also starts from that commit, not from a

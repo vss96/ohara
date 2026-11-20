@@ -167,9 +167,11 @@ pub trait Storage: Send + Sync {
     /// hunk replaces the row rather than appending a duplicate.
     async fn put_hunks(&self, repo_id: &RepoId, records: &[HunkRecord]) -> Result<()>;
 
-    /// Persist HEAD-snapshot symbols extracted by the AST chunker.
-    /// Caller is responsible for deciding whether to clear the previous
-    /// snapshot first (see `clear_head_symbols`).
+    /// Replace the repo's HEAD-symbol snapshot with `symbols` (extracted
+    /// by the AST chunker). Deleting the previous snapshot (and its FTS
+    /// mirrors) and inserting the new set happen in one transaction, so
+    /// repeated calls never accumulate duplicates and readers never see
+    /// an empty snapshot in between.
     async fn put_head_symbols(&self, repo_id: &RepoId, symbols: &[Symbol]) -> Result<()>;
 
     /// Drop all HEAD symbol rows for `repo_id` (and the matching

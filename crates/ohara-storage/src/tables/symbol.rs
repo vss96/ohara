@@ -87,7 +87,7 @@ pub fn clear_all(c: &mut Connection) -> Result<()> {
 /// `ohara index` (and every post-commit hook fire) would append a
 /// fresh duplicate set, causing the table to grow linearly with index
 /// runs.
-pub fn put_many(c: &mut Connection, symbols: &[Symbol]) -> Result<()> {
+pub fn replace_all(c: &mut Connection, symbols: &[Symbol]) -> Result<()> {
     let tx = c.transaction()?;
     // Clear stale HEAD symbols + their mirrors first. Order matters:
     // FTS5 + vec virtual tables hold rowid references into `symbol`,
