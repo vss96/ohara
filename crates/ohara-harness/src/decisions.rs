@@ -9,7 +9,7 @@ use chrono::Utc;
 use ohara_core::task::decision::{DecisionId, DecisionRecord, DecisionState, Evidence};
 use ohara_core::task::{Deadline, RuntimeName, TaskId, TaskRecord, TaskStore};
 
-use crate::agent::process::run_streaming;
+use crate::agent::process::run_streaming_env;
 use crate::contract::check::ScriptResult;
 use crate::error::{Error, Result};
 use crate::git::Git;
@@ -24,6 +24,21 @@ pub struct SettleReport {
     pub settled: u32,
     /// Decisions rejected this call.
     pub rejected: u32,
+}
+
+/// What a round settles against: where it ended and what the supervisor saw.
+#[derive(Debug, Clone, Copy)]
+pub struct Settlement<'a> {
+    /// Round whose `Proposed` decisions are settled.
+    pub round: u32,
+    /// Commit the round's work was checkpointed at.
+    pub checkpoint_sha: &'a str,
+    /// Contract script results of this checkpoint.
+    pub scripts: &'a [ScriptResult],
+    /// Runtime that produced the round.
+    pub runtime: &'a RuntimeName,
+    /// Directory assumption-check output is logged under.
+    pub logs: &'a Path,
 }
 
 /// Settle or reject every `Proposed` decision of `round`.
@@ -42,12 +57,15 @@ pub async fn settle_round(
     store: &dyn TaskStore,
     git: &Git,
     task: &TaskRecord,
-    round: u32,
-    checkpoint_sha: &str,
-    scripts: &[ScriptResult],
-    runtime: &RuntimeName,
-    logs: &Path,
+    at: &Settlement<'_>,
 ) -> Result<SettleReport> {
+    let Settlement {
+        round,
+        checkpoint_sha,
+        scripts,
+        runtime,
+        logs,
+    } = *at;
     let all = store.list_decisions(&task.id).await?;
     let proposed: Vec<&DecisionRecord> = all
         .iter()
@@ -112,11 +130,35 @@ async fn rejection(
     None
 }
 
+/// Environment variables an assumption check may see.
+const CHECK_ENV: [&str; 6] = [
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "LANG",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+];
+
+/// The minimal environment checks run with: [`CHECK_ENV`] entries that are set.
+fn check_env() -> Vec<(String, String)> {
+    CHECK_ENV
+        .iter()
+        .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
+        .collect()
+}
+
 /// Run one assumption check: argv only (no shell), cwd fixed to the task
-/// worktree, killed at [`CHECK_TIMEOUT`], output teed to `log`.
+/// worktree, minimal environment, killed at [`CHECK_TIMEOUT`], output teed to
+/// `log`.
+///
+/// Assumption checks are agent-authored. Phase 1 runs them with the agent's
+/// own authority (worktree cwd, minimal env, deadline). Sandboxing is
+/// required before distribution (spec §12a sandbox gate).
 async fn run_check(argv: &[String], cwd: &Path, log: &Path) -> std::result::Result<(), String> {
     let deadline = Deadline(Utc::now() + CHECK_TIMEOUT);
-    let exit = run_streaming(argv, None, cwd, deadline, log)
+    let env = check_env();
+    let exit = run_streaming_env(argv, None, cwd, deadline, log, Some(&env))
         .await
         .map_err(|e| format!("could not run check: {e}"))?;
     match (exit.killed_at_deadline, exit.code) {
@@ -351,15 +393,18 @@ mod tests {
 
         let rt = RuntimeName("claude".into());
         let logs = tempfile::tempdir().unwrap();
+        let scripts = [script_result()];
         let report = settle_round(
             &store,
             &git,
             &task,
-            1,
-            &ckpt,
-            &[script_result()],
-            &rt,
-            logs.path(),
+            &Settlement {
+                round: 1,
+                checkpoint_sha: &ckpt,
+                scripts: &scripts,
+                runtime: &rt,
+                logs: logs.path(),
+            },
         )
         .await
         .unwrap();
@@ -397,9 +442,20 @@ mod tests {
 
         let rt = RuntimeName("claude".into());
         let logs = tempfile::tempdir().unwrap();
-        let report = settle_round(&store, &git, &task, 1, &ckpt, &[], &rt, logs.path())
-            .await
-            .unwrap();
+        let report = settle_round(
+            &store,
+            &git,
+            &task,
+            &Settlement {
+                round: 1,
+                checkpoint_sha: &ckpt,
+                scripts: &[],
+                runtime: &rt,
+                logs: logs.path(),
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(
             report,
             SettleReport {
@@ -436,24 +492,57 @@ mod tests {
         let c1 = commit_file(&dir, &git, "shared.txt");
         let d1 = proposed(&task, 1, vec![]);
         store.put_decision(&d1).await.unwrap();
-        settle_round(&store, &git, &task, 1, &c1, &[], &rt, logs.path())
-            .await
-            .unwrap();
+        settle_round(
+            &store,
+            &git,
+            &task,
+            &Settlement {
+                round: 1,
+                checkpoint_sha: &c1,
+                scripts: &[],
+                runtime: &rt,
+                logs: logs.path(),
+            },
+        )
+        .await
+        .unwrap();
 
         let c2 = commit_file(&dir, &git, "other.txt");
         let d2 = proposed(&task, 2, vec![]);
         store.put_decision(&d2).await.unwrap();
-        settle_round(&store, &git, &task, 2, &c2, &[], &rt, logs.path())
-            .await
-            .unwrap();
+        settle_round(
+            &store,
+            &git,
+            &task,
+            &Settlement {
+                round: 2,
+                checkpoint_sha: &c2,
+                scripts: &[],
+                runtime: &rt,
+                logs: logs.path(),
+            },
+        )
+        .await
+        .unwrap();
 
         std::fs::write(dir.path().join("shared.txt"), "changed").unwrap();
         let c3 = git.commit_all("again").unwrap();
         let d3 = proposed(&task, 3, vec![]);
         store.put_decision(&d3).await.unwrap();
-        settle_round(&store, &git, &task, 3, &c3, &[], &rt, logs.path())
-            .await
-            .unwrap();
+        settle_round(
+            &store,
+            &git,
+            &task,
+            &Settlement {
+                round: 3,
+                checkpoint_sha: &c3,
+                scripts: &[],
+                runtime: &rt,
+                logs: logs.path(),
+            },
+        )
+        .await
+        .unwrap();
 
         let all = store.list_decisions(&task.id).await.unwrap();
         let by = |id| all.iter().find(|d| d.id == id).unwrap();
@@ -476,9 +565,20 @@ mod tests {
 
         let rt = RuntimeName("claude".into());
         let logs = tempfile::tempdir().unwrap();
-        let report = settle_round(&store, &git, &task, 1, &ckpt, &[], &rt, logs.path())
-            .await
-            .unwrap();
+        let report = settle_round(
+            &store,
+            &git,
+            &task,
+            &Settlement {
+                round: 1,
+                checkpoint_sha: &ckpt,
+                scripts: &[],
+                runtime: &rt,
+                logs: logs.path(),
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(
             report,
             SettleReport {
@@ -490,6 +590,50 @@ mod tests {
         let state = |id| all.iter().find(|d| d.id == id).unwrap().state;
         assert_eq!(state(in_worktree.id), DecisionState::Settled);
         assert_eq!(state(shell_text.id), DecisionState::Rejected);
+    }
+
+    #[tokio::test]
+    async fn check_runs_with_minimal_env() {
+        // Only this test sets the variable, and it never reads it back.
+        std::env::set_var("OHARA_TEST_SECRET_T10", "hunter2");
+        let (dir, git, base) = repo();
+        let ckpt = commit_file(&dir, &git, "a.txt");
+        let task = task_record(&base);
+        let store = MemStore::default();
+        // Passes only when the secret is NOT visible; PATH still resolves `sh`.
+        let hidden = proposed(
+            &task,
+            1,
+            vec![argv(&["sh", "-c", "test -z \"$OHARA_TEST_SECRET_T10\""])],
+        );
+        // Passes only when PATH was passed through.
+        let has_path = proposed(&task, 1, vec![argv(&["sh", "-c", "test -n \"$PATH\""])]);
+        store.put_decision(&hidden).await.unwrap();
+        store.put_decision(&has_path).await.unwrap();
+
+        let rt = RuntimeName("claude".into());
+        let logs = tempfile::tempdir().unwrap();
+        let report = settle_round(
+            &store,
+            &git,
+            &task,
+            &Settlement {
+                round: 1,
+                checkpoint_sha: &ckpt,
+                scripts: &[],
+                runtime: &rt,
+                logs: logs.path(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            report,
+            SettleReport {
+                settled: 2,
+                rejected: 0
+            }
+        );
     }
 
     #[test]

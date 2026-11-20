@@ -53,6 +53,19 @@ pub async fn run_streaming(
     deadline: Deadline,
     transcript: &Path,
 ) -> Result<ProcessExit> {
+    run_streaming_env(argv, stdin, cwd, deadline, transcript, None).await
+}
+
+/// [`run_streaming`] with an explicit environment: `Some(vars)` clears the
+/// inherited environment and passes exactly `vars`; `None` inherits.
+pub async fn run_streaming_env(
+    argv: &[String],
+    stdin: Option<String>,
+    cwd: &Path,
+    deadline: Deadline,
+    transcript: &Path,
+    env: Option<&[(String, String)]>,
+) -> Result<ProcessExit> {
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| Error::Runtime("empty command".to_string()))?;
@@ -65,7 +78,8 @@ pub async fn run_streaming(
         .open(transcript)
         .await?;
 
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .current_dir(cwd)
         .stdin(if stdin.is_some() {
@@ -76,8 +90,11 @@ pub async fn run_streaming(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
-        .process_group(0)
-        .spawn()?;
+        .process_group(0);
+    if let Some(vars) = env {
+        command.env_clear().envs(vars.iter().map(|(k, v)| (k, v)));
+    }
+    let mut child = command.spawn()?;
     let pid = child.id();
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
