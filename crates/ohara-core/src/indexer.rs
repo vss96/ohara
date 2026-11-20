@@ -37,6 +37,15 @@ pub trait CommitSource: Send + Sync {
     async fn list_commits_hiding(&self, hide: &[String]) -> Result<Vec<CommitMeta>> {
         self.list_commits(hide.first().map(String::as_str)).await
     }
+    /// Like [`Self::list_commits_hiding`] but walks from commit `from`
+    /// instead of the live HEAD. Default ignores `from` so fakes keep working.
+    async fn list_commits_from_hiding(
+        &self,
+        _from: &str,
+        hide: &[String],
+    ) -> Result<Vec<CommitMeta>> {
+        self.list_commits_hiding(hide).await
+    }
     /// Yield the per-file hunks of a single commit.
     async fn hunks_for_commit(&self, sha: &str) -> Result<Vec<Hunk>>;
 
@@ -278,7 +287,9 @@ impl Indexer {
             .with_embed_mode(self.embed_mode)
             .with_workers(self.workers);
         if let Some(ctx) = self.tip_context.as_ref() {
-            coordinator = coordinator.with_hidden_tips(ctx.hidden(repo_id).await?);
+            coordinator = coordinator
+                .with_hidden_tips(ctx.hidden(repo_id).await?)
+                .with_walk_from(ctx.head.clone());
         }
         // Plan 26: when repo_root is set, build a LayeredIgnore filter
         // and thread it to the Coordinator. Best-effort load — a missing

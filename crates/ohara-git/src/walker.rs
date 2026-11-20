@@ -81,8 +81,20 @@ impl GitWalker {
     /// A hide entry that is not a valid oid or whose object is missing is skipped.
     pub fn list_commits_hiding(&self, hide: &[&str]) -> Result<Vec<CommitMeta>> {
         let mut walk = self.repo.revwalk()?;
-        walk.set_sorting(Sort::TOPOLOGICAL | Sort::REVERSE)?;
         walk.push_head()?;
+        self.walk_hiding(walk, hide)
+    }
+
+    /// Commits reachable from `from` and from none of `hide`, oldest first.
+    /// Same hide rules as [`Self::list_commits_hiding`].
+    pub fn list_commits_from_hiding(&self, from: &str, hide: &[&str]) -> Result<Vec<CommitMeta>> {
+        let mut walk = self.repo.revwalk()?;
+        walk.push(git2::Oid::from_str(from)?)?;
+        self.walk_hiding(walk, hide)
+    }
+
+    fn walk_hiding(&self, mut walk: git2::Revwalk<'_>, hide: &[&str]) -> Result<Vec<CommitMeta>> {
+        walk.set_sorting(Sort::TOPOLOGICAL | Sort::REVERSE)?;
         for s in hide {
             let Ok(oid) = git2::Oid::from_str(s) else {
                 continue;

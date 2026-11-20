@@ -107,6 +107,27 @@ impl CommitSource for GitCommitSource {
     }
 
     #[tracing::instrument(skip(self), fields(repo = %self.repo_path.display()))]
+    async fn list_commits_from_hiding(
+        &self,
+        from: &str,
+        hide: &[String],
+    ) -> ohara_core::Result<Vec<CommitMeta>> {
+        let from = from.to_string();
+        let hide = hide.to_vec();
+        let path = self.repo_path.clone();
+        tokio::task::spawn_blocking(move || -> ohara_core::Result<Vec<CommitMeta>> {
+            let w = GitWalker::open(&path).map_err(|e| {
+                ohara_core::OhraError::Git(format!("list_commits_from_hiding: open: {e}"))
+            })?;
+            let hide: Vec<&str> = hide.iter().map(String::as_str).collect();
+            w.list_commits_from_hiding(&from, &hide)
+                .map_err(|e| ohara_core::OhraError::Git(format!("list_commits_from_hiding: {e}")))
+        })
+        .await
+        .map_err(|e| ohara_core::OhraError::Git(format!("list_commits_from_hiding: join: {e}")))?
+    }
+
+    #[tracing::instrument(skip(self), fields(repo = %self.repo_path.display()))]
     async fn hunks_for_commit(&self, sha: &str) -> ohara_core::Result<Vec<Hunk>> {
         let sha = sha.to_string();
         let repo = self.repo.clone();

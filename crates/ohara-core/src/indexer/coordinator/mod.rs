@@ -74,6 +74,9 @@ pub struct Coordinator {
     /// Plan 33: when set, the walk hides these tips instead of reading
     /// the legacy watermark from `get_index_status`.
     hidden_tips: Option<Vec<crate::worktree::CommitSha>>,
+    /// Plan 33: commit the hiding walk starts from (the HEAD a
+    /// `TipContext` read before the run). `None` walks from the live HEAD.
+    walk_from: Option<crate::worktree::CommitSha>,
 }
 
 impl Coordinator {
@@ -93,6 +96,7 @@ impl Coordinator {
             cache_storage: None,
             workers: num_cpus::get().max(1),
             hidden_tips: None,
+            walk_from: None,
         }
     }
 
@@ -124,6 +128,14 @@ impl Coordinator {
     /// worktree tips) rather than resuming from the stored watermark.
     pub fn with_hidden_tips(mut self, hide: Vec<crate::worktree::CommitSha>) -> Self {
         self.hidden_tips = Some(hide);
+        self
+    }
+
+    /// Plan 33: start the hiding walk at `from` instead of the live HEAD,
+    /// so a HEAD that moves mid-run cannot make the recorded tip claim
+    /// commits that were never walked.
+    pub fn with_walk_from(mut self, from: crate::worktree::CommitSha) -> Self {
+        self.walk_from = Some(from);
         self
     }
 
@@ -221,7 +233,10 @@ impl Coordinator {
         tracing::info!("walking commit history");
         let walk_start = Instant::now();
         let commits = match self.hidden_tips.as_ref() {
-            Some(hide) => CommitWalkStage::run_hiding(commit_source.as_ref(), hide).await?,
+            Some(hide) => {
+                CommitWalkStage::run_hiding(commit_source.as_ref(), self.walk_from.as_ref(), hide)
+                    .await?
+            }
             None => CommitWalkStage::run(commit_source.as_ref(), watermark.as_ref()).await?,
         };
         result.timings.commit_walk_ms = walk_start.elapsed().as_millis() as u64;

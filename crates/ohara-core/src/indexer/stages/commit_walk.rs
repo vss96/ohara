@@ -30,14 +30,19 @@ impl CommitWalkStage {
         source.list_commits(since).await
     }
 
-    /// Plan 33: walk from HEAD hiding every tip in `hide` (all worktrees'
-    /// indexed tips) instead of resuming from a single watermark.
+    /// Plan 33: walk from `from` (the live HEAD when `None`) hiding every
+    /// tip in `hide` (all worktrees' indexed tips) instead of resuming from
+    /// a single watermark.
     pub async fn run_hiding(
         source: &dyn CommitSource,
+        from: Option<&CommitSha>,
         hide: &[CommitSha],
     ) -> Result<Vec<CommitMeta>> {
         let hide: Vec<String> = hide.iter().map(|s| s.as_str().to_string()).collect();
-        source.list_commits_hiding(&hide).await
+        match from {
+            Some(f) => source.list_commits_from_hiding(f.as_str(), &hide).await,
+            None => source.list_commits_hiding(&hide).await,
+        }
     }
 }
 
