@@ -7,6 +7,8 @@ use ohara_core::task::{CostCents, Deadline, RuntimeName};
 
 use crate::error::Result;
 
+/// Antigravity (`agy -p`) runtime adapter.
+pub mod agy;
 /// Claude Code (`claude -p`) runtime adapter.
 pub mod claude;
 /// Codex (`codex exec --json`) runtime adapter.
