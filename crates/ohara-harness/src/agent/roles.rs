@@ -3,15 +3,32 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use ohara_core::task::{Role, RuntimeName, StepRecord, TaskStore};
+use chrono::Utc;
+use ohara_core::task::{Role, RuntimeName, StepRecord, StepState, TaskStore};
 
 use super::{AgentOutcome, AgentRequest, AgentRuntime, AgentStatus};
 use crate::config::{HarnessConfig, RuntimeSpec};
 use crate::error::{Error, Result};
 
-/// Runs a role's runtimes in configured order.
+/// Runs a role's runtimes in configured order, failing over on
+/// `RateLimited`, `AuthFailed` and `Crashed`.
 pub struct RoleRunner {
     runtimes: BTreeMap<Role, Vec<Arc<dyn AgentRuntime>>>,
+}
+
+fn step_state(status: AgentStatus) -> StepState {
+    match status {
+        AgentStatus::Completed => StepState::Passed,
+        AgentStatus::TimedOut => StepState::Aborted,
+        AgentStatus::RateLimited | AgentStatus::AuthFailed | AgentStatus::Crashed => {
+            StepState::Failed
+        }
+    }
+}
+
+/// A timeout means the clock ran out; a completion needs no retry.
+fn should_fail_over(status: AgentStatus) -> bool {
+    !matches!(status, AgentStatus::Completed | AgentStatus::TimedOut)
 }
 
 impl RoleRunner {
@@ -19,12 +36,22 @@ impl RoleRunner {
         config: &HarnessConfig,
         factory: impl Fn(&RuntimeName, &RuntimeSpec) -> Arc<dyn AgentRuntime>,
     ) -> Self {
-        let _ = (config, factory);
-        Self {
-            runtimes: BTreeMap::new(),
+        let mut runtimes = BTreeMap::new();
+        for (role, names) in &config.roles.0 {
+            let built = names
+                .iter()
+                .filter_map(|n| config.runtimes.get(n).map(|spec| factory(n, spec)))
+                .collect();
+            runtimes.insert(*role, built);
         }
+        Self { runtimes }
     }
 
+    /// Try each runtime for `role` in order. Each attempt is recorded as its
+    /// own step with `seq = step.seq + attempt_index`; retries carry
+    /// `failover_from` and are preceded by `reset`. An `Err` from a runtime
+    /// is recorded and treated as `Crashed`. Returns the final attempt's
+    /// outcome and step record.
     pub async fn run(
         &self,
         role: Role,
@@ -33,8 +60,49 @@ impl RoleRunner {
         store: &dyn TaskStore,
         reset: impl Fn() -> Result<()>,
     ) -> Result<(AgentOutcome, StepRecord)> {
-        let _ = (role, req, step, store, reset, &self.runtimes);
-        Err(Error::Runtime("unimplemented".into()))
+        let runtimes = self
+            .runtimes
+            .get(&role)
+            .filter(|r| !r.is_empty())
+            .ok_or_else(|| Error::Config(format!("no runtimes configured for role {role:?}")))?;
+        let mut previous: Option<RuntimeName> = None;
+        let mut last: Option<(AgentOutcome, StepRecord)> = None;
+        for (attempt, rt) in (0u32..).zip(runtimes) {
+            if previous.is_some() {
+                reset()?;
+            }
+            let started_at = Utc::now();
+            let outcome = match rt.run(req.clone()).await {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::warn!(runtime = %rt.name().0, error = %e, "runtime errored; treating as crashed");
+                    AgentOutcome {
+                        status: AgentStatus::Crashed,
+                        final_message: e.to_string(),
+                        cost: None,
+                        exit_code: None,
+                    }
+                }
+            };
+            let record = StepRecord {
+                seq: step.seq + attempt,
+                runtime: rt.name().clone(),
+                state: step_state(outcome.status),
+                started_at,
+                finished_at: Some(Utc::now()),
+                cost: outcome.cost,
+                failover_from: previous.take(),
+                ..step.clone()
+            };
+            store.record_step(&record).await?;
+            previous = Some(rt.name().clone());
+            let done = !should_fail_over(outcome.status);
+            last = Some((outcome, record));
+            if done {
+                break;
+            }
+        }
+        last.ok_or_else(|| Error::Runtime("role runner made no attempt".into()))
     }
 }
 
@@ -44,10 +112,8 @@ mod tests {
     use crate::agent::fake::FakeRuntime;
     use crate::config::{RoleMap, RuntimeKind};
     use chrono::Utc;
-    use ohara_core::task::{
-        Deadline, StepState, TaskId, TaskRecord, TaskStore,
-    };
     use ohara_core::task::decision::DecisionRecord;
+    use ohara_core::task::{Deadline, StepState, TaskId, TaskRecord, TaskStore};
     use ohara_core::Result as CoreResult;
     use std::cell::Cell;
     use std::collections::BTreeMap;
