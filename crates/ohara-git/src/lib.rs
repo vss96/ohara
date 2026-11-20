@@ -11,6 +11,7 @@
 
 pub mod blame;
 pub mod diff;
+pub mod identity;
 pub mod walker;
 
 pub use blame::Blamer;
