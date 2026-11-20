@@ -46,3 +46,4 @@ pub use types::{
     ulid_for_commit, AttributionKind, ChangeKind, CommitMeta, ContentHash, Hunk, HunkSymbol,
     Provenance, RepoId, Symbol, SymbolKind,
 };
+pub use worktree::{CommitSha, IndexedTip, TipStore, WorktreeKey};
