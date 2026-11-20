@@ -51,6 +51,9 @@ enum Cmd {
     Explain(commands::explain::Args),
     /// Self-update the ohara binary by checking GitHub Releases.
     Update(commands::update::Args),
+    /// Run an outcome-driven harness task: draft a contract, approve it,
+    /// then let agents work until it holds or time runs out.
+    Task(commands::task::Args),
     /// Run the retrieval engine as a long-lived Unix-socket daemon.
     Serve(commands::serve::ServeArgs),
     /// Inspect or manage running ohara daemons.
@@ -89,6 +92,7 @@ async fn main() -> Result<()> {
         Cmd::Prune(a) => commands::prune::run(a, no_daemon).await.map(|_| ()),
         Cmd::Explain(a) => commands::explain::run(a, no_daemon).await,
         Cmd::Update(a) => commands::update::run(a).await,
+        Cmd::Task(a) => commands::task::run(a).await,
         Cmd::Serve(a) => commands::serve::run(a).await,
         Cmd::Daemon { action } => commands::daemon::run(action).await,
     };

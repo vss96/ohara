@@ -9,6 +9,8 @@ use crate::error::Result;
 
 /// Antigravity (`agy -p`) runtime adapter.
 pub mod agy;
+/// Real-adapter construction from config.
+pub mod build;
 /// Claude Code (`claude -p`) runtime adapter.
 pub mod claude;
 /// Codex (`codex exec --json`) runtime adapter.
