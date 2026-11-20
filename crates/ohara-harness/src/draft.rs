@@ -321,16 +321,47 @@ pass_mark = 5
 scale_max = 10
 "#;
 
+    /// A committed git repo containing `files`, as a task worktree would be.
+    fn repo(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let git = crate::git::Git::new(dir.path());
+        git.run(&["init", "-q"]).unwrap();
+        for (name, body) in files {
+            std::fs::write(dir.path().join(name), body).unwrap();
+        }
+        git.commit_all("init").unwrap();
+        dir
+    }
+
+    async fn draft(
+        runner: &RoleRunner,
+        store: &MemStore,
+        wf: &Workflow,
+        cwd: &Path,
+        task_dir: &Path,
+    ) -> Contract {
+        draft_in(runner, store, &task("fix it"), wf, cwd, task_dir)
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn draft_uses_agent_output() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("pyproject.toml"), "").unwrap();
+        let cwd = repo(&[("pyproject.toml", "")]);
+        let task_dir = tempfile::tempdir().unwrap();
         let (runner, fake) = runner(Some(VALID), AgentStatus::Completed);
         let store = MemStore::default();
         let t = task("fix the flaky thing");
-        let c = draft_in(&runner, &store, &t, &bug_workflow(), dir.path(), dir.path())
-            .await
-            .unwrap();
+        let c = draft_in(
+            &runner,
+            &store,
+            &t,
+            &bug_workflow(),
+            cwd.path(),
+            task_dir.path(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(c.scripts[0].name, "py");
         assert_eq!(c.protected_paths, ["ci/"]);
@@ -347,7 +378,8 @@ scale_max = 10
         assert!(calls[0].prompt.contains("cargo")); // the template
         assert!(!calls[0].prompt.contains("{{"));
         // The draft lives in the scratch dir, not in the repo/cwd.
-        assert!(dir.path().join("draft/contract.draft.toml").exists());
+        assert!(task_dir.path().join("draft/contract.draft.toml").exists());
+        assert!(!cwd.path().join("draft").exists());
     }
 
     #[tokio::test]
@@ -358,19 +390,18 @@ scale_max = 10
             Some("```toml\noutcome = 1\n```"),
             None, // agent wrote nothing
         ];
-        for draft in bad {
-            let dir = tempfile::tempdir().unwrap();
-            let (runner, _) = runner(draft, AgentStatus::Completed);
+        for draft_text in bad {
+            let cwd = repo(&[("Cargo.toml", "")]);
+            let task_dir = tempfile::tempdir().unwrap();
+            let (runner, _) = runner(draft_text, AgentStatus::Completed);
             let store = MemStore::default();
-            let t = task("fix it");
-            let c = draft_in(&runner, &store, &t, &bug_workflow(), dir.path(), dir.path())
-                .await
-                .unwrap();
+            let wf = bug_workflow();
+            let c = draft(&runner, &store, &wf, cwd.path(), task_dir.path()).await;
             assert_eq!(c.outcome, "fix it");
-            assert_eq!(c.scripts, bug_workflow().contract_template.scripts);
-            assert_eq!(c.rubrics, bug_workflow().contract_template.rubric);
+            assert_eq!(c.scripts, wf.contract_template.scripts);
+            assert_eq!(c.rubrics, wf.contract_template.rubric);
             let updated = store.updated.lock().unwrap();
-            assert_eq!(updated.len(), 1, "{draft:?}");
+            assert_eq!(updated.len(), 1, "{draft_text:?}");
             assert_eq!(
                 updated[0].detail.as_deref(),
                 Some("drafting fell back to template")
@@ -380,21 +411,136 @@ scale_max = 10
 
     #[tokio::test]
     async fn crashed_agent_falls_back_even_if_it_wrote_a_draft() {
-        let dir = tempfile::tempdir().unwrap();
+        let cwd = repo(&[("Cargo.toml", "")]);
+        let task_dir = tempfile::tempdir().unwrap();
         let (runner, _) = runner(Some(VALID), AgentStatus::Crashed);
         let store = MemStore::default();
-        let c = draft_in(
+        let c = draft(
             &runner,
             &store,
-            &task("t"),
             &bug_workflow(),
-            dir.path(),
-            dir.path(),
+            cwd.path(),
+            task_dir.path(),
         )
-        .await
-        .unwrap();
+        .await;
         assert_eq!(c.scripts[0].name, "tests");
         assert_eq!(store.updated.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fallback_on_python_repo_has_no_cargo_scripts() {
+        let cwd = repo(&[("pyproject.toml", "")]);
+        let task_dir = tempfile::tempdir().unwrap();
+        let (runner, _) = runner(None, AgentStatus::Completed);
+        let store = MemStore::default();
+        let c = draft(
+            &runner,
+            &store,
+            &bug_workflow(),
+            cwd.path(),
+            task_dir.path(),
+        )
+        .await;
+        assert!(c.scripts.is_empty());
+        assert_eq!(c.rubrics.len(), 1);
+        let detail = store.updated.lock().unwrap()[0].detail.clone().unwrap();
+        assert!(
+            detail.starts_with("drafting fell back to template"),
+            "{detail}"
+        );
+        assert!(detail.contains("pyproject.toml"), "{detail}");
+        assert!(detail.contains("Cargo.toml"), "{detail}");
+    }
+
+    #[tokio::test]
+    async fn fallback_on_rust_repo_keeps_cargo_scripts() {
+        let cwd = repo(&[("Cargo.toml", "")]);
+        let task_dir = tempfile::tempdir().unwrap();
+        let (runner, _) = runner(None, AgentStatus::Completed);
+        let store = MemStore::default();
+        let c = draft(
+            &runner,
+            &store,
+            &bug_workflow(),
+            cwd.path(),
+            task_dir.path(),
+        )
+        .await;
+        assert_eq!(c.scripts[0].run[0], "cargo");
+    }
+
+    #[tokio::test]
+    async fn drafting_agent_edits_are_discarded_and_reported() {
+        let cwd = repo(&[("Cargo.toml", ""), ("a.txt", "orig")]);
+        let git = crate::git::Git::new(cwd.path());
+        let head = git.head().unwrap();
+        let task_dir = tempfile::tempdir().unwrap();
+        let name = RuntimeName("fake".into());
+        let spec = RuntimeSpec {
+            kind: RuntimeKind::Fake,
+            model: None,
+            command: None,
+            prompt: None,
+            done: None,
+        };
+        let cfg = HarnessConfig {
+            runtimes: BTreeMap::from([(name.clone(), spec)]),
+            roles: RoleMap(BTreeMap::from([(Role::Contract, vec![name.clone()])])),
+        };
+        let done = AgentOutcome {
+            status: AgentStatus::Completed,
+            final_message: String::new(),
+            cost: None,
+            exit_code: None,
+        };
+        let fake = Arc::new(FakeRuntime::new(name, vec![done]).with_edit(|req| {
+            std::fs::write(req.cwd.join("evil.txt"), "x").unwrap();
+            std::fs::write(req.cwd.join("a.txt"), "changed").unwrap();
+            let g = crate::git::Git::new(&req.cwd);
+            g.commit_all("sneaky").unwrap();
+            std::fs::write(req.cwd.join("untracked.txt"), "y").unwrap();
+        }));
+        let by = fake.clone();
+        let runner = RoleRunner::new(&cfg, move |_, _| by.clone()).unwrap();
+        let store = MemStore::default();
+        let c = draft(
+            &runner,
+            &store,
+            &bug_workflow(),
+            cwd.path(),
+            task_dir.path(),
+        )
+        .await;
+
+        assert_eq!(git.head().unwrap(), head);
+        assert!(!cwd.path().join("evil.txt").exists());
+        assert!(!cwd.path().join("untracked.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(cwd.path().join("a.txt")).unwrap(),
+            "orig"
+        );
+        assert_eq!(c.scripts, bug_workflow().contract_template.scripts);
+        let detail = store.updated.lock().unwrap()[0].detail.clone().unwrap();
+        assert!(
+            detail.contains("drafting agent modified the worktree; changes discarded"),
+            "{detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn drafted_contract_cannot_shrink_template_protections() {
+        let cwd = repo(&[("pyproject.toml", "")]);
+        let task_dir = tempfile::tempdir().unwrap();
+        let wf = Workflow::parse(
+            "p",
+            "description = \"d\"\ndefault_budget_minutes = 5\n[contract]\nprotected_paths = [\"Cargo.lock\", \"ci\"]\n",
+        )
+        .unwrap();
+        let (runner, _) = runner(Some(VALID), AgentStatus::Completed);
+        let store = MemStore::default();
+        let c = draft(&runner, &store, &wf, cwd.path(), task_dir.path()).await;
+        // VALID already protects "ci/"; "ci" must not be added twice.
+        assert_eq!(c.protected_paths, ["ci/", "Cargo.lock"]);
     }
 
     #[test]

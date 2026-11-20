@@ -220,6 +220,20 @@ mod tests {
     }
 
     #[test]
+    fn list_skips_a_malformed_user_file() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("workflows");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("broken.toml"), "nope [").unwrap();
+        let names: Vec<String> = Workflow::list_from(&dir)
+            .unwrap()
+            .into_iter()
+            .map(|w| w.name)
+            .collect();
+        assert_eq!(names, ["bug", "feature", "research"]);
+    }
+
+    #[test]
     fn malformed_workflow_is_an_error_not_a_panic() {
         let err = Workflow::parse("x", "this is not toml [").unwrap_err();
         assert!(err.to_string().contains("workflow x"), "{err}");
