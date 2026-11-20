@@ -27,6 +27,21 @@ pub struct ScriptResult {
     pub log: PathBuf,
 }
 
+impl From<&ScriptResult> for ohara_core::task::decision::ScriptResult {
+    /// Project a check result onto the persisted decision-evidence shape,
+    /// dropping the transient `failures` messages.
+    fn from(r: &ScriptResult) -> Self {
+        Self {
+            name: r.name.clone(),
+            passed: r.passed,
+            exit_code: r.exit_code,
+            tests_run: r.tests_run,
+            missing_required: r.missing_required.clone(),
+            log: r.log.clone(),
+        }
+    }
+}
+
 /// Result of running every script.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckReport {
