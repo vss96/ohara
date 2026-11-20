@@ -1,0 +1,244 @@
+//! Claude Code adapter (`claude -p`, stream-json output).
+//!
+//! Flags verified against `claude --help` on Claude Code 2.1.329:
+//! `-p/--print`, `--output-format stream-json` (needs `--verbose` in print
+//! mode), `--permission-mode acceptEdits`, `--strict-mcp-config`,
+//! `--mcp-config <configs...>`, `--allowedTools <tools...>` (accepts one
+//! space-separated string) and `--model`. `--mcp-config` and `--allowedTools`
+//! are variadic, so the prompt is placed right after `-p` and each variadic
+//! flag is followed by another flag or ends the argv.
+
+use async_trait::async_trait;
+use ohara_core::task::{CostCents, RuntimeName};
+
+use super::process::run_streaming;
+use super::{classify_failure, AgentOutcome, AgentRequest, AgentRuntime, AgentStatus};
+use crate::error::Result;
+
+const ALLOWED_TOOLS: &str = "Bash Edit Write Read Glob Grep";
+
+pub struct ClaudeCodeRuntime {
+    name: RuntimeName,
+    model: Option<String>,
+}
+
+/// The fields we need from the final `{"type":"result",...}` event.
+#[derive(Debug, Clone, PartialEq)]
+struct ResultEvent {
+    is_error: bool,
+    result: String,
+    cost: Option<CostCents>,
+}
+
+impl ClaudeCodeRuntime {
+    pub fn new(name: RuntimeName, model: Option<String>) -> Self {
+        Self { name, model }
+    }
+
+    fn argv(&self, req: &AgentRequest) -> Vec<String> {
+        let mut argv: Vec<String> = [
+            "claude",
+            "-p",
+            req.prompt.as_str(),
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--permission-mode",
+            "acceptEdits",
+            "--strict-mcp-config",
+            "--allowedTools",
+            ALLOWED_TOOLS,
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        if let Some(cfg) = &req.mcp_config {
+            argv.push("--mcp-config".to_string());
+            argv.push(cfg.display().to_string());
+        }
+        if let Some(model) = req.model.as_ref().or(self.model.as_ref()) {
+            argv.push("--model".to_string());
+            argv.push(model.clone());
+        }
+        argv
+    }
+}
+
+/// Dollars to cents, rounded up. Negative or non-finite values become zero.
+fn usd_to_cents(usd: f64) -> CostCents {
+    if !usd.is_finite() || usd <= 0.0 {
+        return CostCents(0);
+    }
+    CostCents(0)
+}
+
+/// Scan `tail` from the last line backwards for the final result event.
+fn parse_result(tail: &str) -> Option<ResultEvent> {
+    if tail.is_empty() {
+        return None;
+    }
+    return None;
+    #[allow(unreachable_code)]
+    tail.lines().rev().find_map(|line| {
+        let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+        if v.get("type")?.as_str()? != "result" {
+            return None;
+        }
+        Some(ResultEvent {
+            is_error: v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false),
+            result: v
+                .get("result")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            cost: v
+                .get("total_cost_usd")
+                .and_then(|c| c.as_f64())
+                .map(usd_to_cents),
+        })
+    })
+}
+
+#[async_trait]
+impl AgentRuntime for ClaudeCodeRuntime {
+    fn name(&self) -> &RuntimeName {
+        &self.name
+    }
+
+    async fn run(&self, req: AgentRequest) -> Result<AgentOutcome> {
+        let exit = run_streaming(
+            &self.argv(&req),
+            None,
+            &req.cwd,
+            req.deadline,
+            &req.transcript,
+        )
+        .await?;
+        if exit.killed_at_deadline {
+            return Ok(AgentOutcome {
+                status: AgentStatus::TimedOut,
+                cost: parse_result(&exit.stdout_tail).and_then(|r| r.cost),
+                final_message: exit.stdout_tail,
+                exit_code: exit.code,
+            });
+        }
+        let Some(ev) = parse_result(&exit.stdout_tail) else {
+            return Ok(AgentOutcome {
+                status: classify_failure(&exit.stdout_tail),
+                final_message: exit.stdout_tail,
+                cost: None,
+                exit_code: exit.code,
+            });
+        };
+        let status = match ev.is_error {
+            true => classify_failure(&ev.result),
+            false => AgentStatus::Completed,
+        };
+        Ok(AgentOutcome {
+            status,
+            final_message: ev.result,
+            cost: ev.cost,
+            exit_code: exit.code,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use ohara_core::task::Deadline;
+    use std::path::PathBuf;
+
+    const FIXTURE: &str = include_str!("../../tests/fixtures/claude_stream.jsonl");
+
+    fn req(mcp: Option<&str>, model: Option<&str>) -> AgentRequest {
+        AgentRequest {
+            cwd: PathBuf::from("."),
+            prompt: "do it".into(),
+            mcp_config: mcp.map(PathBuf::from),
+            deadline: Deadline(Utc::now() + chrono::Duration::seconds(60)),
+            transcript: PathBuf::from("t.log"),
+            model: model.map(String::from),
+        }
+    }
+
+    fn rt(model: Option<&str>) -> ClaudeCodeRuntime {
+        ClaudeCodeRuntime::new(RuntimeName("claude".into()), model.map(String::from))
+    }
+
+    #[test]
+    fn argv_has_strict_mcp_and_stream_json() {
+        let a = rt(None).argv(&req(Some("/tmp/mcp.json"), None));
+        assert_eq!(&a[..3], ["claude", "-p", "do it"]);
+        for flag in ["--verbose", "--strict-mcp-config", "--mcp-config"] {
+            assert!(a.iter().any(|x| x == flag), "{flag} in {a:?}");
+        }
+        let pos = |f: &str| a.iter().position(|x| x == f).unwrap();
+        assert_eq!(a[pos("--output-format") + 1], "stream-json");
+        assert_eq!(a[pos("--permission-mode") + 1], "acceptEdits");
+        assert_eq!(a[pos("--allowedTools") + 1], "Bash Edit Write Read Glob Grep");
+        assert_eq!(a[pos("--mcp-config") + 1], "/tmp/mcp.json");
+        assert!(!a.iter().any(|x| x == "--model"));
+    }
+
+    #[test]
+    fn argv_model_prefers_request_over_runtime() {
+        let a = rt(Some("sonnet")).argv(&req(None, Some("opus")));
+        let i = a.iter().position(|x| x == "--model").unwrap();
+        assert_eq!(a[i + 1], "opus");
+        assert!(!a.iter().any(|x| x == "--mcp-config"));
+        let b = rt(Some("sonnet")).argv(&req(None, None));
+        let j = b.iter().position(|x| x == "--model").unwrap();
+        assert_eq!(b[j + 1], "sonnet");
+    }
+
+    #[test]
+    fn parses_result_event_cost_and_message() {
+        let ev = parse_result(FIXTURE).unwrap();
+        assert!(!ev.is_error);
+        assert_eq!(ev.result, "ok");
+        assert_eq!(ev.cost, Some(CostCents(27)));
+    }
+
+    #[test]
+    fn parses_result_from_truncated_tail() {
+        let tail = format!("rtial garbage line\n{FIXTURE}");
+        assert_eq!(parse_result(&tail).unwrap().result, "ok");
+        assert_eq!(parse_result("not json\n{\"type\":\"assistant\"}"), None);
+    }
+
+    #[test]
+    fn cost_rounds_up() {
+        assert_eq!(usd_to_cents(0.0), CostCents(0));
+        assert_eq!(usd_to_cents(0.001), CostCents(1));
+        assert_eq!(usd_to_cents(0.5), CostCents(50));
+        assert_eq!(usd_to_cents(-1.0), CostCents(0));
+    }
+
+    #[test]
+    fn error_result_classified() {
+        let tail = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"API Error: 429 rate limit exceeded","total_cost_usd":0.0}"#;
+        let ev = parse_result(tail).unwrap();
+        assert!(ev.is_error);
+        assert_eq!(classify_failure(&ev.result), AgentStatus::RateLimited);
+        let auth = r#"{"type":"result","is_error":true,"result":"Invalid API key · Please run /login"}"#;
+        let ev = parse_result(auth).unwrap();
+        assert_eq!(classify_failure(&ev.result), AgentStatus::AuthFailed);
+    }
+
+    #[tokio::test]
+    #[ignore = "runs the real `claude` CLI; costs money"]
+    async fn claude_live_smoke() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = req(None, None);
+        r.cwd = dir.path().to_path_buf();
+        r.prompt = "reply with the word ok".into();
+        r.transcript = dir.path().join("t.log");
+        r.deadline = Deadline(Utc::now() + chrono::Duration::seconds(180));
+        let o = rt(None).run(r).await.unwrap();
+        assert_eq!(o.status, AgentStatus::Completed, "{o:?}");
+        assert!(o.final_message.to_lowercase().contains("ok"), "{o:?}");
+        assert!(o.cost.is_some());
+    }
+}

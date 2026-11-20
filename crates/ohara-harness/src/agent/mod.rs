@@ -10,6 +10,8 @@ use crate::error::Result;
 /// Scripted runtime for tests.
 #[cfg(any(test, feature = "test-util"))]
 pub mod fake;
+/// Claude Code (`claude -p`) runtime adapter.
+pub mod claude;
 /// Config-driven generic runtime.
 pub mod generic;
 /// Deadline-bound child process streaming.
