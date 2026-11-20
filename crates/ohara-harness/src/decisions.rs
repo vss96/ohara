@@ -223,13 +223,21 @@ async fn diff_names(git: &Git, from: &str, to: &str) -> Result<BTreeSet<String>>
     Ok(names.into_iter().collect())
 }
 
+/// Key of the ohara server in the MCP config written by [`mcp_config_for`].
+pub const MCP_SERVER_NAME: &str = "ohara";
+
+/// Fully qualified name Claude Code gives the `propose_decision` tool.
+pub fn propose_decision_tool_name() -> String {
+    format!("mcp__{MCP_SERVER_NAME}__propose_decision")
+}
+
 /// Write an MCP config that runs `ohara-mcp --harness-task <id>` and return
 /// its path (`<dir>/mcp.json`).
 pub fn mcp_config_for(task: &TaskId, dir: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let config = serde_json::json!({
         "mcpServers": {
-            "ohara": {
+            MCP_SERVER_NAME: {
                 "command": "ohara-mcp",
                 "args": ["--harness-task", task.to_string()],
             }
