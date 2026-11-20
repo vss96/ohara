@@ -1,0 +1,3 @@
+{"type": "system", "subtype": "init", "cwd": "/tmp/work", "session_id": "0cf0b9a4-f157-4b95-a09a-8a7350454f12", "model": "claude-opus-5-5"}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}, "session_id": "0cf0b9a4-f157-4b95-a09a-8a7350454f12"}
+{"type": "result", "subtype": "success", "is_error": false, "duration_ms": 2490, "num_turns": 1, "result": "ok", "stop_reason": "end_turn", "session_id": "0cf0b9a4-f157-4b95-a09a-8a7350454f12", "total_cost_usd": 0.2686774}
