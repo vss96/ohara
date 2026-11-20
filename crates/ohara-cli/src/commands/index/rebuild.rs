@@ -5,6 +5,23 @@
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 
+/// `--rebuild`: refuse without `--yes`, check the DB lives under
+/// `OHARA_HOME`, then delete the DB and its sidecars so the normal index
+/// flow re-runs migrations and rebuilds every row from scratch.
+pub(super) fn drop_index(yes: bool, db_path: &Path) -> Result<()> {
+    if !yes {
+        bail!(
+            "refusing to --rebuild without --yes: would delete {}.\n\
+             Re-run with `--rebuild --yes` to confirm.",
+            db_path.display(),
+        );
+    }
+    let home = ohara_core::paths::ohara_home()?;
+    assert_rebuild_safe(db_path, &home)?;
+    tracing::warn!(db = %db_path.display(), "rebuilding: deleting existing index DB");
+    delete_index_files(db_path)
+}
+
 /// Plan 13 Task 3.3 Step 2: refuse `--rebuild` unless the index DB
 /// path resolves under `OHARA_HOME`. Defensive belt against an edge
 /// case where the path resolver is replaced or `OHARA_HOME` is later

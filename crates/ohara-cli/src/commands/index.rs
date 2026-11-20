@@ -9,10 +9,10 @@ use super::provider::{resolve_provider, ProviderArg};
 use crate::resources::{apply_intensity, detect_host, pick_resources, ResourcePlan, ResourcesArg};
 
 mod daemon_route;
+mod notify;
 mod rebuild;
 mod summary;
 mod up_to_date;
-use rebuild::{assert_rebuild_safe, delete_index_files};
 use summary::{failed_commits_notice, index_summary_human, phase_timings_json};
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
@@ -214,17 +214,7 @@ pub async fn run(args: Args, no_daemon: bool) -> Result<IndexerReport> {
     // sidecars; then fall through to the normal index flow, which
     // will re-run migrations and rebuild every row from scratch.
     if args.rebuild {
-        if !args.yes {
-            bail!(
-                "refusing to --rebuild without --yes: would delete {}.\n\
-                 Re-run with `--rebuild --yes` to confirm.",
-                db_path.display(),
-            );
-        }
-        let home = ohara_core::paths::ohara_home()?;
-        assert_rebuild_safe(&db_path, &home)?;
-        tracing::warn!(db = %db_path.display(), "rebuilding: deleting existing index DB");
-        delete_index_files(&db_path)?;
+        rebuild::drop_index(args.yes, &db_path)?;
     }
 
     // Resolve the resource plan up front so the chosen values are
@@ -449,37 +439,8 @@ pub async fn run(args: Args, no_daemon: bool) -> Result<IndexerReport> {
     if let Some(notice) = failed_commits_notice(report.commits_failed as u64) {
         eprintln!("{notice}");
     }
-    notify_daemons_of_invalidation(&canonical).await;
+    notify::notify_daemons_of_invalidation(&canonical).await;
     Ok(report)
-}
-
-/// Best-effort: notify every alive daemon that `repo_path` was re-indexed.
-///
-/// Failures at any step (registry missing, daemon down, IPC error) are
-/// silently discarded — the next `list_alive` call prunes stale records.
-async fn notify_daemons_of_invalidation(repo_path: &std::path::Path) {
-    use ohara_engine::client::{registry_path, Client};
-    use ohara_engine::ipc::{Request, RequestMethod};
-    use ohara_engine::registry::Registry;
-
-    let Ok(reg_path) = registry_path() else {
-        return;
-    };
-    let Ok(reg) = Registry::open(&reg_path) else {
-        return;
-    };
-    let Ok(alive) = reg.list_alive() else {
-        return;
-    };
-    for d in alive {
-        let req = Request {
-            id: 1,
-            repo_path: Some(repo_path.to_string_lossy().to_string()),
-            method: RequestMethod::InvalidateRepo,
-        };
-        // Best-effort. Daemon down → next list_alive prunes it.
-        let _ = Client::connect(&d.socket_path).call(req).await;
-    }
 }
 
 #[cfg(test)]
