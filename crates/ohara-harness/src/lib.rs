@@ -10,5 +10,7 @@ pub mod contract;
 pub mod error;
 /// Git CLI helper for task worktrees and refs.
 pub mod git;
+/// Guard: protected paths and test weakening.
+pub mod guard;
 
 pub use error::{Error, Result};

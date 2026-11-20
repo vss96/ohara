@@ -94,6 +94,13 @@ pub struct Contract {
     pub rubrics: Vec<Rubric>,
 }
 
+/// Normalise a protected-path pattern: strip a leading `./` and a trailing
+/// `/` (so `ci/` names the directory `ci`).
+pub(crate) fn normalize_glob(g: &str) -> String {
+    let g = g.strip_prefix("./").unwrap_or(g);
+    g.trim_end_matches('/').to_string()
+}
+
 impl Contract {
     /// Parse a `contract.toml` document.
     pub fn parse(s: &str) -> Result<Self> {
@@ -104,6 +111,17 @@ impl Contract {
                 "invalid contract: script {:?} has an empty run command",
                 bad.name
             )));
+        }
+        for g in &c.protected_paths {
+            let n = normalize_glob(g);
+            if n.is_empty() || n == "." {
+                return Err(Error::Contract(format!(
+                    "invalid contract: protected path {g:?} is empty or matches everything"
+                )));
+            }
+            globset::Glob::new(&n).map_err(|e| {
+                Error::Contract(format!("invalid contract: protected path {g:?}: {e}"))
+            })?;
         }
         Ok(c)
     }
@@ -159,5 +177,17 @@ scale_max = 10
         let bad = SAMPLE.replace(r#"run = ["cargo", "test", "--workspace"]"#, "run = []");
         let err = Contract::parse(&bad).unwrap_err();
         assert!(err.to_string().contains("empty run"), "{err}");
+    }
+
+    #[test]
+    fn degenerate_protected_path_is_rejected() {
+        for bad in ["", "./", "/", "."] {
+            let doc = SAMPLE.replace(
+                r#"protected_paths = ["Cargo.lock"]"#,
+                &format!("protected_paths = [{bad:?}]"),
+            );
+            let err = Contract::parse(&doc).unwrap_err();
+            assert!(err.to_string().contains("protected path"), "{bad:?}: {err}");
+        }
     }
 }
