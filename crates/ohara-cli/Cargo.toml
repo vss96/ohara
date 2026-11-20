@@ -46,4 +46,5 @@ cuda = ["ohara-embed/cuda"]
 
 [dev-dependencies]
 tempfile.workspace = true
+async-trait.workspace = true
 ohara-harness = { path = "../ohara-harness", features = ["test-util"] }

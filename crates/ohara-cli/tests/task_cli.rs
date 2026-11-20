@@ -7,11 +7,14 @@ use std::process::Command;
 use std::sync::{Arc, OnceLock};
 
 use chrono::{DateTime, Duration, Utc};
-use ohara_cli::commands::task::approve::approve;
+use clap::{Parser, Subcommand};
+use ohara_cli::commands::task::approve::{approval_report, approve};
 use ohara_cli::commands::task::clock::{parse_duration, parse_until, Budget};
 use ohara_cli::commands::task::create::{create, CreateOpts};
 use ohara_cli::commands::task::view::{render_list, render_task};
-use ohara_core::task::{RuntimeName, TaskRecord, TaskState, TaskStore};
+use ohara_cli::commands::task::{create_flow, resolve_budget, Args as TaskArgs, TaskCmd};
+use ohara_core::task::decision::DecisionRecord;
+use ohara_core::task::{RuntimeName, StepRecord, TaskId, TaskRecord, TaskState, TaskStore};
 use ohara_harness::agent::fake::FakeRuntime;
 use ohara_harness::agent::roles::RoleRunner;
 use ohara_harness::agent::{AgentOutcome, AgentStatus};
@@ -136,6 +139,288 @@ async fn detach_leaves_task_awaiting_approval() {
     );
 }
 
+fn parse_task(argv: &[&str]) -> Result<TaskArgs, clap::Error> {
+    #[derive(Subcommand, Debug)]
+    enum C {
+        Task(TaskArgs),
+    }
+    #[derive(Parser, Debug)]
+    struct W {
+        #[command(subcommand)]
+        c: C,
+    }
+    let mut full = vec!["ohara", "task"];
+    full.extend_from_slice(argv);
+    W::try_parse_from(full).map(|w| match w.c {
+        C::Task(a) => a,
+    })
+}
+
+#[tokio::test]
+async fn detach_flow_prints_approve_hint_and_never_prompts() {
+    let _g = env_lock().lock().await;
+    let env = setup(true).await;
+    let repo = env.repo.path().to_str().unwrap().to_string();
+    let args = parse_task(&["do it", "--for", "1h", "--detach", "--repo", &repo]).unwrap();
+    assert!(args.detach);
+    let mut out = Vec::new();
+    let mut ask = |_: &str| -> anyhow::Result<String> { panic!("detach must not prompt") };
+    let t = create_flow(
+        &env.store,
+        &env.runner,
+        args,
+        Utc::now(),
+        &mut out,
+        &mut ask,
+    )
+    .await
+    .unwrap();
+    assert_eq!(t.state, TaskState::AwaitingApproval);
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.contains(&format!("ohara task approve {}", t.id)),
+        "{text}"
+    );
+    assert!(text.contains("no sandbox"), "{text}");
+    // Declining at the prompt also leaves it awaiting approval.
+    let args = parse_task(&["do it", "--for", "1h", "--repo", &repo]).unwrap();
+    let mut out = Vec::new();
+    let mut ask = |_: &str| -> anyhow::Result<String> { Ok("n".into()) };
+    let t2 = create_flow(
+        &env.store,
+        &env.runner,
+        args,
+        Utc::now(),
+        &mut out,
+        &mut ask,
+    )
+    .await
+    .unwrap();
+    assert_eq!(t2.state, TaskState::AwaitingApproval);
+}
+
+#[test]
+fn clap_surface() {
+    let list = parse_task(&["list"]).unwrap();
+    assert!(list.outcome.is_none());
+    assert!(matches!(list.command, Some(TaskCmd::List { .. })));
+    let create = parse_task(&["ship it", "--until", "23:59"]).unwrap();
+    assert_eq!(create.outcome.as_deref(), Some("ship it"));
+    assert!(create.command.is_none());
+    assert!(parse_task(&["x", "--for", "1h", "--until", "23:59"]).is_err());
+    let none = parse_task(&["x"]).unwrap();
+    let err = resolve_budget(&none, Utc::now()).unwrap_err();
+    assert!(err.to_string().contains("--for"), "{err}");
+}
+
+#[tokio::test]
+async fn approve_refuses_pending_contract_changed_since_display() {
+    let _g = env_lock().lock().await;
+    let env = setup(true).await;
+    let now = Utc::now();
+    let t = create(
+        &env.store,
+        &env.runner,
+        opts(&env, Budget::For(Duration::hours(1))),
+        now,
+    )
+    .await
+    .unwrap();
+    let pending = pending_file(&t);
+    let text = std::fs::read_to_string(&pending).unwrap();
+    std::fs::write(
+        &pending,
+        text.replace("add a retry helper", "something else"),
+    )
+    .unwrap();
+    let err = approve(&env.store, &t.id, now, None).await.unwrap_err();
+    assert!(err.to_string().contains("changed since"), "{err}");
+    let stored = env.store.get_task(&t.id).await.unwrap().unwrap();
+    assert_eq!(stored.state, TaskState::AwaitingApproval);
+    // Reviewing through --edit accepts the new text.
+    let mut keep = |_: &Path| -> anyhow::Result<()> { Ok(()) };
+    let run = approve(&env.store, &t.id, now, Some(&mut keep))
+        .await
+        .unwrap();
+    assert_eq!(run.state, TaskState::Running);
+}
+
+#[tokio::test]
+async fn approve_prints_frozen_contract_and_hash() {
+    let _g = env_lock().lock().await;
+    let env = setup(true).await;
+    let now = Utc::now();
+    let t = create(
+        &env.store,
+        &env.runner,
+        opts(&env, Budget::For(Duration::hours(1))),
+        now,
+    )
+    .await
+    .unwrap();
+    let run = approve(&env.store, &t.id, now, None).await.unwrap();
+    let hash = run.contract_hash.unwrap();
+    let (c, _) = load_frozen(&Git::new(worktree_of(&t)), &t.id, &hash).unwrap();
+    let report = approval_report(&run, &c);
+    assert!(report.contains(&c.to_toml()), "{report}");
+    assert!(report.contains(&hash.to_string()), "{report}");
+    assert!(report.contains("no sandbox"), "{report}");
+    assert!(
+        report.contains(&(now + Duration::hours(1)).to_rfc3339()[..19]),
+        "{report}"
+    );
+}
+
+/// Fails the first `update_task` that moves a task to Running.
+struct Flaky<'a> {
+    inner: &'a SqliteTaskStore,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl TaskStore for Flaky<'_> {
+    async fn create_task(&self, t: &TaskRecord) -> ohara_core::Result<()> {
+        self.inner.create_task(t).await
+    }
+    async fn update_task(&self, t: &TaskRecord) -> ohara_core::Result<()> {
+        let running = t.state == TaskState::Running;
+        if running && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(ohara_core::OhraError::Storage("injected failure".into()));
+        }
+        self.inner.update_task(t).await
+    }
+    async fn get_task(&self, id: &TaskId) -> ohara_core::Result<Option<TaskRecord>> {
+        self.inner.get_task(id).await
+    }
+    async fn list_tasks(&self) -> ohara_core::Result<Vec<TaskRecord>> {
+        self.inner.list_tasks().await
+    }
+    async fn heartbeat(&self, id: &TaskId, at: DateTime<Utc>) -> ohara_core::Result<()> {
+        self.inner.heartbeat(id, at).await
+    }
+    async fn record_step(&self, s: &StepRecord) -> ohara_core::Result<()> {
+        self.inner.record_step(s).await
+    }
+    async fn list_steps(&self, id: &TaskId) -> ohara_core::Result<Vec<StepRecord>> {
+        self.inner.list_steps(id).await
+    }
+    async fn put_decision(&self, d: &DecisionRecord) -> ohara_core::Result<()> {
+        self.inner.put_decision(d).await
+    }
+    async fn list_decisions(&self, id: &TaskId) -> ohara_core::Result<Vec<DecisionRecord>> {
+        self.inner.list_decisions(id).await
+    }
+}
+
+fn pending_file(t: &TaskRecord) -> PathBuf {
+    worktree_of(t).with_file_name("contract.pending.toml")
+}
+
+#[tokio::test]
+async fn approve_recovers_after_freeze_succeeded_but_record_update_failed() {
+    let _g = env_lock().lock().await;
+    let env = setup(true).await;
+    let t0 = Utc::now();
+    let t = create(
+        &env.store,
+        &env.runner,
+        opts(&env, Budget::For(Duration::hours(1))),
+        t0,
+    )
+    .await
+    .unwrap();
+    let flaky = Flaky {
+        inner: &env.store,
+        armed: std::sync::atomic::AtomicBool::new(true),
+    };
+    assert!(approve(&flaky, &t.id, t0, None).await.is_err());
+    let stuck = env.store.get_task(&t.id).await.unwrap().unwrap();
+    assert_eq!(stuck.state, TaskState::AwaitingApproval);
+    let run = approve(&flaky, &t.id, t0 + Duration::seconds(5), None)
+        .await
+        .unwrap();
+    assert_eq!(run.state, TaskState::Running);
+    assert_eq!(
+        run.deadline.0,
+        t0 + Duration::hours(1),
+        "frozen deadline adopted"
+    );
+    let (c, h) = load_frozen(
+        &Git::new(worktree_of(&t)),
+        &t.id,
+        &run.contract_hash.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(h, c.hash());
+
+    // A different contract under the ref is not adopted.
+    let t2 = create(
+        &env.store,
+        &env.runner,
+        opts(&env, Budget::For(Duration::hours(1))),
+        t0,
+    )
+    .await
+    .unwrap();
+    let wt = Git::new(worktree_of(&t2));
+    let other = ohara_harness::contract::Contract {
+        outcome: "tampered".into(),
+        ..c
+    };
+    ohara_harness::contract::freeze::freeze(&wt, &t2.id, &other).unwrap();
+    let err = approve(&env.store, &t2.id, t0, None).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains(&format!("refs/ohara/tasks/{}/contract", t2.id)),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn failed_create_removes_worktree_and_branch() {
+    let _g = env_lock().lock().await;
+    let mut env = setup(true).await;
+    // A runner with no contract role makes drafting fail after the worktree exists.
+    let cfg = HarnessConfig {
+        runtimes: BTreeMap::new(),
+        roles: RoleMap(BTreeMap::new()),
+    };
+    env.runner = RoleRunner::new(&cfg, |_, _| unreachable!()).unwrap();
+    let err = create(
+        &env.store,
+        &env.runner,
+        opts(&env, Budget::For(Duration::hours(1))),
+        Utc::now(),
+    )
+    .await;
+    assert!(err.is_err());
+    let git = Git::new(env.repo.path());
+    let trees = git.run(&["worktree", "list", "--porcelain"]).unwrap();
+    assert_eq!(trees.matches("worktree ").count(), 1, "{trees}");
+    let branches = git.run(&["branch", "--list", "ohara/*"]).unwrap();
+    assert!(branches.trim().is_empty(), "{branches}");
+    let tasks = env.store.list_tasks().await.unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].state, TaskState::Aborted);
+    assert!(!worktree_of(&tasks[0]).exists());
+}
+
+#[tokio::test]
+async fn refuses_ohara_home_inside_the_repo() {
+    let _g = env_lock().lock().await;
+    let env = setup(true).await;
+    std::env::set_var("OHARA_HOME", env.repo.path().join(".ohara-home"));
+    let err = create(
+        &env.store,
+        &env.runner,
+        opts(&env, Budget::For(Duration::hours(1))),
+        Utc::now(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("OHARA_HOME"), "{err}");
+}
+
 #[tokio::test]
 async fn approve_freezes_contract_and_sets_running() {
     let _g = env_lock().lock().await;
@@ -189,6 +474,16 @@ async fn until_in_past_is_error() {
     let _g = env_lock().lock().await;
     let env = setup(true).await;
     let err = parse_until("2001-01-01T00:00:00Z", Utc::now()).unwrap_err();
+    assert!(err.to_string().contains("past"), "{err}");
+    let past = Utc::now() - Duration::hours(1);
+    let err = create(
+        &env.store,
+        &env.runner,
+        opts(&env, Budget::Until(past)),
+        Utc::now(),
+    )
+    .await
+    .unwrap_err();
     assert!(err.to_string().contains("past"), "{err}");
     assert!(env.store.list_tasks().await.unwrap().is_empty());
     assert!(parse_duration("bogus").is_err());
