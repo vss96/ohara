@@ -17,6 +17,9 @@ pub const STDOUT_TAIL_CAP: usize = 64 * 1024;
 /// Grace allowed for the killed child to be reaped after the deadline.
 const REAP_GRACE: Duration = Duration::from_secs(5);
 
+/// How long to keep collecting queued output after the child is done/killed.
+const DRAIN_GRACE: Duration = Duration::from_millis(200);
+
 const READ_CHUNK: usize = 8 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,9 +31,14 @@ pub struct ProcessExit {
 
 /// Run `argv` in `cwd`, teeing stdout and stderr into `transcript`.
 ///
-/// At the deadline the child is killed (SIGKILL via `start_kill`; a graceful
-/// SIGTERM would need `unsafe`/libc, which the workspace forbids here) and the
-/// call returns with `killed_at_deadline: true`.
+/// The child runs in its own process group. At the deadline the whole group
+/// is sent SIGKILL (`kill -KILL -- -<pgid>`, so forked workers die too, with
+/// no `unsafe`), `start_kill` is the backstop for the direct child, and the
+/// call returns with `killed_at_deadline: true`. A graceful SIGTERM would need
+/// `unsafe`/libc, which the workspace forbids here. Output already in flight
+/// is drained (bounded by `DRAIN_GRACE`) before returning, and a child that
+/// exits on its own is reported with its real status even if a background
+/// grandchild still holds the pipes.
 pub async fn run_streaming(
     argv: &[String],
     stdin: Option<String>,
@@ -61,7 +69,9 @@ pub async fn run_streaming(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
+        .process_group(0)
         .spawn()?;
+    let pid = child.id();
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let mut readers = Vec::new();
@@ -84,16 +94,18 @@ pub async fn run_streaming(
     tokio::pin!(sleep);
     let mut tail: Vec<u8> = Vec::new();
     let mut killed = false;
+    let mut status = None;
     loop {
         tokio::select! {
             chunk = rx.recv() => {
                 match chunk {
-                    Some(chunk) => {
-                        log.write_all(&chunk).await?;
-                        push_tail(&mut tail, &chunk);
-                    }
+                    Some(chunk) => record(&mut log, &mut tail, &chunk).await?,
                     None => break,
                 }
+            }
+            exited = child.wait() => {
+                status = Some(exited?);
+                break;
             }
             _ = &mut sleep => {
                 killed = true;
@@ -103,27 +115,62 @@ pub async fn run_streaming(
     }
 
     if killed {
+        kill_group(pid).await;
         if let Err(e) = child.start_kill() {
             tracing::warn!("kill at deadline failed: {e}");
         }
-        for r in &readers {
-            r.abort();
-        }
     }
-    let status = match killed {
-        true => tokio::time::timeout(REAP_GRACE, child.wait()).await.ok(),
-        false => Some(child.wait().await),
+    // Collect output still in flight. Bounded, because a surviving
+    // grandchild could hold the pipes open indefinitely.
+    drain(&mut rx, &mut log, &mut tail).await?;
+    for r in &readers {
+        r.abort();
+    }
+    let status = match (status, killed) {
+        (Some(st), _) => Some(st),
+        (None, true) => tokio::time::timeout(REAP_GRACE, child.wait())
+            .await
+            .ok()
+            .transpose()?,
+        (None, false) => Some(child.wait().await?),
     };
     log.flush().await?;
-    let code = match status {
-        Some(res) => res?.code(),
-        None => None,
-    };
+    let code = status.and_then(|st| st.code());
     Ok(ProcessExit {
         code,
         stdout_tail: String::from_utf8_lossy(&tail).into_owned(),
         killed_at_deadline: killed,
     })
+}
+
+async fn record(log: &mut tokio::fs::File, tail: &mut Vec<u8>, chunk: &[u8]) -> Result<()> {
+    log.write_all(chunk).await?;
+    push_tail(tail, chunk);
+    Ok(())
+}
+
+async fn drain(
+    rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
+    log: &mut tokio::fs::File,
+    tail: &mut Vec<u8>,
+) -> Result<()> {
+    let end = tokio::time::Instant::now() + DRAIN_GRACE;
+    while let Ok(Some(chunk)) = tokio::time::timeout_at(end, rx.recv()).await {
+        record(log, tail, &chunk).await?;
+    }
+    Ok(())
+}
+
+async fn kill_group(pid: Option<u32>) {
+    let Some(pid) = pid else { return };
+    let target = format!("-{pid}");
+    let res = Command::new("kill")
+        .args(["-KILL", "--", &target])
+        .output()
+        .await;
+    if let Err(e) = res {
+        tracing::warn!("kill of process group {pid} failed: {e}");
+    }
 }
 
 fn until(deadline: Deadline) -> Duration {
