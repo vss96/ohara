@@ -146,6 +146,30 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    #[derive(clap::Parser)]
+    struct Wrapper {
+        #[command(flatten)]
+        args: Args,
+    }
+
+    fn parsed(flags: &[&str]) -> Args {
+        use clap::Parser;
+        let argv = std::iter::once("ohara").chain(flags.iter().copied());
+        Wrapper::parse_from(argv).args
+    }
+
+    #[test]
+    fn an_explicit_resource_plan_counts_as_tuning() {
+        assert!(!explicit_tuning(&parsed(&["--incremental"])));
+        assert!(!explicit_tuning(&parsed(&["--resources", "auto"])));
+        for plan in ["conservative", "aggressive"] {
+            assert!(
+                explicit_tuning(&parsed(&["--incremental", "--resources", plan])),
+                "--resources {plan} must stay in-process; the daemon would drop it"
+            );
+        }
+    }
+
     #[test]
     fn routes_to_daemon_only_for_plain_incremental_with_a_live_daemon() {
         let sock = Some(PathBuf::from("/tmp/s"));

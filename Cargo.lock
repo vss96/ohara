@@ -2559,6 +2559,7 @@ dependencies = [
  "git2",
  "ohara-core",
  "proptest",
+ "tempfile",
  "tokio",
  "tracing",
  "tree-sitter",

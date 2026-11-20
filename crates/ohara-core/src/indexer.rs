@@ -1630,6 +1630,66 @@ mod phase_timing_tests {
     }
 
     #[tokio::test]
+    async fn legacy_watermark_does_not_advance_past_failed_commits() {
+        let storage = zero_storage();
+        let source = WatermarkOnlySource { poison: Some("c1") };
+        let indexer = Indexer::new(
+            storage.clone(),
+            std::sync::Arc::new(FakeEmbedder {
+                sleep: std::time::Duration::ZERO,
+            }),
+        );
+        let repo_id = RepoId::from_parts("first", "/tmp/legacy-failed");
+        let report = indexer
+            .run(&repo_id, Arc::new(source), no_symbols())
+            .await
+            .expect("run");
+        assert_eq!(report.commits_failed, 1);
+        assert_eq!(
+            storage.last_indexed.lock().unwrap().clone(),
+            None,
+            "a run with failed commits must leave the watermark alone"
+        );
+    }
+
+    /// Implements only the required `CommitSource` methods; can poison one sha.
+    struct WatermarkOnlySource {
+        poison: Option<&'static str>,
+    }
+
+    #[async_trait]
+    impl CommitSource for WatermarkOnlySource {
+        async fn list_commits(&self, _: Option<&str>) -> Result<Vec<CommitMeta>> {
+            Ok(vec![fake_commit("c1"), fake_commit("c2")])
+        }
+        async fn hunks_for_commit(&self, sha: &str) -> Result<Vec<Hunk>> {
+            if self.poison == Some(sha) {
+                return Err(crate::OhraError::Git(format!("poisoned {sha}")));
+            }
+            Ok(vec![fake_hunk(sha, "+x\n")])
+        }
+    }
+
+    #[tokio::test]
+    async fn default_hiding_walks_refuse_what_they_cannot_honour() {
+        let s = WatermarkOnlySource { poison: None };
+        assert!(s.list_commits_hiding(&[]).await.is_ok());
+        assert!(s.list_commits_hiding(&["a".repeat(40)]).await.is_ok());
+        assert!(
+            s.list_commits_hiding(&["a".repeat(40), "b".repeat(40)])
+                .await
+                .is_err(),
+            "a second hide tip must not be silently dropped"
+        );
+        assert!(
+            s.list_commits_from_hiding(&"f".repeat(40), &[])
+                .await
+                .is_err(),
+            "an explicit start commit must not be silently replaced by HEAD"
+        );
+    }
+
+    #[tokio::test]
     async fn indexer_hides_every_indexed_tip_and_records_the_worktree_head() {
         let slot1 = WorktreeKey::linked("slot-1").unwrap();
         let tips = Arc::new(FakeTips::with(vec![

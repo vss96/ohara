@@ -176,6 +176,11 @@ impl GitSymbolSource {
             repo_path: path.as_ref().to_path_buf(),
         })
     }
+
+    /// Extract the snapshot of commit `sha` rather than the live HEAD.
+    pub fn open_at<P: AsRef<Path>>(path: P, _sha: &ohara_core::CommitSha) -> Result<Self> {
+        Self::open(path)
+    }
 }
 
 #[async_trait::async_trait]
@@ -224,6 +229,45 @@ impl SymbolSource for GitSymbolSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Commit `body` as `a.rs` on HEAD of the repo at `dir`.
+    fn commit_a_rs(repo: &git2::Repository, body: &str) -> git2::Oid {
+        let dir = repo.workdir().unwrap().to_path_buf();
+        std::fs::write(dir.join("a.rs"), body).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("a.rs")).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("a", "a@a").unwrap();
+        let parents: Vec<git2::Commit> = repo
+            .head()
+            .ok()
+            .and_then(|h| h.peel_to_commit().ok())
+            .into_iter()
+            .collect();
+        let parents: Vec<&git2::Commit> = parents.iter().collect();
+        repo.commit(Some("HEAD"), &sig, &sig, "m", &tree, &parents)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn open_at_extracts_the_given_commit_not_the_live_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        let first = commit_a_rs(&repo, "fn alpha() {}\n");
+        commit_a_rs(&repo, "fn beta() {}\n");
+        let sha = ohara_core::CommitSha::parse(&first.to_string()).unwrap();
+        let source = GitSymbolSource::open_at(dir.path(), &sha).unwrap();
+        let names: Vec<String> = source
+            .extract_head_symbols()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert!(names.contains(&"alpha".to_string()), "{names:?}");
+        assert!(!names.contains(&"beta".to_string()), "{names:?}");
+    }
 
     #[test]
     fn extract_atomic_symbols_dispatches_javascript_extensions() {

@@ -1778,3 +1778,41 @@ async fn blame_cache_is_not_reused_after_head_moves_to_the_same_blob() {
         "blame for the old HEAD must not be served from the cache"
     );
 }
+
+// ---- PR #138 review: the HEAD-symbol snapshot follows its owner's HEAD ----
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn main_reset_to_an_ancestor_refreshes_the_head_symbol_snapshot() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let main = tempfile::tempdir().unwrap();
+    build_test_repo(main.path());
+    let repo = git2::Repository::open(main.path()).unwrap();
+    let a = repo.head().unwrap().peel_to_commit().unwrap().id();
+    commit_file(&repo, "b.rs", "fn two() {}\n", "second");
+    index_checkout(main.path()).await;
+    assert!(head_symbol_names(main.path())
+        .await
+        .contains(&"two".to_string()));
+
+    // HEAD moves back to an ancestor: nothing new to walk, but the
+    // snapshot still describes B.
+    hard_reset(&repo, a);
+    let (_rec, engine) = recording_engine();
+    let out = engine
+        .ensure_indexed(main.path(), &sha_of(a))
+        .await
+        .expect("ensure_indexed");
+    assert!(
+        out.indexed,
+        "the snapshot owner must refresh a stale snapshot"
+    );
+    let names = head_symbol_names(main.path()).await;
+    assert!(
+        !names.contains(&"two".to_string()),
+        "stale snapshot: {names:?}"
+    );
+    assert_eq!(tip_of(main.path()).await, Some(a.to_string()));
+}
