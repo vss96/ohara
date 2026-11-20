@@ -94,7 +94,9 @@ pub async fn run_streaming_env(
     if let Some(vars) = env {
         command.env_clear().envs(vars.iter().map(|(k, v)| (k, v)));
     }
-    let mut child = command.spawn()?;
+    let mut child = command
+        .spawn()
+        .map_err(|e| Error::Spawn(format!("{program}: {e}")))?;
     let pid = child.id();
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();

@@ -39,6 +39,8 @@ pub struct Settlement<'a> {
     pub runtime: &'a RuntimeName,
     /// Directory assumption-check output is logged under.
     pub logs: &'a Path,
+    /// No new check starts after this; remaining decisions are rejected.
+    pub deadline: Deadline,
 }
 
 /// Settle or reject every `Proposed` decision of `round`.
@@ -65,6 +67,7 @@ pub async fn settle_round(
         scripts,
         runtime,
         logs,
+        deadline,
     } = *at;
     let all = store.list_decisions(&task.id).await?;
     let proposed: Vec<&DecisionRecord> = all
@@ -86,7 +89,11 @@ pub async fn settle_round(
     };
     for d in proposed {
         let mut next = d.clone();
-        match rejection(d, &known, git.cwd(), logs).await {
+        let verdict = match Utc::now() >= deadline.0 {
+            true => Some("settlement deadline exceeded".to_string()),
+            false => rejection(d, &known, git.cwd(), logs, deadline).await?,
+        };
+        match verdict {
             Some(reason) => {
                 next.state = DecisionState::Rejected;
                 next.rejected_reason = Some(reason);
@@ -115,19 +122,24 @@ async fn rejection(
     known: &HashSet<DecisionId>,
     cwd: &Path,
     logs: &Path,
-) -> Option<String> {
+    deadline: Deadline,
+) -> Result<Option<String>> {
     if let Some(p) = d.parent_ids.iter().find(|p| !known.contains(p)) {
-        return Some(format!("parent decision {} does not exist", p.0));
+        return Ok(Some(format!("parent decision {} does not exist", p.0)));
     }
     for (i, a) in d.assumptions.iter().enumerate() {
         let Some(argv) = &a.check else {
             continue;
         };
-        if let Err(why) = run_check(argv, cwd, &logs.join(format!("{}-{i}.log", d.id.0))).await {
-            return Some(format!("assumption {:?} failed: {why}", a.text));
+        if Utc::now() >= deadline.0 {
+            return Ok(Some("settlement deadline exceeded".to_string()));
+        }
+        let log = logs.join(format!("{}-{i}.log", d.id.0));
+        if let Err(why) = run_check(argv, cwd, &log, deadline).await? {
+            return Ok(Some(format!("assumption {:?} failed: {why}", a.text)));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Environment variables an assumption check may see.
@@ -140,32 +152,48 @@ const CHECK_ENV: [&str; 6] = [
     "RUSTUP_HOME",
 ];
 
-/// The minimal environment checks run with: [`CHECK_ENV`] entries that are set.
-fn check_env() -> Vec<(String, String)> {
+/// The minimal environment checks run with, read through `lookup`.
+fn check_env_from(lookup: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
     CHECK_ENV
         .iter()
-        .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
+        .filter_map(|k| lookup(k).map(|v| (k.to_string(), v)))
         .collect()
 }
 
 /// Run one assumption check: argv only (no shell), cwd fixed to the task
-/// worktree, minimal environment, killed at [`CHECK_TIMEOUT`], output teed to
-/// `log`.
+/// worktree, minimal environment, killed at [`CHECK_TIMEOUT`] or the
+/// settlement `deadline` (whichever is first), output teed to `log`.
+///
+/// The outer `Err` is an infrastructure failure (log I/O) that must not be
+/// blamed on the agent; the inner `Err` is the check failing, including a
+/// program that cannot be started.
 ///
 /// Assumption checks are agent-authored. Phase 1 runs them with the agent's
 /// own authority (worktree cwd, minimal env, deadline). Sandboxing is
 /// required before distribution (spec §12a sandbox gate).
-async fn run_check(argv: &[String], cwd: &Path, log: &Path) -> std::result::Result<(), String> {
-    let deadline = Deadline(Utc::now() + CHECK_TIMEOUT);
-    let env = check_env();
-    let exit = run_streaming_env(argv, None, cwd, deadline, log, Some(&env))
-        .await
-        .map_err(|e| format!("could not run check: {e}"))?;
-    match (exit.killed_at_deadline, exit.code) {
+async fn run_check(
+    argv: &[String],
+    cwd: &Path,
+    log: &Path,
+    settle_deadline: Deadline,
+) -> Result<std::result::Result<(), String>> {
+    if let Some(parent) = log.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    // The runner appends; each check's log must hold only its own output.
+    tokio::fs::File::create(log).await?;
+    let deadline = Deadline((Utc::now() + CHECK_TIMEOUT).min(settle_deadline.0));
+    let env = check_env_from(|k| std::env::var(k).ok());
+    let exit = match run_streaming_env(argv, None, cwd, deadline, log, Some(&env)).await {
+        Ok(exit) => exit,
+        Err(Error::Spawn(why)) => return Ok(Err(format!("could not start check: {why}"))),
+        Err(e) => return Err(e),
+    };
+    Ok(match (exit.killed_at_deadline, exit.code) {
         (true, _) => Err("timed out".to_string()),
         (false, Some(0)) => Ok(()),
         (false, code) => Err(format!("exited with {code:?}")),
-    }
+    })
 }
 
 /// Ids of earlier settled decisions whose checkpoint diff shares a file with
@@ -438,6 +466,7 @@ mod tests {
                 scripts: &scripts,
                 runtime: &rt,
                 logs: logs.path(),
+                deadline: far(),
             },
         )
         .await
@@ -486,6 +515,7 @@ mod tests {
                 scripts: &[],
                 runtime: &rt,
                 logs: logs.path(),
+                deadline: far(),
             },
         )
         .await
@@ -536,6 +566,7 @@ mod tests {
                 scripts: &[],
                 runtime: &rt,
                 logs: logs.path(),
+                deadline: far(),
             },
         )
         .await
@@ -554,6 +585,7 @@ mod tests {
                 scripts: &[],
                 runtime: &rt,
                 logs: logs.path(),
+                deadline: far(),
             },
         )
         .await
@@ -573,6 +605,7 @@ mod tests {
                 scripts: &[],
                 runtime: &rt,
                 logs: logs.path(),
+                deadline: far(),
             },
         )
         .await
@@ -609,6 +642,7 @@ mod tests {
                 scripts: &[],
                 runtime: &rt,
                 logs: logs.path(),
+                deadline: far(),
             },
         )
         .await
@@ -626,21 +660,41 @@ mod tests {
         assert_eq!(state(shell_text.id), DecisionState::Rejected);
     }
 
+    fn far() -> Deadline {
+        Deadline(Utc::now() + chrono::Duration::seconds(300))
+    }
+
+    #[test]
+    fn check_env_passes_only_the_allow_list() {
+        let parent = [
+            ("PATH", "/bin"),
+            ("SECRET_TOKEN", "hunter2"),
+            ("HOME", "/h"),
+        ];
+        let env = check_env_from(|k| {
+            parent
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.to_string())
+        });
+        let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(names, ["PATH", "HOME"]);
+    }
+
     #[tokio::test]
     async fn check_runs_with_minimal_env() {
-        // Only this test sets the variable, and it never reads it back.
-        std::env::set_var("OHARA_TEST_SECRET_T10", "hunter2");
+        // cargo sets CARGO_MANIFEST_DIR for every test process, so the parent
+        // already has a variable outside the allow-list; no set_var needed.
+        assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
         let (dir, git, base) = repo();
         let ckpt = commit_file(&dir, &git, "a.txt");
         let task = task_record(&base);
         let store = MemStore::default();
-        // Passes only when the secret is NOT visible; PATH still resolves `sh`.
         let hidden = proposed(
             &task,
             1,
-            vec![argv(&["sh", "-c", "test -z \"$OHARA_TEST_SECRET_T10\""])],
+            vec![argv(&["sh", "-c", "test -z \"$CARGO_MANIFEST_DIR\""])],
         );
-        // Passes only when PATH was passed through.
         let has_path = proposed(&task, 1, vec![argv(&["sh", "-c", "test -n \"$PATH\""])]);
         store.put_decision(&hidden).await.unwrap();
         store.put_decision(&has_path).await.unwrap();
@@ -657,6 +711,7 @@ mod tests {
                 scripts: &[],
                 runtime: &rt,
                 logs: logs.path(),
+                deadline: far(),
             },
         )
         .await
@@ -668,6 +723,124 @@ mod tests {
                 rejected: 0
             }
         );
+    }
+
+    #[tokio::test]
+    async fn settlement_deadline_rejects_the_rest() {
+        let (dir, git, base) = repo();
+        let ckpt = commit_file(&dir, &git, "a.txt");
+        let task = task_record(&base);
+        let store = MemStore::default();
+        let rt = RuntimeName("claude".into());
+        let logs = tempfile::tempdir().unwrap();
+
+        // Already past: nothing starts, everything is rejected.
+        let d = proposed(&task, 1, vec![argv(&["true"])]);
+        store.put_decision(&d).await.unwrap();
+        let past = Deadline(Utc::now() - chrono::Duration::seconds(1));
+        let report = settle_round(
+            &store,
+            &git,
+            &task,
+            &Settlement {
+                round: 1,
+                checkpoint_sha: &ckpt,
+                scripts: &[],
+                runtime: &rt,
+                logs: logs.path(),
+                deadline: past,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            report,
+            SettleReport {
+                settled: 0,
+                rejected: 1
+            }
+        );
+        let got = &store.list_decisions(&task.id).await.unwrap()[0];
+        assert_eq!(
+            got.rejected_reason.as_deref(),
+            Some("settlement deadline exceeded")
+        );
+    }
+
+    #[tokio::test]
+    async fn deadline_during_a_slow_check_cuts_off_later_decisions() {
+        let (dir, git, base) = repo();
+        let ckpt = commit_file(&dir, &git, "a.txt");
+        let task = task_record(&base);
+        let store = MemStore::default();
+        let slow = proposed(&task, 1, vec![argv(&["sleep", "30"])]);
+        let later = proposed(&task, 1, vec![argv(&["true"])]);
+        store.put_decision(&slow).await.unwrap();
+        store.put_decision(&later).await.unwrap();
+        let rt = RuntimeName("claude".into());
+        let logs = tempfile::tempdir().unwrap();
+        let started = std::time::Instant::now();
+        let report = settle_round(
+            &store,
+            &git,
+            &task,
+            &Settlement {
+                round: 1,
+                checkpoint_sha: &ckpt,
+                scripts: &[],
+                runtime: &rt,
+                logs: logs.path(),
+                deadline: Deadline(Utc::now() + chrono::Duration::milliseconds(500)),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(
+            report,
+            SettleReport {
+                settled: 0,
+                rejected: 2
+            }
+        );
+        let all = store.list_decisions(&task.id).await.unwrap();
+        let reason = |id| {
+            all.iter()
+                .find(|d| d.id == id)
+                .unwrap()
+                .rejected_reason
+                .clone()
+        };
+        assert_eq!(
+            reason(later.id).as_deref(),
+            Some("settlement deadline exceeded")
+        );
+        assert!(reason(slow.id).unwrap().contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn check_log_is_truncated_and_io_errors_propagate() {
+        let (dir, _git, _base) = repo();
+        let logs = tempfile::tempdir().unwrap();
+        let log = logs.path().join("c.log");
+        std::fs::write(&log, "stale output").unwrap();
+        let echo = argv(&["echo", "fresh"]);
+        run_check(&echo, dir.path(), &log, far())
+            .await
+            .unwrap()
+            .unwrap();
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.contains("fresh") && !text.contains("stale"), "{text}");
+
+        // A log path whose parent is a regular file is infrastructure failure.
+        let blocker = logs.path().join("file");
+        std::fs::write(&blocker, "x").unwrap();
+        let bad = blocker.join("c.log");
+        assert!(run_check(&echo, dir.path(), &bad, far()).await.is_err());
+        // A missing program is the check failing, not infrastructure.
+        let missing = argv(&["ohara-no-such-binary-xyz"]);
+        let out = run_check(&missing, dir.path(), &log, far()).await.unwrap();
+        assert!(out.is_err());
     }
 
     fn server_entry(path: &Path) -> serde_json::Value {
