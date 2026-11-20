@@ -33,6 +33,11 @@ struct ResultEvent {
     cost: Option<CostCents>,
 }
 
+/// Classify an `is_error` result event (currently by its text only).
+fn classify_error_result(result: &str, _tail: &str) -> AgentStatus {
+    classify_failure(result)
+}
+
 impl ClaudeCodeRuntime {
     pub fn new(name: RuntimeName, model: Option<String>) -> Self {
         Self { name, model }
@@ -140,7 +145,7 @@ impl AgentRuntime for ClaudeCodeRuntime {
             });
         };
         let status = match ev.is_error {
-            true => classify_failure(&ev.result),
+            true => classify_error_result(&ev.result, &exit.stdout_tail),
             false => AgentStatus::Completed,
         };
         Ok(AgentOutcome {
@@ -263,6 +268,17 @@ mod tests {
             r#"{"type":"result","is_error":true,"result":"Invalid API key · Please run /login"}"#;
         let ev = parse_result(auth).unwrap();
         assert_eq!(classify_failure(&ev.result), AgentStatus::AuthFailed);
+    }
+
+    #[test]
+    fn error_result_with_generic_text_uses_tail_for_classification() {
+        let tail = "stderr: HTTP 429 rate limit exceeded";
+        assert_eq!(classify_error_result("", tail), AgentStatus::RateLimited);
+        assert_eq!(
+            classify_error_result("error", tail),
+            AgentStatus::RateLimited
+        );
+        assert_eq!(classify_error_result("error", "boom"), AgentStatus::Crashed);
     }
 
     #[tokio::test]
