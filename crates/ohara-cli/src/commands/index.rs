@@ -9,6 +9,7 @@ use super::provider::{resolve_provider, ProviderArg};
 use crate::resources::{apply_intensity, detect_host, pick_resources, ResourcePlan, ResourcesArg};
 
 mod daemon_route;
+mod force;
 mod notify;
 mod rebuild;
 mod summary;
@@ -276,12 +277,13 @@ pub async fn run(args: Args, no_daemon: bool) -> Result<IndexerReport> {
     // commit/hunk history are untouched — only HEAD-snapshot symbols are
     // re-extracted. `force` wins over `incremental`.
     if args.force {
-        match id.worktree.is_main() {
-            true => {
+        let tips = ohara_core::TipStore::indexed_tips(storage.as_ref(), &repo_id).await?;
+        match force::force_note(&id.worktree, &tips) {
+            None => {
                 tracing::info!("force: clearing existing HEAD symbol rows");
                 storage.clear_head_symbols(&repo_id).await?;
             }
-            false => println!("HEAD symbols follow the main worktree; not clearing them here"),
+            Some(note) => println!("{note}"),
         }
     }
 
