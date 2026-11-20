@@ -50,6 +50,13 @@ impl SqliteStorage {
     pub fn write_pool(&self) -> &Pool {
         &self.write_pool
     }
+
+    /// Names in the HEAD-symbol snapshot, sorted. The index file holds
+    /// one repository, so this is that repository's snapshot. For
+    /// diagnostics and tests; retrieval goes through the `Storage` lanes.
+    pub async fn head_symbol_names(&self) -> CoreResult<Vec<String>> {
+        with_conn(&self.pool, crate::tables::symbol::names).await
+    }
 }
 
 pub(crate) async fn with_conn<F, T>(pool: &deadpool_sqlite::Pool, f: F) -> ohara_core::Result<T>

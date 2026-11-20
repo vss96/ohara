@@ -86,6 +86,13 @@ pub fn replace_all(c: &mut Connection, symbols: &[Symbol]) -> Result<()> {
     Ok(())
 }
 
+/// Every symbol name in the HEAD snapshot, sorted by name.
+pub fn names(c: &mut Connection) -> Result<Vec<String>> {
+    let mut stmt = c.prepare("SELECT name FROM symbol ORDER BY name")?;
+    let rows = stmt.query_map([], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
+}
+
 /// BM25 over `fts_symbol_name`, joined to the touched-file's hunk +
 /// commit metadata so we return the same `HunkHit` shape as the dense
 /// vector lane. SQLite's `bm25(<table>)` function only resolves inside
