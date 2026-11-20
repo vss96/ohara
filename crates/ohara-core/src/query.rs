@@ -1,5 +1,6 @@
 use crate::storage::HunkId;
 use crate::types::{Provenance, RepoId};
+use crate::worktree::{TipStore, WorktreeKey};
 use crate::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -104,6 +105,11 @@ pub fn reciprocal_rank_fusion(rankings: &[Vec<HunkId>], k: u32) -> Vec<HunkId> {
 #[async_trait]
 pub trait CommitsBehind: Send + Sync {
     async fn count_since(&self, since: Option<&str>) -> Result<u64>;
+    /// Count commits reachable from HEAD but from none of the `hide` tips.
+    /// Default falls back to the first hide entry as a watermark.
+    async fn count_hiding(&self, hide: &[String]) -> Result<u64> {
+        self.count_since(hide.first().map(String::as_str)).await
+    }
 }
 
 /// Combine the storage-side index status with the git-side commits-behind
@@ -121,6 +127,35 @@ pub async fn compute_index_status(
         .await?;
     Ok(IndexStatus {
         last_indexed_commit: st.last_indexed_commit,
+        commits_behind_head: n,
+        indexed_at: st.indexed_at,
+    })
+}
+
+/// Per-worktree variant of [`compute_index_status`] (plan-33).
+///
+/// `last_indexed_commit` is `worktree`'s own tip when it has one, else the
+/// main checkout's tip. `commits_behind_head` counts commits reachable from
+/// this worktree's HEAD but from none of the repo's indexed tips, so a
+/// worktree whose HEAD is already covered by another worktree's index
+/// reports zero without reindexing.
+pub async fn compute_worktree_index_status(
+    storage: &dyn crate::storage::StorageStatus,
+    tips: &dyn TipStore,
+    repo_id: &RepoId,
+    worktree: &WorktreeKey,
+    behind: &dyn CommitsBehind,
+) -> Result<IndexStatus> {
+    let st = storage.get_index_status(repo_id).await?;
+    let all = tips.indexed_tips(repo_id).await?;
+    let own = all
+        .iter()
+        .find(|t| &t.worktree == worktree)
+        .map(|t| t.sha.as_str().to_string());
+    let hide: Vec<String> = all.iter().map(|t| t.sha.as_str().to_string()).collect();
+    let n = behind.count_hiding(&hide).await?;
+    Ok(IndexStatus {
+        last_indexed_commit: own.or(st.last_indexed_commit),
         commits_behind_head: n,
         indexed_at: st.indexed_at,
     })

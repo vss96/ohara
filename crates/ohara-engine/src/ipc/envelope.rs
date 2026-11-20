@@ -14,6 +14,18 @@ pub enum RequestMethod {
     InvalidateRepo,
     IndexStatus,
     Metrics,
+    /// Block until `sha` is covered by an indexed tip (plan-33). Result:
+    /// [`crate::EnsureIndexedOutcome`].
+    EnsureIndexed {
+        /// Full 40-hex commit SHA.
+        sha: String,
+    },
+    /// Queue this worktree's HEAD for background indexing. Result:
+    /// `{"queued": true}`; returns before any indexing runs.
+    IndexTip,
+    /// Delete indexed commits nothing reaches any more. Result:
+    /// [`crate::PruneOutcome`].
+    PruneUnreachable,
 }
 
 /// A single IPC request frame.
@@ -95,6 +107,46 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         let back: Request = serde_json::from_str(&json).unwrap();
         assert!(matches!(back.method, RequestMethod::FindPattern(_)));
+    }
+
+    #[test]
+    fn ensure_indexed_round_trip_uses_snake_case_tag() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let wire = serde_json::json!({
+            "id": 1,
+            "repo_path": "/r",
+            "method": "ensure_indexed",
+            "params": {"sha": sha},
+        });
+        let req: Request = serde_json::from_value(wire.clone()).unwrap();
+        assert!(
+            matches!(&req.method, RequestMethod::EnsureIndexed { sha: s } if s == sha),
+            "decoded {:?}",
+            req.method
+        );
+        assert_eq!(serde_json::to_value(&req).unwrap(), wire);
+    }
+
+    #[test]
+    fn index_tip_and_prune_round_trip() {
+        for (method, tag) in [
+            (RequestMethod::IndexTip, "index_tip"),
+            (RequestMethod::PruneUnreachable, "prune_unreachable"),
+        ] {
+            let req = Request {
+                id: 3,
+                repo_path: Some("/r".into()),
+                method,
+            };
+            let json = serde_json::to_value(&req).unwrap();
+            assert_eq!(json["method"], tag);
+            let back: Request = serde_json::from_value(json).unwrap();
+            assert_eq!(
+                serde_json::to_value(&back).unwrap()["method"],
+                tag,
+                "{tag} must round-trip"
+            );
+        }
     }
 
     #[test]

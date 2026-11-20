@@ -334,14 +334,15 @@ async fn rerank_pool_sweep() -> Result<()> {
         embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
         workers: None,
     };
-    ohara_cli::commands::index::run(index_args)
+    ohara_cli::commands::index::run(index_args, true)
         .await
         .context("index eval fixture")?;
 
     // Step 3: build storage + embedder + reranker once. They're identical
     // across pool sizes; only RankingWeights changes.
-    let (repo_id, _, _) =
-        ohara_cli::commands::resolve_repo_id(&fixture).context("resolve repo id")?;
+    let repo_id = ohara_cli::commands::resolve_repo_id(&fixture)
+        .context("resolve repo id")?
+        .repo_id;
     let db_path = ohara_cli::commands::index_db_path(&repo_id).context("resolve db path")?;
     let (storage, embedder, reranker) = build_pipeline_components(db_path).await?;
 

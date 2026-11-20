@@ -393,16 +393,48 @@ pub trait StorageWrite: Send + Sync {
     /// hunk replaces the row rather than appending a duplicate.
     async fn put_hunks(&self, repo_id: &RepoId, records: &[HunkRecord]) -> Result<()>;
 
-    /// Persist HEAD-snapshot symbols extracted by the AST chunker.
-    /// Caller is responsible for deciding whether to clear the previous
-    /// snapshot first (see `clear_head_symbols`).
+    /// Persist one commit and all of its hunks as a single unit: either
+    /// the commit row and every hunk land, or nothing does. The indexer's
+    /// resume skip treats a stored commit row as "done", so a commit row
+    /// without its hunks would never be repaired.
+    ///
+    /// The default calls [`Self::put_commit`] then [`Self::put_hunks`] and
+    /// is NOT atomic; it exists for in-memory test fakes. Durable backends
+    /// MUST override it with one transaction.
+    async fn put_commit_with_hunks(
+        &self,
+        repo_id: &RepoId,
+        commit: &CommitRecord,
+        hunks: &[HunkRecord],
+    ) -> Result<()> {
+        self.put_commit(repo_id, commit).await?;
+        self.put_hunks(repo_id, hunks).await
+    }
+
+    /// Replace the repo's HEAD-symbol snapshot with `symbols` (extracted
+    /// by the AST chunker). Deleting the previous snapshot (and its FTS
+    /// mirrors) and inserting the new set happen in one transaction, so
+    /// repeated calls never accumulate duplicates and readers never see
+    /// an empty snapshot in between. Any recorded provenance is cleared
+    /// with it (see [`Self::put_head_symbols_at`]).
     async fn put_head_symbols(&self, repo_id: &RepoId, symbols: &[Symbol]) -> Result<()>;
 
-    /// Drop all HEAD symbol rows for `repo_id` (and the matching
-    /// `vec_symbol` / `fts_symbol_name` rows). Used by `ohara index
-    /// --force` before re-extracting symbols so the AST sibling-merge
-    /// chunker can repopulate without duplicates.
-    async fn clear_head_symbols(&self, repo_id: &RepoId) -> Result<()>;
+    /// [`Self::put_head_symbols`] that also records `provenance` (which
+    /// worktree's run wrote the snapshot, at which commit) so a later run
+    /// can tell whether the snapshot describes its HEAD
+    /// ([`crate::worktree::head_symbols_stale`]).
+    ///
+    /// The default drops the provenance and exists for in-memory test
+    /// fakes. Durable backends MUST override it and write the snapshot and
+    /// its provenance in one transaction.
+    async fn put_head_symbols_at(
+        &self,
+        repo_id: &RepoId,
+        symbols: &[Symbol],
+        _provenance: &crate::worktree::HeadSymbolSnapshot,
+    ) -> Result<()> {
+        self.put_head_symbols(repo_id, symbols).await
+    }
 }
 
 /// Facts about the index itself: freshness watermark, stamped component

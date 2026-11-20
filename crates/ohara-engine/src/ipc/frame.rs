@@ -17,6 +17,30 @@ pub async fn read_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<u
         .read_u32()
         .await
         .map_err(|e| EngineError::Internal(format!("ipc read length: {e}")))?;
+    read_body(reader, len).await
+}
+
+/// Like [`read_frame`], but `Ok(None)` when the peer closes the connection
+/// before sending any byte (e.g. a connect-only reachability probe).
+pub async fn read_frame_or_eof<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Option<Vec<u8>>> {
+    let mut header = [0u8; 4];
+    let n = reader
+        .read(&mut header)
+        .await
+        .map_err(|e| EngineError::Internal(format!("ipc read length: {e}")))?;
+    if n == 0 {
+        return Ok(None);
+    }
+    reader
+        .read_exact(&mut header[n..])
+        .await
+        .map_err(|e| EngineError::Internal(format!("ipc read length: {e}")))?;
+    read_body(reader, u32::from_be_bytes(header))
+        .await
+        .map(Some)
+}
+
+async fn read_body<R: AsyncReadExt + Unpin>(reader: &mut R, len: u32) -> Result<Vec<u8>> {
     if len > MAX_FRAME_BYTES {
         return Err(EngineError::Internal(format!(
             "ipc frame too large: {len} bytes (max {MAX_FRAME_BYTES})"
@@ -70,6 +94,26 @@ mod tests {
         write_frame(&mut writer, payload).await.unwrap();
         let received = read_frame(&mut reader).await.unwrap();
         assert_eq!(received, payload);
+    }
+
+    #[tokio::test]
+    async fn connect_and_close_without_a_frame_is_not_an_error() {
+        let (writer, mut reader) = tokio::io::duplex(64);
+        drop(writer);
+        assert!(read_frame_or_eof(&mut reader).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn read_frame_or_eof_reads_a_frame_and_rejects_a_truncated_header() {
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        write_frame(&mut writer, b"ping").await.unwrap();
+        let got = read_frame_or_eof(&mut reader).await.unwrap();
+        assert_eq!(got.as_deref(), Some(&b"ping"[..]));
+
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        writer.write_all(&[0, 0]).await.unwrap();
+        drop(writer);
+        assert!(read_frame_or_eof(&mut reader).await.is_err());
     }
 
     #[tokio::test]

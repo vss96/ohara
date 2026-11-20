@@ -5,21 +5,27 @@ use std::sync::{Arc, Mutex};
 
 use ohara_core::explain::BlameRange;
 use ohara_core::types::RepoId;
+use ohara_core::WorktreeKey;
 
 #[derive(PartialEq, Eq, Hash, Clone)]
 struct Key {
     repo_id: RepoId,
+    /// Blame depends on the worktree's history, not just the blob: the same
+    /// content can be last touched by different commits in two worktrees.
+    worktree: WorktreeKey,
     file: String,
     content_hash: String,
 }
 
-/// LRU cache keyed by `(RepoId, file, content_hash)` → shared blame result.
+/// LRU cache keyed by `(RepoId, WorktreeKey, file, content_hash)` → shared
+/// blame result.
 ///
 /// Thread-safe: wraps the inner [`LruCache`] in a [`Mutex`] so it can be
 /// shared across async tasks via `Arc<BlameCache>`.
 ///
-/// `content_hash` is the HEAD blob OID (40-char hex) for the file, which
-/// changes whenever the file's content changes, providing natural invalidation.
+/// `content_hash` is the HEAD commit plus the file's HEAD blob OID
+/// (`<commit>:<blob>`): it changes whenever the file's content or the
+/// checkout's history changes, providing natural invalidation.
 /// `invalidate_repo` drops every entry whose `RepoId` matches the argument.
 pub struct BlameCache {
     inner: Mutex<LruCache<Key, Arc<Vec<BlameRange>>>>,
@@ -44,17 +50,19 @@ impl BlameCache {
         }
     }
 
-    /// Look up `(repo_id, file, content_hash)` in the cache; returns `None`
-    /// on a miss or poisoned lock.
+    /// Look up `(repo_id, worktree, file, content_hash)` in the cache;
+    /// returns `None` on a miss or poisoned lock.
     pub fn get(
         &self,
         repo_id: &RepoId,
+        worktree: &WorktreeKey,
         file: &str,
         content_hash: &str,
     ) -> Option<Arc<Vec<BlameRange>>> {
         let mut g = self.inner.lock().ok()?;
         g.get(&Key {
             repo_id: repo_id.clone(),
+            worktree: worktree.clone(),
             file: file.into(),
             content_hash: content_hash.into(),
         })
@@ -74,6 +82,7 @@ impl BlameCache {
     pub fn put(
         &self,
         repo_id: RepoId,
+        worktree: WorktreeKey,
         file: String,
         content_hash: String,
         value: Arc<Vec<BlameRange>>,
@@ -82,6 +91,7 @@ impl BlameCache {
             g.put(
                 Key {
                     repo_id,
+                    worktree,
                     file,
                     content_hash,
                 },
@@ -119,12 +129,30 @@ mod tests {
         RepoId::from_parts(s, "/x")
     }
 
+    fn wt() -> WorktreeKey {
+        WorktreeKey::main()
+    }
+
+    #[test]
+    fn different_worktrees_do_not_collide() {
+        let c = BlameCache::new(8);
+        c.put(
+            rid("a"),
+            wt(),
+            "f.rs".into(),
+            "h".into(),
+            std::sync::Arc::new(vec![]),
+        );
+        let slot = WorktreeKey::linked("slot-1").unwrap();
+        assert!(c.get(&rid("a"), &slot, "f.rs", "h").is_none());
+    }
+
     #[test]
     fn put_then_get_returns_arc_eq() {
         let c = BlameCache::new(8);
         let v = std::sync::Arc::new(vec![]);
-        c.put(rid("a"), "f.rs".into(), "abc".into(), v.clone());
-        let got = c.get(&rid("a"), "f.rs", "abc").expect("hit");
+        c.put(rid("a"), wt(), "f.rs".into(), "abc".into(), v.clone());
+        let got = c.get(&rid("a"), &wt(), "f.rs", "abc").expect("hit");
         assert!(std::sync::Arc::ptr_eq(&got, &v));
     }
 
@@ -133,25 +161,28 @@ mod tests {
         let c = BlameCache::new(2);
         c.put(
             rid("a"),
+            wt(),
             "f.rs".into(),
             "h1".into(),
             std::sync::Arc::new(vec![]),
         );
         c.put(
             rid("a"),
+            wt(),
             "f.rs".into(),
             "h2".into(),
             std::sync::Arc::new(vec![]),
         );
         c.put(
             rid("a"),
+            wt(),
             "f.rs".into(),
             "h3".into(),
             std::sync::Arc::new(vec![]),
         ); // evicts h1
-        assert!(c.get(&rid("a"), "f.rs", "h1").is_none());
-        assert!(c.get(&rid("a"), "f.rs", "h2").is_some());
-        assert!(c.get(&rid("a"), "f.rs", "h3").is_some());
+        assert!(c.get(&rid("a"), &wt(), "f.rs", "h1").is_none());
+        assert!(c.get(&rid("a"), &wt(), "f.rs", "h2").is_some());
+        assert!(c.get(&rid("a"), &wt(), "f.rs", "h3").is_some());
     }
 
     #[test]
@@ -159,11 +190,12 @@ mod tests {
         let c = BlameCache::new(8);
         c.put(
             rid("a"),
+            wt(),
             "x.rs".into(),
             "h".into(),
             std::sync::Arc::new(vec![]),
         );
-        assert!(c.get(&rid("a"), "y.rs", "h").is_none());
+        assert!(c.get(&rid("a"), &wt(), "y.rs", "h").is_none());
     }
 
     #[test]
@@ -171,33 +203,36 @@ mod tests {
         let c = BlameCache::new(8);
         c.put(
             rid("a"),
+            wt(),
             "f.rs".into(),
             "h".into(),
             std::sync::Arc::new(vec![]),
         );
         c.put(
             rid("b"),
+            wt(),
             "f.rs".into(),
             "h".into(),
             std::sync::Arc::new(vec![]),
         );
         c.invalidate_repo(&rid("a"));
-        assert!(c.get(&rid("a"), "f.rs", "h").is_none());
-        assert!(c.get(&rid("b"), "f.rs", "h").is_some());
+        assert!(c.get(&rid("a"), &wt(), "f.rs", "h").is_none());
+        assert!(c.get(&rid("b"), &wt(), "f.rs", "h").is_some());
     }
 
     #[test]
     fn hits_count_only_cache_hits() {
         let c = BlameCache::new(8);
-        assert!(c.get(&rid("a"), "f.rs", "h").is_none());
+        assert!(c.get(&rid("a"), &wt(), "f.rs", "h").is_none());
         assert_eq!(c.hits(), 0);
         c.put(
             rid("a"),
+            wt(),
             "f.rs".into(),
             "h".into(),
             std::sync::Arc::new(vec![]),
         );
-        c.get(&rid("a"), "f.rs", "h").expect("hit");
+        c.get(&rid("a"), &wt(), "f.rs", "h").expect("hit");
         assert_eq!(c.hits(), 1);
     }
 }

@@ -42,13 +42,20 @@ pub struct Args {
 /// [`ohara_core::explain::explain_change`]. Used both as the direct standalone
 /// path and as the fallback when the daemon is unavailable or disabled.
 async fn run_standalone(canonical: &Path, q: ExplainQuery) -> Result<ExplainResult> {
-    let (repo_id, _, _) = super::resolve_repo_id(canonical)?;
+    let repo_id = super::resolve_repo_id(canonical)?.repo_id;
     let db_path = super::index_db_path(&repo_id)?;
     let storage =
         Arc::new(timed_phase("storage_open", ohara_storage::SqliteStorage::open(&db_path)).await?);
     let blamer = timed_phase("blamer_open", async { Blamer::open(canonical) }).await?;
-    let (hits, meta) =
-        ohara_core::explain::explain_change(storage.as_ref(), &blamer, &repo_id, &q).await?;
+    // Same git fallback as the daemon path, so `--no-daemon` answers alike.
+    let (hits, meta) = ohara_core::explain::explain_change_with_fallback(
+        storage.as_ref(),
+        &blamer,
+        Some(&blamer),
+        &repo_id,
+        &q,
+    )
+    .await?;
     Ok(ExplainResult { hits, meta })
 }
 

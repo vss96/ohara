@@ -1,22 +1,28 @@
 //! `RetrievalEngine` — long-lived holder of the embedder, reranker,
 //! and per-repo handles.
 
+use crate::cache::AncestryCache;
 use crate::cache::EmbeddingCache;
 use crate::cache::RepoCaches;
 use crate::error::EngineError;
-use crate::handle::RepoHandle;
+use crate::handle::{RepoHandle, RepoStore};
+use crate::index_service::{EnsureIndexedOutcome, IndexService, PruneOutcome};
 use ohara_core::embed::RerankProvider;
 use ohara_core::explain::ExplainQuery;
 use ohara_core::index_metadata::CompatibilityStatus;
 use ohara_core::query::{PatternQuery, ResponseMeta};
 use ohara_core::types::RepoId;
+use ohara_core::CommitSha;
 use ohara_core::EmbeddingProvider;
 use std::collections::HashMap;
-use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
+
+mod open;
+pub(crate) mod visibility;
 
 /// Result returned by [`RetrievalEngine::find_pattern`].
 ///
@@ -45,14 +51,28 @@ pub struct ExplainResult {
 pub struct RetrievalEngine {
     embedder: Arc<dyn EmbeddingProvider>,
     reranker: Arc<dyn RerankProvider>,
-    repos: RwLock<HashMap<RepoId, Arc<RepoHandle>>>,
+    /// One store per repository, shared by all of its worktrees.
+    stores: RwLock<HashMap<RepoId, Arc<RepoStore>>>,
+    /// One handle per worktree, keyed by canonical worktree path.
+    repos: RwLock<HashMap<PathBuf, Arc<RepoHandle>>>,
+    /// Bumped by `invalidate_repo` under the `stores` write lock, so an
+    /// open that raced it does not cache a store it already evicted.
+    store_generation: AtomicU64,
     /// Repo-independent: keyed by `(model_id, query text)`.
     embed_cache: EmbeddingCache,
     /// Per-repo caches (meta + blame), invalidated as one group.
     repo_caches: RepoCaches,
+    /// One ancestry cache for every repo (keys hold full SHAs).
+    ancestry: Arc<AncestryCache>,
+    /// Counts `find_pattern` calls that needed the ancestry filter.
+    ancestry_filtered_count: AtomicU64,
+    /// Perf-harness switch: when set, `find_pattern` skips visibility.
+    visibility_bypass: AtomicBool,
     /// Unix-second timestamp of the last dispatched request.
     /// Written by [`Self::touch`]; read by [`Self::idle_for`].
     last_request_at: AtomicU64,
+    /// Plan-33 daemon-side indexing; serialises jobs per repository.
+    index_service: IndexService,
 }
 
 impl RetrievalEngine {
@@ -65,10 +85,16 @@ impl RetrievalEngine {
         Self {
             embedder,
             reranker,
+            stores: RwLock::new(HashMap::new()),
             repos: RwLock::new(HashMap::new()),
+            store_generation: AtomicU64::new(0),
             embed_cache: EmbeddingCache::new(model_id, 256),
             repo_caches: RepoCaches::new(),
+            ancestry: Arc::new(AncestryCache::default()),
+            ancestry_filtered_count: AtomicU64::new(0),
+            visibility_bypass: AtomicBool::new(false),
             last_request_at: AtomicU64::new(now_unix),
+            index_service: IndexService::default(),
         }
     }
 
@@ -86,14 +112,33 @@ impl RetrievalEngine {
 
     /// Return the duration since the last request was dispatched.
     ///
-    /// Saturates at zero if the clock appears to have gone backwards.
+    /// Zero while an index or prune job runs, so the idle watchdog never
+    /// exits mid-job. Saturates at zero if the clock went backwards.
     pub fn idle_for(&self) -> Duration {
+        if self.index_service.is_busy() {
+            return Duration::ZERO;
+        }
         let last = self.last_request_at.load(Ordering::Relaxed);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(last);
         Duration::from_secs(now.saturating_sub(last))
+    }
+
+    /// Whether an index or prune job is running.
+    pub(crate) fn has_running_job(&self) -> bool {
+        self.index_service.is_busy()
+    }
+
+    /// The idle watchdog's decision: `true` when the engine has been idle
+    /// for at least `idle`, in which case the daemon shuts down. Decided
+    /// under the job admission lock; once `true`, every index or prune job
+    /// that tries to start is refused, so none starts between the decision
+    /// and the stop.
+    pub fn begin_idle_shutdown(&self, idle: Duration) -> bool {
+        self.index_service
+            .decide_shutdown(|| self.idle_for() >= idle)
     }
 
     /// Returns the number of times `find_pattern` served `ResponseMeta`
@@ -146,72 +191,19 @@ impl RetrievalEngine {
         self.reranker.clone()
     }
 
-    /// Open (or return cached) per-repo handle. Cheap on hit; on miss it
-    /// canonicalises the path, derives the repo id, opens SQLite, builds the
-    /// retriever, and caches the result.
-    pub async fn open_repo(&self, repo_path: impl AsRef<Path>) -> crate::Result<Arc<RepoHandle>> {
-        let canonical = std::fs::canonicalize(repo_path.as_ref())
-            .map_err(|e| EngineError::Internal(format!("canonicalize: {e}")))?;
-
-        let walker = ohara_git::GitWalker::open(&canonical)
-            .map_err(|e| EngineError::Git(format!("open walker: {e}")))?;
-        let first = walker
-            .first_commit_sha()
-            .map_err(|e| EngineError::Git(format!("first_commit_sha: {e}")))?;
-        let repo_id = RepoId::from_parts(&first, &canonical.to_string_lossy());
-
-        // Fast path — handle already cached.
-        if let Some(existing) = self.repos.read().await.get(&repo_id).cloned() {
-            return Ok(existing);
-        }
-
-        // Slow path: open storage, build retriever, build blamer.
-        tracing::debug!(repo_id = ?repo_id, path = %canonical.display(), "open_repo cache miss");
-        let db_path = ohara_core::paths::index_db_path(&repo_id)
-            .map_err(|e| EngineError::Internal(format!("index_db_path: {e}")))?;
-
-        let storage: Arc<dyn ohara_core::Storage> = Arc::new(
-            ohara_storage::SqliteStorage::open(&db_path)
-                .await
-                .map_err(|e| EngineError::Storage(format!("open: {e}")))?,
-        );
-
-        let retriever = ohara_core::Retriever::new(storage.clone(), self.embedder.clone())
-            .with_reranker(self.reranker.clone());
-
-        let blamer = Arc::new(
-            ohara_git::Blamer::open(&canonical)
-                .map_err(|e| EngineError::Git(format!("blamer open: {e}")))?,
-        );
-
-        let handle = Arc::new(RepoHandle {
-            repo_id: repo_id.clone(),
-            repo_path: canonical,
-            storage,
-            retriever,
-            blamer,
-        });
-
-        // Re-check under write lock to avoid double-open race.
-        let mut w = self.repos.write().await;
-        if let Some(existing) = w.get(&repo_id).cloned() {
-            return Ok(existing);
-        }
-        w.insert(repo_id, handle.clone());
-        Ok(handle)
-    }
-
     /// Serve `ResponseMeta` from [`MetaCache`] when a fresh entry exists
     /// (TTL = 5 s). On a miss the meta is computed via `compose_response_meta`
     /// and stored before returning.
     async fn cached_meta(&self, handle: &RepoHandle) -> crate::Result<ResponseMeta> {
-        if let Some(cached) = self.repo_caches.meta.get(&handle.repo_id) {
+        if let Some(cached) = self.repo_caches.meta.get(&handle.repo_id, &handle.worktree) {
             return Ok(cached);
         }
         let fresh = compose_response_meta(handle).await?;
-        self.repo_caches
-            .meta
-            .put(handle.repo_id.clone(), fresh.clone());
+        self.repo_caches.meta.put(
+            handle.repo_id.clone(),
+            handle.worktree.clone(),
+            fresh.clone(),
+        );
         Ok(fresh)
     }
 
@@ -231,6 +223,16 @@ impl RetrievalEngine {
         repo_path: impl AsRef<Path>,
         query: PatternQuery,
     ) -> crate::Result<FindPatternResult> {
+        // An unborn HEAD has no history to search (and no repo identity yet).
+        let Some(head) = visibility::read_head(repo_path.as_ref()).await? else {
+            return Ok(FindPatternResult {
+                hits: Vec::new(),
+                meta: ResponseMeta {
+                    hint: Some("HEAD has no commits yet; nothing to search".into()),
+                    ..ResponseMeta::default()
+                },
+            });
+        };
         let handle = self.open_repo(repo_path).await?;
         let meta = self.cached_meta(&handle).await?;
         // Plan-29: refuse before touching the vector index. KNN against
@@ -243,11 +245,9 @@ impl RetrievalEngine {
             });
         }
         let now_unix = chrono::Utc::now().timestamp();
-        let (hits, _profile) = handle
-            .retriever
-            .find_pattern_with_profile(&handle.repo_id, &query, now_unix)
-            .await
-            .map_err(EngineError::from)?;
+        let hits = self
+            .retrieve_visible(&handle, &head, &query, now_unix)
+            .await?;
         Ok(FindPatternResult { hits, meta })
     }
 
@@ -259,35 +259,65 @@ impl RetrievalEngine {
         self.cached_meta(&handle).await
     }
 
+    /// Blocks until `sha` is covered by some indexed tip, running one
+    /// incremental index of this worktree if needed. `indexed == false`
+    /// means it already was. Never indexes a repo from scratch.
+    pub async fn ensure_indexed(
+        &self,
+        repo_path: impl AsRef<Path>,
+        sha: &CommitSha,
+    ) -> crate::Result<EnsureIndexedOutcome> {
+        self.index_service
+            .ensure_indexed(self, repo_path.as_ref(), sha)
+            .await
+    }
+
+    /// Index this worktree's HEAD now (used by the queue worker and by
+    /// [`Self::ensure_indexed`]).
+    pub async fn index_worktree(
+        &self,
+        repo_path: impl AsRef<Path>,
+    ) -> crate::Result<EnsureIndexedOutcome> {
+        self.index_service
+            .index_worktree(self, repo_path.as_ref())
+            .await
+    }
+
+    /// Delete indexed commits no ref or worktree HEAD reaches and the tips
+    /// of linked worktrees that no longer exist.
+    pub async fn prune_unreachable(
+        &self,
+        repo_path: impl AsRef<Path>,
+    ) -> crate::Result<PruneOutcome> {
+        self.index_service
+            .prune_unreachable(self, repo_path.as_ref())
+            .await
+    }
+
+    /// Queue this worktree's HEAD for indexing. Never blocks on indexing.
+    /// A worktree already waiting in the queue is not queued twice.
+    /// Returns `false` when coalesced with a waiting entry.
+    pub fn enqueue_index_tip(&self, repo_path: PathBuf) -> bool {
+        self.index_service.enqueue(repo_path)
+    }
+
+    /// Drain the queue until `stop` is cancelled. One job at a time; a
+    /// failed job is logged once and dropped. A started job runs to
+    /// completion — `stop` is only observed between jobs.
+    pub async fn run_index_queue(self: Arc<Self>, stop: tokio_util::sync::CancellationToken) {
+        self.index_service.run_queue(&self, stop).await
+    }
+
     /// Ask the reranker to drop its session when idle for at least `idle`.
     /// Returns `true` when a session was dropped (plan-29 tiered unload).
     pub async fn unload_idle_reranker(&self, idle: std::time::Duration) -> bool {
         self.reranker.unload_if_idle(idle).await
     }
 
-    /// Evict the cached [`RepoHandle`] and every per-repo cache entry
-    /// ([`RepoCaches`]: meta + blame) for `repo_path`.
-    ///
-    /// After this call, the next [`open_repo`][Self::open_repo] for the same
-    /// path will re-open storage and rebuild the handle from scratch.
-    pub async fn invalidate_repo(&self, repo_path: impl AsRef<Path>) -> crate::Result<()> {
-        let canonical = std::fs::canonicalize(repo_path.as_ref())
-            .map_err(|e| EngineError::Internal(format!("canonicalize: {e}")))?;
-        let walker = ohara_git::GitWalker::open(&canonical)
-            .map_err(|e| EngineError::Git(format!("open walker: {e}")))?;
-        let first = walker
-            .first_commit_sha()
-            .map_err(|e| EngineError::Git(format!("first_commit_sha: {e}")))?;
-        let repo_id = RepoId::from_parts(&first, &canonical.to_string_lossy());
-        self.repos.write().await.remove(&repo_id);
-        self.repo_caches.invalidate_repo(&repo_id);
-        Ok(())
-    }
-
     /// Blame-based explain for a file + line range in a repo's git history.
     ///
     /// Opens (or reuses) the per-repo handle. On a BlameCache hit (same
-    /// HEAD blob OID for the file), skips `Blamer::blame_range` and feeds
+    /// HEAD commit and blob OID for the file), skips `Blamer::blame_range` and feeds
     /// the cached `Vec<BlameRange>` directly to the hydrator. On a miss,
     /// calls the blamer, caches the result, then hydrates.
     ///
@@ -299,22 +329,24 @@ impl RetrievalEngine {
         query: ExplainQuery,
     ) -> crate::Result<ExplainResult> {
         let handle = self.open_repo(repo_path).await?;
-        let content_hash_opt = compute_head_content_hash(&handle.repo_path, &query.file);
+        let content_hash_opt = head_blame_key(&handle.repo_path, &query.file);
 
         // Cache hit path — skip Blamer entirely.
         if let Some(ref hash) = content_hash_opt {
-            if let Some(cached) =
-                self.repo_caches
-                    .blame
-                    .get(&handle.repo_id, &query.file, hash.as_str())
-            {
+            if let Some(cached) = self.repo_caches.blame.get(
+                &handle.repo_id,
+                &handle.worktree,
+                &query.file,
+                hash.as_str(),
+            ) {
                 tracing::debug!(file = %query.file, "explain_change: BlameCache hit");
                 let hydrated = ohara_core::explain::hydrator::hydrate_blame_results(
                     ohara_core::explain::hydrator::HydrateInputs {
-                        storage: &*handle.storage,
+                        storage: &*handle.store.storage,
                         blame_ranges: (*cached).clone(),
                         query: &query,
                         repo_id: &handle.repo_id,
+                        git_fallback: Some(handle.blamer.as_ref()),
                     },
                 )
                 .await
@@ -334,6 +366,7 @@ impl RetrievalEngine {
         if let Some(hash) = content_hash_opt {
             self.repo_caches.blame.put(
                 handle.repo_id.clone(),
+                handle.worktree.clone(),
                 query.file.clone(),
                 hash.as_str().to_string(),
                 Arc::new(raw_ranges.clone()),
@@ -342,10 +375,11 @@ impl RetrievalEngine {
 
         let hydrated = ohara_core::explain::hydrator::hydrate_blame_results(
             ohara_core::explain::hydrator::HydrateInputs {
-                storage: &*handle.storage,
+                storage: &*handle.store.storage,
                 blame_ranges: raw_ranges,
                 query: &query,
                 repo_id: &handle.repo_id,
+                git_fallback: Some(handle.blamer.as_ref()),
             },
         )
         .await
@@ -357,6 +391,10 @@ impl RetrievalEngine {
 /// Compute a fresh [`ResponseMeta`] for `handle` by querying storage for
 /// index status and metadata, then assessing compatibility.
 ///
+/// Freshness is per worktree (plan-33): `last_indexed_commit` is this
+/// worktree's tip (else the main tip) and `commits_behind_head` counts
+/// commits reachable from this worktree's HEAD but from no indexed tip.
+///
 /// Called on a MetaCache miss inside [`RetrievalEngine::find_pattern`].
 ///
 /// Issue #40: query-time callers don't know the user's `--embed-cache`
@@ -365,14 +403,20 @@ impl RetrievalEngine {
 /// internally-consistent `--embed-cache=diff` index then assesses as
 /// `Compatible`, not `NeedsRebuild`. Mirrors the same override in
 /// `ohara-cli`'s `status` command.
-async fn compose_response_meta(handle: &RepoHandle) -> crate::Result<ResponseMeta> {
+pub(crate) async fn compose_response_meta(handle: &RepoHandle) -> crate::Result<ResponseMeta> {
     let behind = ohara_git::GitCommitsBehind::open(&handle.repo_path)
         .map_err(|e| EngineError::Git(format!("commits_behind open: {e}")))?;
-    let st =
-        ohara_core::query::compute_index_status(handle.storage.as_ref(), &handle.repo_id, &behind)
-            .await
-            .map_err(EngineError::from)?;
+    let st = ohara_core::query::compute_worktree_index_status(
+        handle.store.storage.as_ref(),
+        handle.store.tips.as_ref(),
+        &handle.repo_id,
+        &handle.worktree,
+        &behind,
+    )
+    .await
+    .map_err(EngineError::from)?;
     let stored = handle
+        .store
         .storage
         .get_index_metadata(&handle.repo_id)
         .await
@@ -390,20 +434,24 @@ async fn compose_response_meta(handle: &RepoHandle) -> crate::Result<ResponseMet
     })
 }
 
-/// Compute the git blob OID for `file` at HEAD in `repo_path`.
+/// The blame cache key for `file` at HEAD in `repo_path`: the HEAD commit
+/// plus the file's blob OID. The blob alone is not enough: after a reset,
+/// rebase or branch switch the same content can be last touched by other
+/// commits.
 ///
 /// Returns `None` when the file is absent from HEAD (deleted file,
 /// wrong path) or when the git2 repository can't be opened. Callers
-/// treat `None` as "skip the cache, let the Blamer decide".
-fn compute_head_content_hash(
-    repo_path: &std::path::Path,
-    file: &str,
-) -> Option<ohara_core::types::ContentHash> {
+/// fall through to a direct blame without caching in that case.
+fn head_blame_key(repo_path: &std::path::Path, file: &str) -> Option<String> {
     let repo = git2::Repository::open(repo_path).ok()?;
-    let head = repo.head().ok()?;
-    let tree = head.peel_to_tree().ok()?;
-    let entry = tree.get_path(std::path::Path::new(file)).ok()?;
-    Some(ohara_core::types::ContentHash::from_blob_oid(entry.id()))
+    let commit = repo.head().ok()?.peel_to_commit().ok()?;
+    let entry = commit
+        .tree()
+        .ok()?
+        .get_path(std::path::Path::new(file))
+        .ok()?;
+    let blob = ohara_core::types::ContentHash::from_blob_oid(entry.id());
+    Some(format!("{}:{}", commit.id(), blob.as_str()))
 }
 
 /// Assemble `ExplainResult` from a `HydratedBlame` + the original query.

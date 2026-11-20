@@ -11,6 +11,7 @@ ohara-storage = { path = "../ohara-storage" }
 ohara-embed = { path = "../ohara-embed" }
 ohara-git = { path = "../ohara-git" }
 ohara-parse = { path = "../ohara-parse" }
+async-trait.workspace = true
 blake3.workspace = true
 chrono.workspace = true
 git2.workspace = true
@@ -33,3 +34,5 @@ proptest.workspace = true
 default = []
 coreml = ["ohara-embed/coreml"]
 cuda = ["ohara-embed/cuda"]
+# Exposes `RetrievalEngine::set_visibility_bypass` for tests/perf harnesses.
+perf-hooks = []

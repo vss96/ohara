@@ -1,6 +1,7 @@
 //! Unix-socket listener + per-request dispatch for the `ohara serve` daemon.
 
-use std::path::Path;
+use ohara_core::CommitSha;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
 use tokio_util::sync::CancellationToken;
@@ -8,7 +9,7 @@ use tracing::{error, info, warn};
 
 use crate::engine::RetrievalEngine;
 use crate::error::EngineError;
-use crate::ipc::{read_frame, write_frame};
+use crate::ipc::{read_frame_or_eof, write_frame};
 use crate::ipc::{ErrorCode, ErrorPayload, Request, RequestMethod, Response};
 
 /// Bind a Unix socket at `socket_path`, accept connections until `stop` is
@@ -21,6 +22,19 @@ pub async fn serve_unix(
     engine: Arc<RetrievalEngine>,
     socket_path: &Path,
     stop: CancellationToken,
+) -> crate::Result<()> {
+    serve_unix_with_grace(engine, socket_path, stop, SHUTDOWN_GRACE).await
+}
+
+/// How long shutdown waits for in-flight requests before aborting them.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// [`serve_unix`] with an explicit shutdown grace period (test seam).
+pub(crate) async fn serve_unix_with_grace(
+    engine: Arc<RetrievalEngine>,
+    socket_path: &Path,
+    stop: CancellationToken,
+    grace: std::time::Duration,
 ) -> crate::Result<()> {
     if socket_path.exists() {
         #[cfg(unix)]
@@ -62,13 +76,34 @@ pub async fn serve_unix(
             }
         }
     }
-    // Drain in-flight handlers with a bounded 5-second grace period so
-    // requests that are mid-flight are not abruptly aborted.
+    // Drain in-flight handlers with a bounded grace period so requests
+    // that are mid-flight are not abruptly aborted.
     let drain = async { while handlers.join_next().await.is_some() {} };
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), drain).await;
+    if tokio::time::timeout(grace, drain).await.is_err() {
+        drain_running_jobs(&mut handlers, &engine).await;
+    }
     let _ = std::fs::remove_file(socket_path);
     Ok(())
 }
+
+/// Past the grace period, keep draining while an index or prune job runs.
+/// Aborting its handler would drop the job lock and the indexer future while
+/// the job's spawned workers keep writing; letting the job finish ends them
+/// cleanly. Handlers left once no job runs are aborted with the set.
+async fn drain_running_jobs(handlers: &mut tokio::task::JoinSet<()>, engine: &RetrievalEngine) {
+    if engine.has_running_job() {
+        info!("waiting for a running index or prune job before shutting down");
+    }
+    while engine.has_running_job() {
+        let next = tokio::time::timeout(JOB_POLL, handlers.join_next()).await;
+        if let Ok(None) = next {
+            return;
+        }
+    }
+}
+
+/// How often shutdown re-checks whether a job is still running.
+const JOB_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
 #[cfg(unix)]
 fn set_socket_perms(path: &Path) -> crate::Result<()> {
@@ -82,7 +117,11 @@ async fn handle_connection(
     mut conn: UnixStream,
     stop: CancellationToken,
 ) -> crate::Result<()> {
-    let body = read_frame(&mut conn).await?;
+    // A connect-only probe (`Client::reachable`) closes before any frame.
+    let Some(body) = read_frame_or_eof(&mut conn).await? else {
+        tracing::debug!("connection closed before the first frame");
+        return Ok(());
+    };
     let req: Request = serde_json::from_slice(&body)
         .map_err(|e| EngineError::Internal(format!("decode request: {e}")))?;
     engine.touch();
@@ -100,74 +139,76 @@ async fn handle_connection(
 
 async fn dispatch(engine: &RetrievalEngine, req: Request) -> Response {
     let id = req.id;
+    let repo_path = req.repo_path;
     let result: crate::Result<serde_json::Value> = match req.method {
         RequestMethod::Ping => Ok(serde_json::json!({"pong": true})),
         RequestMethod::Shutdown => Ok(serde_json::json!({"shutting_down": true})),
         RequestMethod::FindPattern(q) => {
-            let path = match req.repo_path {
-                Some(p) => p,
-                None => {
-                    return error_response(
-                        id,
-                        ErrorCode::Internal,
-                        "find_pattern requires repo_path",
-                    )
-                }
+            let path = match require_repo_path(id, repo_path, "find_pattern") {
+                Ok(p) => p,
+                Err(resp) => return resp,
             };
-            match engine.find_pattern(&path, q).await {
-                Ok(r) => serde_json::to_value(&r).map_err(|e| EngineError::Internal(e.to_string())),
-                Err(e) => Err(e),
-            }
+            engine.find_pattern(&path, q).await.and_then(to_value)
         }
         RequestMethod::ExplainChange(q) => {
-            let path = match req.repo_path {
-                Some(p) => p,
-                None => {
-                    return error_response(
-                        id,
-                        ErrorCode::Internal,
-                        "explain_change requires repo_path",
-                    )
-                }
+            let path = match require_repo_path(id, repo_path, "explain_change") {
+                Ok(p) => p,
+                Err(resp) => return resp,
             };
-            match engine.explain_change(&path, q).await {
-                Ok(r) => serde_json::to_value(&r).map_err(|e| EngineError::Internal(e.to_string())),
-                Err(e) => Err(e),
-            }
+            engine.explain_change(&path, q).await.and_then(to_value)
         }
         RequestMethod::InvalidateRepo => {
-            let path = match req.repo_path {
-                Some(p) => p,
-                None => {
-                    return error_response(
-                        id,
-                        ErrorCode::Internal,
-                        "invalidate_repo requires repo_path",
-                    )
-                }
+            let path = match require_repo_path(id, repo_path, "invalidate_repo") {
+                Ok(p) => p,
+                Err(resp) => return resp,
             };
-            match engine.invalidate_repo(&path).await {
-                Ok(()) => Ok(serde_json::json!({"invalidated": true})),
-                Err(e) => Err(e),
-            }
+            engine
+                .invalidate_repo(&path)
+                .await
+                .map(|()| serde_json::json!({"invalidated": true}))
         }
         RequestMethod::IndexStatus => {
-            let path = match req.repo_path {
-                Some(p) => p,
-                None => {
-                    return error_response(
-                        id,
-                        ErrorCode::Internal,
-                        "index_status requires repo_path",
-                    )
-                }
+            let path = match require_repo_path(id, repo_path, "index_status") {
+                Ok(p) => p,
+                Err(resp) => return resp,
             };
-            match engine.index_status(&path).await {
-                Ok(m) => serde_json::to_value(&m).map_err(|e| EngineError::Internal(e.to_string())),
-                Err(e) => Err(e),
-            }
+            engine.index_status(&path).await.and_then(to_value)
         }
         RequestMethod::Metrics => Err(EngineError::NotImplemented { method: "metrics" }),
+        RequestMethod::EnsureIndexed { sha } => {
+            let path = match require_repo_path(id, repo_path, "ensure_indexed") {
+                Ok(p) => p,
+                Err(resp) => return resp,
+            };
+            let sha = match CommitSha::parse(&sha) {
+                Ok(s) => s,
+                Err(e) => {
+                    let msg = format!("ensure_indexed: invalid sha: {e}");
+                    return error_response(id, ErrorCode::InvalidRequest, &msg);
+                }
+            };
+            let out = engine.ensure_indexed(&path, &sha).await;
+            // The job may have run for minutes; restart the idle clock.
+            engine.touch();
+            out.and_then(to_value)
+        }
+        RequestMethod::IndexTip => {
+            let path = match require_repo_path(id, repo_path, "index_tip") {
+                Ok(p) => p,
+                Err(resp) => return resp,
+            };
+            engine.enqueue_index_tip(PathBuf::from(path));
+            Ok(serde_json::json!({"queued": true}))
+        }
+        RequestMethod::PruneUnreachable => {
+            let path = match require_repo_path(id, repo_path, "prune_unreachable") {
+                Ok(p) => p,
+                Err(resp) => return resp,
+            };
+            let out = engine.prune_unreachable(&path).await;
+            engine.touch();
+            out.and_then(to_value)
+        }
     };
     match result {
         Ok(v) => Response {
@@ -181,6 +222,23 @@ async fn dispatch(engine: &RetrievalEngine, req: Request) -> Response {
             error: Some(engine_error_to_payload(e)),
         },
     }
+}
+
+/// The request's `repo_path`, or the error response for a method that
+/// needs one.
+fn require_repo_path(id: u64, repo_path: Option<String>, method: &str) -> Result<String, Response> {
+    match repo_path {
+        Some(p) => Ok(p),
+        None => Err(error_response(
+            id,
+            ErrorCode::Internal,
+            &format!("{method} requires repo_path"),
+        )),
+    }
+}
+
+fn to_value<T: serde::Serialize>(v: T) -> crate::Result<serde_json::Value> {
+    serde_json::to_value(v).map_err(|e| EngineError::Internal(e.to_string()))
 }
 
 fn error_response(id: u64, code: ErrorCode, msg: &str) -> Response {
@@ -346,6 +404,35 @@ mod tests {
             "missing repo_path must produce internal error, got {:?}",
             err.code
         );
+    }
+
+    #[tokio::test]
+    async fn index_tip_requires_repo_path() {
+        let resp = round_trip(Request {
+            id: 12,
+            repo_path: None,
+            method: RequestMethod::IndexTip,
+        })
+        .await;
+        assert!(resp.result.is_none(), "no result expected: {resp:?}");
+        let err = resp.error.expect("IndexTip without repo_path must error");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(err.message.contains("index_tip requires repo_path"));
+    }
+
+    #[tokio::test]
+    async fn ensure_indexed_rejects_a_malformed_sha() {
+        let resp = round_trip(Request {
+            id: 13,
+            repo_path: Some("/nonexistent/ohara-test-repo".into()),
+            method: RequestMethod::EnsureIndexed {
+                sha: "not-a-sha".into(),
+            },
+        })
+        .await;
+        assert!(resp.result.is_none(), "no result expected: {resp:?}");
+        let err = resp.error.expect("malformed sha must error");
+        assert_eq!(err.code, ErrorCode::InvalidRequest, "got {err:?}");
     }
 
     #[tokio::test]

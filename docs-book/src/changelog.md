@@ -4,6 +4,83 @@ User-facing release notes. The full commit log lives on
 [GitHub](https://github.com/vss96/ohara/commits/main); this page is
 the highlights.
 
+## Unreleased — Shared worktree store
+
+A git clone and all of its linked worktrees now share one index.
+
+- **One index per clone.** `ohara index`, `status`, `explain` and the
+  MCP tools resolve a linked worktree (`git worktree add`) to its main
+  clone's index. Plain clones keep their existing index id, so nothing
+  needs re-indexing.
+- **Per-worktree tips.** A new `indexed_tip` table (migration V7)
+  records how far each worktree has been indexed, replacing the single
+  `repo.last_indexed_commit` watermark (backfilled automatically).
+  Indexing a worktree embeds only the commits no other worktree has
+  indexed yet.
+- **Worktree-scoped results.** `find_pattern` only returns commits the
+  querying worktree's `HEAD` can reach. When every indexed tip is
+  reachable — always the case with one checkout — the filter is
+  skipped, so single-checkout results are unchanged.
+- **HEAD symbols follow the main checkout.** Once the main checkout
+  is indexed, indexing from a linked worktree never replaces the
+  head-snapshot symbols; `--force` there says so and leaves them
+  alone. Until then linked worktrees write them, and main's first
+  incremental pass always runs and takes them over. The snapshot
+  records which worktree and commit it was taken at (migration V8), so
+  a worktree whose snapshot another worktree replaced re-runs instead of
+  skipping.
+- **Retired tips.** When a worktree moves off its indexed commits
+  (branch switch, reset, a reused slot), its old tip is kept as a
+  retired tip so those commits stay behind the visibility filter;
+  prune drops it once its branch is gone. The daemon prunes after an
+  index pass once some retired tip has become unreachable.
+- **`ohara prune [PATH]`** removes index rows for commits no branch,
+  tag or worktree reaches any more. It runs on a same-version daemon
+  when one is running, else in-process without loading any model.
+- **HEAD-symbol snapshot replaced atomically.** Every pass extracts
+  first and then swaps the snapshot in one transaction, so a failed
+  extraction keeps the previous snapshot and queries never see an
+  empty head-symbol lane. `--force` no longer clears symbols up front.
+- **`--rebuild` in a linked worktree** warns that it drops the index
+  shared by every worktree of the clone.
+- **The daemon indexes incremental work.** When a same-version
+  `ohara serve` daemon is running, `ohara index --incremental` hands
+  the pass to it. The daemon also serves `EnsureIndexed`, `IndexTip`
+  and `PruneUnreachable` over its socket, and refuses to write unless
+  the index and its loaded embedder are fully compatible.
+- **`ohara status`** prints `worktree: <name> (shared index)` inside a
+  linked worktree, and `commits_behind_head` is computed per worktree.
+- **`explain_change`** returns commits that blame finds but the index
+  doesn't have yet, with metadata from git and no diff excerpt, and
+  says so in `limitation`.
+
+### Upgrading
+
+- **Old per-worktree indexes are orphaned.** Earlier versions gave each
+  linked worktree its own index at
+  `$OHARA_HOME/<repo-id>/index.sqlite` (default `OHARA_HOME` is
+  `~/.ohara`), keyed by the worktree's path. A linked worktree now uses
+  its main clone's index, so those directories are no longer read and
+  can be deleted. `ohara status` in the main checkout prints the `id`
+  that is still in use; every other `<repo-id>` directory belonging to
+  one of the clone's worktrees is safe to remove.
+- **Index the main checkout first.** After upgrading, a linked worktree
+  reads the main clone's index. Run `ohara index` in the main checkout
+  (or a full `ohara index` anywhere in the clone) before querying from
+  a worktree, otherwise the worktree sees an empty or missing index.
+- **Downgrading.** Older binaries write `repo.last_indexed_commit`,
+  which this version no longer reads (it uses `indexed_tip`). The data
+  stays consistent, but after going back and forth some work is
+  redone.
+
+Known limits: a failed index pass can leave stored commits without a
+tip, which other worktrees may see until the next clean pass or a
+prune; there is no cross-process writer lock (CLI `--force` /
+`--rebuild` or an overlapping second daemon can hit `SQLITE_BUSY`);
+and a worktree git can't open is skipped when computing reachability,
+so its commits can be pruned. See
+[Indexing → Known limits](./architecture/indexing.md#known-limits).
+
 ## v0.7.1 — Release CI token scope
 
 No user-facing binary changes. Fixes GitHub Actions `GITHUB_TOKEN`

@@ -127,10 +127,6 @@ impl crate::storage::StorageWrite for SpyStorage {
     async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> Result<()> {
         Ok(())
     }
-
-    async fn clear_head_symbols(&self, _: &RepoId) -> Result<()> {
-        Ok(())
-    }
 }
 
 #[async_trait]

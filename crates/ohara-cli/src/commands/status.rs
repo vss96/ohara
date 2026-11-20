@@ -1,7 +1,6 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
 use ohara_core::index_metadata::{CompatibilityStatus, RuntimeIndexMetadata};
-use ohara_core::query::compute_index_status;
 use ohara_core::{EmbedMode, StorageCache, StorageStatus};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -70,6 +69,14 @@ pub fn render_embed_cache_summary(
     ))
 }
 
+/// `last_indexed_commit` as the engine and MCP report it: this worktree's
+/// own indexed tip, else the main checkout's (plan-33), `<none>` if unset.
+pub fn render_last_indexed(st: &ohara_core::query::IndexStatus) -> String {
+    st.last_indexed_commit
+        .clone()
+        .unwrap_or_else(|| "<none>".into())
+}
+
 fn count_ignore_layers(repo_root: &std::path::Path) -> (usize, usize, usize) {
     let builtins = ohara_core::BUILT_IN_DEFAULTS.len();
     let gitattrs = std::fs::read_to_string(repo_root.join(".gitattributes"))
@@ -89,11 +96,19 @@ fn count_ignore_layers(repo_root: &std::path::Path) -> (usize, usize, usize) {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let (repo_id, canonical, _) = super::resolve_repo_id(&args.path)?;
+    let id = super::resolve_repo_id(&args.path)?;
+    let (repo_id, canonical) = (id.repo_id.clone(), id.worktree_path.clone());
     let db_path = super::index_db_path(&repo_id)?;
     let storage = Arc::new(ohara_storage::SqliteStorage::open(&db_path).await?);
     let behind = ohara_git::GitCommitsBehind::open(&canonical)?;
-    let st = compute_index_status(storage.as_ref(), &repo_id, &behind).await?;
+    let st = ohara_core::query::compute_worktree_index_status(
+        storage.as_ref(),
+        storage.as_ref(),
+        &repo_id,
+        &id.worktree,
+        &behind,
+    )
+    .await?;
 
     let mut runtime = current_runtime_metadata(EmbedMode::default());
     let stored = storage.get_index_metadata(&repo_id).await?;
@@ -108,13 +123,7 @@ pub async fn run(args: Args) -> Result<()> {
     }
     let compatibility = CompatibilityStatus::assess(&runtime, &stored);
 
-    // Plan 28: derive last_indexed_commit from MAX(ulid) for V6+ indexes;
-    // fall back to the watermark column for pre-V6 rows.
-    let derived = storage.latest_indexed_by_ulid(&repo_id).await?;
-    let last_indexed_display = derived
-        .map(|m| m.commit_sha)
-        .or(st.last_indexed_commit.clone())
-        .unwrap_or_else(|| "<none>".into());
+    let last_indexed_display = render_last_indexed(&st);
 
     println!(
         "repo: {}\nid: {}\nlast_indexed_commit: {}\nindexed_at: {}\ncommits_behind_head: {}\n{}",
@@ -125,6 +134,9 @@ pub async fn run(args: Args) -> Result<()> {
         st.commits_behind_head,
         render_compatibility(&compatibility),
     );
+    if !id.worktree.is_main() {
+        println!("worktree: {} (shared index)", id.worktree.as_str());
+    }
     let (b, g, u) = count_ignore_layers(&canonical);
     println!("{}", render_ignore_summary(b, g, u));
     let cache_stats = storage.embed_cache_stats().await?;
@@ -153,6 +165,17 @@ mod tests {
             components.insert(k, v);
         }
         StoredIndexMetadata { components }
+    }
+
+    #[test]
+    fn last_indexed_commit_is_the_worktree_status_value() {
+        let st = |sha: Option<&str>| ohara_core::query::IndexStatus {
+            last_indexed_commit: sha.map(str::to_string),
+            commits_behind_head: 0,
+            indexed_at: None,
+        };
+        assert_eq!(render_last_indexed(&st(Some("abc"))), "abc");
+        assert_eq!(render_last_indexed(&st(None)), "<none>");
     }
 
     #[test]

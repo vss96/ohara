@@ -45,6 +45,8 @@ enum Cmd {
     Query(commands::query::Args),
     /// Print index status for a repo.
     Status(commands::status::Args),
+    /// Remove index rows for commits no branch, tag or worktree reaches.
+    Prune(commands::prune::Args),
     /// Explain why a file/range looks the way it does (Plan 5).
     Explain(commands::explain::Args),
     /// Self-update the ohara binary by checking GitHub Releases.
@@ -73,7 +75,7 @@ async fn main() -> Result<()> {
         // Plan 31: a run that dropped commits is a hard failure — exit
         // non-zero so scripts and the post-commit hook notice the index
         // is incomplete rather than trusting a silent partial pass.
-        Cmd::Index(a) => match commands::index::run(a).await {
+        Cmd::Index(a) => match commands::index::run(a, no_daemon).await {
             Ok(report) if report.commits_failed > 0 => Err(anyhow::anyhow!(
                 "{} commit(s) failed to index; the index is incomplete",
                 report.commits_failed
@@ -84,6 +86,7 @@ async fn main() -> Result<()> {
         Cmd::Plan(a) => commands::plan::run(a).await,
         Cmd::Query(a) => commands::query::run(a, no_daemon).await,
         Cmd::Status(a) => commands::status::run(a).await,
+        Cmd::Prune(a) => commands::prune::run(a, no_daemon).await.map(|_| ()),
         Cmd::Explain(a) => commands::explain::run(a, no_daemon).await,
         Cmd::Update(a) => commands::update::run(a).await,
         Cmd::Serve(a) => commands::serve::run(a).await,

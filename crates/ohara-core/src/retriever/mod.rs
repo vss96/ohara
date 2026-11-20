@@ -103,7 +103,24 @@ impl Retriever {
         Vec<PatternHit>,
         crate::query_understanding::RetrievalProfile,
     )> {
-        use crate::retriever::coordinator;
+        self.find_pattern_scoped(repo_id, query, now_unix, None)
+            .await
+    }
+
+    /// Same as [`Self::find_pattern_with_profile`], but when `visibility`
+    /// is `Some` only commits reachable from the scope's HEAD can be
+    /// returned (used by per-worktree queries over a shared index).
+    pub async fn find_pattern_scoped(
+        &self,
+        repo_id: &crate::types::RepoId,
+        query: &PatternQuery,
+        now_unix: i64,
+        visibility: Option<crate::visibility::VisibilityScope<'_>>,
+    ) -> crate::Result<(
+        Vec<PatternHit>,
+        crate::query_understanding::RetrievalProfile,
+    )> {
+        use crate::retriever::coordinator::{self, RunContext};
         use crate::retriever::lanes::{
             bm25_head_sym::Bm25HeadSymLane, bm25_hist_sym::Bm25HistSymLane,
             bm25_sem_text::Bm25SemTextLane, bm25_text::Bm25TextLane, vec::VecLane, RetrievalLane,
@@ -148,10 +165,13 @@ impl Retriever {
             &lanes,
             &effective_weights,
             reranker,
-            query,
-            repo_id,
-            final_k,
-            now_unix,
+            RunContext {
+                query,
+                repo_id,
+                final_k,
+                now_unix,
+                visibility,
+            },
         )
         .await?;
 

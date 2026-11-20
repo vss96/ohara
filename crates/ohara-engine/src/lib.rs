@@ -10,12 +10,14 @@ pub mod daemon;
 mod engine;
 mod error;
 mod handle;
+mod index_service;
 pub mod ipc;
 pub mod lifecycle;
 pub mod registry;
 mod runtime_metadata;
 pub mod server;
 
+pub use cache::AncestryCache;
 pub use cache::BlameCache;
 pub use cache::EmbeddingCache;
 pub use cache::MetaCache;
@@ -23,7 +25,8 @@ pub use engine::ExplainResult;
 pub use engine::FindPatternResult;
 pub use engine::RetrievalEngine;
 pub use error::EngineError;
-pub use handle::RepoHandle;
+pub use handle::{RepoHandle, RepoStore};
+pub use index_service::{prune_unreachable_in_process, EnsureIndexedOutcome, PruneOutcome};
 pub use runtime_metadata::current_runtime_metadata;
 pub use server::serve_unix;
 

@@ -3,7 +3,40 @@
 //! then removes the index DB and its advisory WAL/SHM sidecars.
 
 use anyhow::{bail, Result};
+use ohara_core::WorktreeKey;
 use std::path::{Path, PathBuf};
+
+/// One-line warning when `--rebuild` runs from a linked worktree: the DB
+/// it drops is shared by the main clone and every linked worktree.
+pub(super) fn shared_rebuild_warning(worktree: &WorktreeKey) -> Option<String> {
+    if worktree.is_main() {
+        return None;
+    }
+    Some(format!(
+        "warning: --rebuild from linked worktree '{}' drops the index shared by all worktrees of this clone",
+        worktree.as_str()
+    ))
+}
+
+/// `--rebuild`: refuse without `--yes`, check the DB lives under
+/// `OHARA_HOME`, then delete the DB and its sidecars so the normal index
+/// flow re-runs migrations and rebuilds every row from scratch.
+pub(super) fn drop_index(yes: bool, db_path: &Path, worktree: &WorktreeKey) -> Result<()> {
+    if let Some(warning) = shared_rebuild_warning(worktree) {
+        eprintln!("{warning}");
+    }
+    if !yes {
+        bail!(
+            "refusing to --rebuild without --yes: would delete {}.\n\
+             Re-run with `--rebuild --yes` to confirm.",
+            db_path.display(),
+        );
+    }
+    let home = ohara_core::paths::ohara_home()?;
+    assert_rebuild_safe(db_path, &home)?;
+    tracing::warn!(db = %db_path.display(), "rebuilding: deleting existing index DB");
+    delete_index_files(db_path)
+}
 
 /// Plan 13 Task 3.3 Step 2: refuse `--rebuild` unless the index DB
 /// path resolves under `OHARA_HOME`. Defensive belt against an edge
@@ -49,6 +82,15 @@ pub fn delete_index_files(db_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod rebuild_safety_tests {
     use super::*;
+
+    #[test]
+    fn rebuild_from_a_linked_worktree_warns_about_the_shared_index() {
+        assert!(shared_rebuild_warning(&WorktreeKey::main()).is_none());
+        let w = shared_rebuild_warning(&WorktreeKey::linked("slot-1").unwrap())
+            .expect("linked worktree must warn");
+        assert!(w.contains("slot-1") && w.contains("all worktrees"), "{w}");
+        assert!(!w.contains('\n'), "one line: {w}");
+    }
 
     #[test]
     fn assert_rebuild_safe_passes_for_path_under_ohara_home() {

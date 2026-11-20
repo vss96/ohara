@@ -1,5 +1,5 @@
 //! Persist stage: writes one commit + its embedded hunks to storage
-//! in a single logical operation.
+//! as one atomic unit (`StorageWrite::put_commit_with_hunks`).
 
 use crate::indexer::stages::embed::EmbedOutput;
 use crate::storage::{CommitRecord, HunkRecord as StorageHunkRecord};
@@ -20,10 +20,12 @@ fn commit_ulid(ts: i64, sha: &str) -> String {
     crate::ulid_for_commit(ts, &effective).to_string()
 }
 
-/// The persist stage: writes commit + embedded hunks to storage in a
-/// single logical operation. The storage layer's DELETE-then-INSERT
-/// contract (`commit::put`) guarantees idempotency — re-running on the
-/// same SHA replays cleanly.
+/// The persist stage: writes commit + embedded hunks to storage in one
+/// `put_commit_with_hunks` call, which durable backends run as a single
+/// transaction. That matters for resume: the walker skips any commit
+/// that already has a commit row, so the row must never land without
+/// its hunks. The DELETE-then-INSERT inside the write keeps a re-run
+/// on the same SHA idempotent.
 ///
 /// This stage carries no state. The coordinator calls it once per
 /// successfully embedded commit.
@@ -32,9 +34,9 @@ pub struct PersistStage;
 impl PersistStage {
     /// Write `commit` and all hunks in `embed_output` to `storage`.
     ///
-    /// On success, the commit's watermark is ready to be advanced.
-    /// On error, the storage write is incomplete — the coordinator
-    /// should not advance the watermark and should propagate the error.
+    /// On success, the commit is fully stored. On error nothing of it is
+    /// stored (with an atomic backend), so the commit counts as failed and
+    /// the next pass redoes it.
     pub async fn run(
         repo: &RepoId,
         commit: &CommitMeta,
@@ -46,8 +48,6 @@ impl PersistStage {
             meta: commit.clone(),
             message_emb: embed_output.commit_embedding,
         };
-        storage.put_commit(repo, &commit_record).await?;
-
         let hunk_rows: Vec<StorageHunkRecord> = embed_output
             .hunks
             .into_iter()
@@ -76,8 +76,9 @@ impl PersistStage {
             })
             .collect();
 
-        storage.put_hunks(repo, &hunk_rows).await?;
-        Ok(())
+        storage
+            .put_commit_with_hunks(repo, &commit_record, &hunk_rows)
+            .await
     }
 }
 
@@ -134,6 +135,9 @@ mod tests {
     struct RecordingStorage {
         commits: Mutex<Vec<String>>,
         hunk_counts: Mutex<Vec<usize>>,
+        /// `(sha, hunk count)` per `put_commit_with_hunks` call. Recorded
+        /// instead of delegating, so a split write shows up as a miss.
+        atomic_writes: Mutex<Vec<(String, usize)>>,
     }
 
     #[async_trait]
@@ -182,11 +186,20 @@ mod tests {
             Ok(())
         }
 
-        async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> Result<()> {
+        async fn put_commit_with_hunks(
+            &self,
+            _: &RepoId,
+            commit: &CommitRecord,
+            hunks: &[StorageHunkRecord],
+        ) -> Result<()> {
+            self.atomic_writes
+                .lock()
+                .unwrap()
+                .push((commit.meta.commit_sha.clone(), hunks.len()));
             Ok(())
         }
 
-        async fn clear_head_symbols(&self, _: &RepoId) -> Result<()> {
+        async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> Result<()> {
             Ok(())
         }
     }
@@ -300,7 +313,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persist_writes_one_commit_and_correct_hunk_count() {
+    async fn persist_writes_the_commit_and_all_its_hunks_in_one_storage_call() {
         let storage = Arc::new(RecordingStorage::default());
         let repo = RepoId::from_parts("sha", "/repo");
         let cm = meta("abc");
@@ -309,14 +322,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            *storage.commits.lock().unwrap(),
-            vec!["abc"],
-            "must call put_commit exactly once"
+            *storage.atomic_writes.lock().unwrap(),
+            vec![("abc".to_string(), 3)],
+            "commit and its 3 hunks must go through one put_commit_with_hunks call"
         );
-        assert_eq!(
-            *storage.hunk_counts.lock().unwrap(),
-            vec![3],
-            "must call put_hunks once with all 3 hunks"
+        assert!(
+            storage.commits.lock().unwrap().is_empty()
+                && storage.hunk_counts.lock().unwrap().is_empty(),
+            "split put_commit / put_hunks writes are not atomic"
         );
     }
 
@@ -332,10 +345,10 @@ mod tests {
         PersistStage::run(&repo, &cm, embed_output("abc", 1), storage.as_ref())
             .await
             .unwrap();
-        let commits = storage.commits.lock().unwrap().clone();
+        let writes = storage.atomic_writes.lock().unwrap().clone();
         assert_eq!(
-            commits,
-            vec!["abc", "abc"],
+            writes,
+            vec![("abc".to_string(), 1), ("abc".to_string(), 1)],
             "both runs must delegate to storage"
         );
     }

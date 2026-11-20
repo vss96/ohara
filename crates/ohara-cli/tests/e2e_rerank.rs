@@ -69,30 +69,35 @@ async fn cross_encoder_picks_better_message_among_near_duplicates() {
     );
 
     // Index the repo via the public CLI command path.
-    let report = ohara_cli::commands::index::run(ohara_cli::commands::index::Args {
-        path: repo_dir.path().to_path_buf(),
-        incremental: false,
-        force: false,
-        rebuild: false,
-        yes: false,
-        commit_batch: Some(512),
-        threads: Some(0),
-        no_progress: true,
-        profile: false,
-        embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
-        resources: ohara_cli::resources::ResourcesArg::Auto,
-        embed_batch: None,
-        embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
-        workers: None,
-        interactive: false,
-    })
+    let report = ohara_cli::commands::index::run(
+        ohara_cli::commands::index::Args {
+            path: repo_dir.path().to_path_buf(),
+            incremental: false,
+            force: false,
+            rebuild: false,
+            yes: false,
+            commit_batch: Some(512),
+            threads: Some(0),
+            no_progress: true,
+            profile: false,
+            embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
+            resources: ohara_cli::resources::ResourcesArg::Auto,
+            embed_batch: None,
+            embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
+            workers: None,
+            interactive: false,
+        },
+        true,
+    )
     .await
     .unwrap();
     assert_eq!(report.new_commits, 2, "fixture should have 2 commits");
 
     // Build a Retriever with the bge-reranker-base cross-encoder attached.
     use std::sync::Arc;
-    let (repo_id, _, _) = ohara_cli::commands::resolve_repo_id(repo_dir.path()).unwrap();
+    let repo_id = ohara_cli::commands::resolve_repo_id(repo_dir.path())
+        .unwrap()
+        .repo_id;
     let db = ohara_cli::commands::index_db_path(&repo_id).unwrap();
     let storage = Arc::new(ohara_storage::SqliteStorage::open(&db).await.unwrap());
     let embedder = Arc::new(

@@ -1,0 +1,333 @@
+//! Newtypes and the persistence contract for worktree-aware indexing.
+
+use crate::error::{OhraError, Result};
+use crate::types::RepoId;
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+
+/// A full 40-character lowercase hex git commit id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CommitSha(String);
+
+impl CommitSha {
+    /// Validate and wrap a 40-char lowercase hex string.
+    pub fn parse(hex: &str) -> Result<Self> {
+        let valid = hex.len() == 40 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        if !valid {
+            return Err(OhraError::InvalidArgument(format!(
+                "invalid commit sha: {hex:?}"
+            )));
+        }
+        Ok(Self(hex.to_string()))
+    }
+
+    /// The hex string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Separates the worktree from the sha in a retired tip's key.
+const RETIRED_SEPARATOR: char = '/';
+
+/// Identifies a worktree within one repo: empty for the main checkout,
+/// a non-empty name for a linked worktree.
+///
+/// A third, reserved form keys a *retired* tip: the tip a worktree had
+/// before it moved to a commit that does not descend from it (branch
+/// switch, reset, slot reuse). Its key is `<worktree>/<sha>`. A worktree
+/// name is a directory under `.git/worktrees/`, so it can never contain
+/// `/`, and a retired key never collides with a real worktree.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WorktreeKey(String);
+
+impl WorktreeKey {
+    /// Key of the main checkout (empty string).
+    pub fn main() -> Self {
+        Self(String::new())
+    }
+
+    /// Key of a linked worktree; `name` must be non-empty and free of `/`
+    /// (git worktree names are directory names).
+    pub fn linked(name: &str) -> Result<Self> {
+        if name.is_empty() || name.contains(RETIRED_SEPARATOR) {
+            return Err(OhraError::InvalidArgument(format!(
+                "invalid linked worktree name: {name:?}"
+            )));
+        }
+        Ok(Self(name.to_string()))
+    }
+
+    /// Reserved key for `tip`, the tip `of` held before moving to a commit
+    /// that does not descend from it.
+    pub fn retired(of: &WorktreeKey, tip: &CommitSha) -> Self {
+        Self(format!("{}{RETIRED_SEPARATOR}{}", of.0, tip.as_str()))
+    }
+
+    /// Parse a key as stored: `""` is main, `<name>/<sha>` is retired,
+    /// anything else is a linked worktree name.
+    pub fn from_stored(key: &str) -> Result<Self> {
+        if key.is_empty() {
+            return Ok(Self::main());
+        }
+        let Some((of, sha)) = key.rsplit_once(RETIRED_SEPARATOR) else {
+            return Self::linked(key);
+        };
+        if of.contains(RETIRED_SEPARATOR) {
+            return Err(OhraError::InvalidArgument(format!(
+                "invalid retired tip key: {key:?}"
+            )));
+        }
+        let sha = CommitSha::parse(sha)?;
+        Ok(Self::retired(&Self(of.to_string()), &sha))
+    }
+
+    /// True for the main checkout.
+    pub fn is_main(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// True for a retired tip's reserved key (not a worktree).
+    pub fn is_retired(&self) -> bool {
+        self.0.contains(RETIRED_SEPARATOR)
+    }
+
+    /// The key string ("" for main).
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The last indexed commit for one worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedTip {
+    /// Which worktree the tip belongs to.
+    pub worktree: WorktreeKey,
+    /// The commit indexed as that worktree's tip.
+    pub sha: CommitSha,
+}
+
+/// True when `worktree` is the main checkout and `tips` holds no main tip
+/// yet. Main must then run (record its tip and take over the HEAD-symbol
+/// snapshot) even when linked worktrees' tips already cover its HEAD.
+pub fn main_needs_first_run(worktree: &WorktreeKey, tips: &[IndexedTip]) -> bool {
+    worktree.is_main() && !tips.iter().any(|t| t.worktree.is_main())
+}
+
+/// True when an index run of `worktree` owns the shared HEAD-symbol
+/// snapshot: main always does; until main has a tip, whichever worktree
+/// indexes does, so a linked-first or bare-repo index still has head
+/// symbols.
+pub fn owns_head_symbols(worktree: &WorktreeKey, tips: &[IndexedTip]) -> bool {
+    worktree.is_main() || !tips.iter().any(|t| t.worktree.is_main())
+}
+
+/// Provenance of the shared HEAD-symbol snapshot: the worktree whose run
+/// last replaced it, and the commit it was extracted at. Recorded in the
+/// same transaction as the snapshot itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadSymbolSnapshot {
+    /// The worktree whose run wrote the snapshot.
+    pub worktree: WorktreeKey,
+    /// The HEAD commit the snapshot describes.
+    pub sha: CommitSha,
+}
+
+/// True when an index run of `worktree` at `head` must not be skipped even
+/// if every commit is already covered: the worktree owns the HEAD-symbol
+/// snapshot ([`owns_head_symbols`]) and `snapshot` (its recorded
+/// provenance) does not describe `head`.
+///
+/// The worktree's own tip is no proxy for the snapshot: until main has a
+/// tip, every linked worktree that indexes replaces it, so the snapshot
+/// may describe another worktree's commit. A matching sha from another
+/// linked worktree is accepted (same commit, same symbols); main also
+/// requires the snapshot to be its own, so it takes the snapshot over
+/// from a linked worktree. A missing provenance is stale.
+pub fn head_symbols_stale(
+    worktree: &WorktreeKey,
+    tips: &[IndexedTip],
+    snapshot: Option<&HeadSymbolSnapshot>,
+    head: &CommitSha,
+) -> bool {
+    if !owns_head_symbols(worktree, tips) {
+        return false;
+    }
+    match snapshot {
+        None => true,
+        Some(s) if &s.sha != head => true,
+        Some(s) => worktree.is_main() && !s.worktree.is_main(),
+    }
+}
+
+/// Persistence of per-worktree indexed tips and commit pruning.
+#[async_trait]
+pub trait TipStore: Send + Sync {
+    /// All recorded tips for the repo.
+    async fn indexed_tips(&self, repo_id: &RepoId) -> Result<Vec<IndexedTip>>;
+
+    /// Insert or replace the tip for `worktree`.
+    async fn set_indexed_tip(
+        &self,
+        repo_id: &RepoId,
+        worktree: &WorktreeKey,
+        sha: &CommitSha,
+    ) -> Result<()>;
+
+    /// Remove the tip for `worktree` only while it still names `expected`
+    /// (compare-and-delete). Returns whether a row was removed; `false`
+    /// means another writer moved or removed the tip meanwhile.
+    async fn remove_indexed_tip(
+        &self,
+        repo_id: &RepoId,
+        worktree: &WorktreeKey,
+        expected: &CommitSha,
+    ) -> Result<bool>;
+
+    /// Move the tip for `worktree` from `expected` to `new` only while it
+    /// still names `expected` (compare-and-swap). Returns whether it moved.
+    async fn replace_indexed_tip(
+        &self,
+        repo_id: &RepoId,
+        worktree: &WorktreeKey,
+        expected: &CommitSha,
+        new: &CommitSha,
+    ) -> Result<bool>;
+
+    /// Shas of every commit currently indexed for the repo.
+    async fn indexed_commit_shas(&self, repo_id: &RepoId) -> Result<Vec<CommitSha>>;
+
+    /// Deletes each commit with its hunks, vectors and FTS rows. Returns commits deleted.
+    async fn delete_commits(&self, repo_id: &RepoId, shas: &[CommitSha]) -> Result<u64>;
+
+    /// Provenance of the shared HEAD-symbol snapshot, or `None` when it
+    /// was never recorded (an index from before provenance existed, or a
+    /// snapshot written without it).
+    async fn head_symbol_snapshot(&self, repo_id: &RepoId) -> Result<Option<HeadSymbolSnapshot>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commit_sha_accepts_40_hex_and_rejects_everything_else() {
+        assert!(CommitSha::parse("0123456789abcdef0123456789abcdef01234567").is_ok());
+        assert!(CommitSha::parse("abc").is_err());
+        assert!(CommitSha::parse("0123456789ABCDEF0123456789abcdef01234567").is_err());
+        assert!(CommitSha::parse("z123456789abcdef0123456789abcdef01234567").is_err());
+    }
+
+    #[test]
+    fn worktree_key_main_is_empty_and_linked_rejects_empty() {
+        assert_eq!(WorktreeKey::main().as_str(), "");
+        assert!(WorktreeKey::main().is_main());
+        assert!(WorktreeKey::linked("").is_err());
+        let k = WorktreeKey::linked("slot-1").unwrap();
+        assert_eq!(k.as_str(), "slot-1");
+        assert!(!k.is_main());
+    }
+
+    const P: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn linked_rejects_a_slash_so_it_never_collides_with_a_retired_key() {
+        assert!(WorktreeKey::linked("a/b").is_err());
+    }
+
+    #[test]
+    fn retired_key_is_neither_main_nor_linked_and_round_trips() {
+        let sha = CommitSha::parse(P).unwrap();
+        for of in [WorktreeKey::main(), WorktreeKey::linked("slot-1").unwrap()] {
+            let r = WorktreeKey::retired(&of, &sha);
+            assert!(r.is_retired());
+            assert!(!r.is_main());
+            assert_ne!(r, of);
+            assert_eq!(WorktreeKey::from_stored(r.as_str()).unwrap(), r);
+        }
+        assert!(!WorktreeKey::main().is_retired());
+        assert!(!WorktreeKey::linked("slot-1").unwrap().is_retired());
+        assert_eq!(WorktreeKey::from_stored("").unwrap(), WorktreeKey::main());
+        assert_eq!(
+            WorktreeKey::from_stored("slot-1").unwrap(),
+            WorktreeKey::linked("slot-1").unwrap()
+        );
+        assert!(WorktreeKey::from_stored("slot-1/not-a-sha").is_err());
+    }
+
+    #[test]
+    fn the_snapshot_owner_is_stale_until_the_snapshot_describes_head() {
+        let a = CommitSha::parse(P).unwrap();
+        let b = CommitSha::parse("1123456789abcdef0123456789abcdef01234567").unwrap();
+        let main = WorktreeKey::main();
+        let slot = WorktreeKey::linked("slot-1").unwrap();
+        let other = WorktreeKey::linked("slot-2").unwrap();
+        let tip = |w: &WorktreeKey, s: &CommitSha| IndexedTip {
+            worktree: w.clone(),
+            sha: s.clone(),
+        };
+        let snap = |w: &WorktreeKey, s: &CommitSha| HeadSymbolSnapshot {
+            worktree: w.clone(),
+            sha: s.clone(),
+        };
+        let main_tip = [tip(&main, &a)];
+        assert!(!head_symbols_stale(
+            &main,
+            &main_tip,
+            Some(&snap(&main, &a)),
+            &a
+        ));
+        assert!(head_symbols_stale(
+            &main,
+            &main_tip,
+            Some(&snap(&main, &b)),
+            &a
+        ));
+        assert!(head_symbols_stale(&main, &main_tip, None, &a));
+        // Main takes over a snapshot a linked worktree wrote, even at HEAD.
+        assert!(head_symbols_stale(
+            &main,
+            &main_tip,
+            Some(&snap(&slot, &a)),
+            &a
+        ));
+        // A linked worktree owns the snapshot only while main has no tip.
+        assert!(!head_symbols_stale(&slot, &main_tip, None, &a));
+        // slot-1's own tip is A, but slot-2 replaced the snapshot at B.
+        let linked = [tip(&slot, &a), tip(&other, &b)];
+        assert!(head_symbols_stale(
+            &slot,
+            &linked,
+            Some(&snap(&other, &b)),
+            &a
+        ));
+        assert!(!head_symbols_stale(
+            &slot,
+            &linked,
+            Some(&snap(&slot, &a)),
+            &a
+        ));
+        // Same commit from another linked worktree: same symbols, not stale.
+        assert!(!head_symbols_stale(
+            &slot,
+            &linked,
+            Some(&snap(&other, &a)),
+            &a
+        ));
+    }
+
+    #[test]
+    fn only_main_without_a_main_tip_needs_its_first_run() {
+        let slot = WorktreeKey::linked("slot-1").unwrap();
+        let tip = |w: WorktreeKey| IndexedTip {
+            worktree: w,
+            sha: CommitSha::parse(P).unwrap(),
+        };
+        let linked_only = vec![tip(slot.clone())];
+        assert!(main_needs_first_run(&WorktreeKey::main(), &linked_only));
+        assert!(main_needs_first_run(&WorktreeKey::main(), &[]));
+        assert!(!main_needs_first_run(&slot, &linked_only));
+        let with_main = vec![tip(WorktreeKey::main()), tip(slot.clone())];
+        assert!(!main_needs_first_run(&WorktreeKey::main(), &with_main));
+    }
+}

@@ -89,7 +89,7 @@ async fn quest_db_baseline_under_threshold() {
     };
 
     let start = Instant::now();
-    let report = ohara_cli::commands::index::run(args)
+    let report = ohara_cli::commands::index::run(args, true)
         .await
         .expect("index run");
     let elapsed = start.elapsed();

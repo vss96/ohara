@@ -1,7 +1,9 @@
 # Storage schema
 
 ohara persists everything in a single SQLite file at
-`$OHARA_HOME/<repo-id>/index.sqlite` (default `~/.ohara/`). The file
+`$OHARA_HOME/<repo-id>/index.sqlite` (default `~/.ohara/`). A git
+clone and all of its linked worktrees resolve to the same `<repo-id>`
+and share that file. The file
 loads three SQLite extensions:
 
 - [`sqlite-vec`](https://github.com/asg017/sqlite-vec) for the
@@ -57,6 +59,18 @@ repo. Other components stay absent — the runtime reports them as
 subsequent index pass writes the current binary's values into the
 table at successful completion.
 
+### V7 — per-worktree indexed tips
+
+| Table / column | Kind | Purpose |
+|----------------|------|---------|
+| `indexed_tip(repo_id, worktree_key, sha, updated_at)` | new table | One row per worktree of the repo: the `HEAD` its last clean index pass covered. `worktree_key` is `''` for the main checkout and the git admin-dir name (`.git/worktrees/<name>`) for a linked worktree; `<worktree>/<sha>` keys hold retired tips (see below). Primary key `(repo_id, worktree_key)`. |
+
+V7 backfills the main checkout's row (`worktree_key = ''`) from
+`repo.last_indexed_commit` for every repo that has one, so an existing
+index needs no re-index. From V7 on, `repo.last_indexed_commit` stays
+in the schema but nothing reads it; `indexed_tip` is the only record
+of how far indexing has got.
+
 ## Idempotency
 
 Indexing is structured so any pass can be repeated without
@@ -68,19 +82,45 @@ duplicating data:
   previously-written hunks (and their `vec_hunk` / `fts_hunk_text`
   rows) for that SHA are cleared first, so a re-index of the same
   commit produces exactly the same row count.
+- **`put_commit_with_hunks`** — what the indexer actually calls: the
+  two writes above in one transaction, so a commit row never exists
+  without its hunks.
 - **`put_head_symbols`** — replaces the entire `symbol` /
   `vec_symbol` / `fts_symbol` / `fts_symbol_name` content for the
-  repo. HEAD is a snapshot, not history; partial updates would leak
-  stale symbols across commits.
+  repo: the DELETE and the INSERTs share one transaction, so repeated
+  runs never accumulate duplicates and readers never see an empty
+  snapshot. HEAD is a snapshot, not history; partial updates would
+  leak stale symbols across commits.
 
-## Watermark + abort safety
+## Indexed tips + abort safety
 
-`repo.last_indexed_commit` is the watermark. The `Indexer` advances it
-**every 100 commits** during the walk (and once at the end of the
-pass). Combined with `put_hunks`'s DELETE-then-INSERT semantics, the
-worst-case cost of a Ctrl-C / kill / crash mid-walk is re-doing
-~100 commits — already-written hunks are cleared and re-inserted
-identically, so no duplicate rows accumulate.
+Each worktree's `indexed_tip` row is written once, at the end of a
+clean index pass (a pass with failed commits leaves it unchanged). The
+next pass walks from `HEAD` hiding every worktree's tip and skips any
+commit that already has a `commit_record` row, so a Ctrl-C / kill /
+crash mid-walk costs a re-walk but no re-embedding of stored commits.
+A commit's row and its hunks are written in one transaction
+(`put_commit_with_hunks`), so an interrupted write leaves no commit row
+for the skip to trust; the commit is redone on the next pass, and the
+DELETE-then-INSERT writes keep the redo free of duplicate rows.
+
+When a worktree moves to a commit that does not descend from its tip
+(branch switch, reset, slot reuse), the old tip is kept in
+`indexed_tip` as a *retired tip* under the reserved key
+`<worktree>/<sha>` before the new tip is written. A git worktree name
+is a directory name and never contains `/`, so a retired key cannot
+collide with a worktree. Retired tips count as tips (walk hiding,
+coverage, the retrieval visibility fast path) but not as worktrees.
+
+Pruning (the daemon's `PruneUnreachable`) deletes the commits no ref
+or worktree `HEAD` reaches, together with their hunks, vectors and
+FTS rows, in batches of 500 per transaction, then tidies
+`indexed_tip`: retired tips nothing reaches are removed; a linked
+worktree that no longer exists has its row turned into a retired tip
+while a ref still reaches it, and removed otherwise; a main or live
+worktree tip on a commit being deleted is rewound to its merge base with
+that checkout's `HEAD` (or removed when there is none). The tip edits
+run before the deletes and are compare-and-swap on the sha prune read.
 
 Schema version (`repo.schema_version`) is bumped when migrations land.
 A v0.3 binary on a v0.2 index runs migration V2; a v0.2 binary on a

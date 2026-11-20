@@ -8,10 +8,10 @@ use ohara_core::{
     index_metadata::StoredIndexMetadata,
     query::IndexStatus,
     storage::{
-        CommitRecord, HunkHit, HunkId, HunkRecord, StorageCache, StorageExplain,
-        StorageMetricsSnapshot, StorageRead, StorageStatus, StorageWrite,
+        HunkHit, HunkId, StorageCache, StorageExplain, StorageMetricsSnapshot, StorageRead,
+        StorageStatus,
     },
-    types::{CommitMeta, Hunk, HunkSymbol, RepoId, Symbol},
+    types::{CommitMeta, Hunk, HunkSymbol, RepoId},
     Result as CoreResult,
 };
 use std::path::Path;
@@ -52,6 +52,13 @@ impl SqliteStorage {
     /// one connection; exposed so tests can assert the cap.
     pub fn write_pool(&self) -> &Pool {
         &self.write_pool
+    }
+
+    /// Names in the HEAD-symbol snapshot, sorted. The index file holds
+    /// one repository, so this is that repository's snapshot. For
+    /// diagnostics and tests; retrieval goes through the `Storage` lanes.
+    pub async fn head_symbol_names(&self) -> CoreResult<Vec<String>> {
+        with_conn(&self.pool, crate::tables::symbol::names).await
     }
 }
 
@@ -115,71 +122,6 @@ impl StorageStatus for SqliteStorage {
         _repo_id: &ohara_core::types::RepoId,
     ) -> ohara_core::Result<Option<ohara_core::types::CommitMeta>> {
         with_conn(&self.pool, |c| crate::tables::commit::latest_by_ulid(c)).await
-    }
-}
-
-#[async_trait::async_trait]
-impl StorageWrite for SqliteStorage {
-    async fn open_repo(
-        &self,
-        repo_id: &RepoId,
-        path: &str,
-        first_commit_sha: &str,
-    ) -> CoreResult<()> {
-        let id = repo_id.as_str().to_string();
-        let path = path.to_string();
-        let fcs = first_commit_sha.to_string();
-        with_conn(&self.write_pool, move |c| repo::upsert(c, &id, &path, &fcs)).await
-    }
-
-    async fn set_last_indexed_commit(&self, repo_id: &RepoId, sha: &str) -> CoreResult<()> {
-        let id = repo_id.as_str().to_string();
-        let sha = sha.to_string();
-        with_conn(&self.write_pool, move |c| repo::set_watermark(c, &id, &sha)).await
-    }
-
-    async fn put_commit(&self, _repo_id: &RepoId, record: &CommitRecord) -> CoreResult<()> {
-        let rec = record.clone();
-        with_conn(&self.write_pool, move |c| {
-            crate::tables::commit::put(c, &rec)
-        })
-        .await
-    }
-
-    async fn commit_exists(&self, sha: &str) -> CoreResult<bool> {
-        let sha = sha.to_string();
-        with_conn(&self.pool, move |c| {
-            crate::tables::commit::commit_exists(c, &sha)
-        })
-        .await
-    }
-
-    async fn put_hunks(&self, _repo_id: &RepoId, records: &[HunkRecord]) -> CoreResult<()> {
-        let recs = records.to_vec();
-        with_conn(&self.write_pool, move |c| {
-            crate::tables::hunk::put_many(c, &recs)
-        })
-        .await
-    }
-
-    async fn put_head_symbols(&self, _repo_id: &RepoId, symbols: &[Symbol]) -> CoreResult<()> {
-        // Plan 3 / Track A: persist symbols + mirror into fts_symbol_name so
-        // the BM25-by-symbol-name lane has rows to match against. Track C
-        // wires `Symbol::sibling_names` through this path.
-        let syms = symbols.to_vec();
-        with_conn(&self.write_pool, move |c| {
-            crate::tables::symbol::put_many(c, &syms)
-        })
-        .await
-    }
-
-    async fn clear_head_symbols(&self, _repo_id: &RepoId) -> CoreResult<()> {
-        // Plan 3 / Track D: drop all symbol rows + their FTS5 mirror so a
-        // subsequent put_head_symbols (driven by `ohara index --force`)
-        // doesn't double-count. The symbol table is HEAD-scoped — it holds
-        // only the latest snapshot, never historical, so a blanket DELETE
-        // is the right semantics.
-        with_conn(&self.write_pool, crate::tables::symbol::clear_all).await
     }
 }
 
@@ -493,6 +435,7 @@ impl StorageCache for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ohara_core::storage::{CommitRecord, HunkRecord, StorageWrite};
 
     #[tokio::test]
     async fn open_repo_round_trip() {
@@ -2065,6 +2008,7 @@ mod tests {
 #[cfg(test)]
 mod metrics_tests {
     use super::*;
+    use ohara_core::storage::StorageWrite;
     use ohara_core::types::RepoId;
 
     #[tokio::test]
@@ -2087,5 +2031,49 @@ mod metrics_tests {
 
         let elapsed = s.metrics_snapshot().knn_hunks.total_elapsed_us;
         assert!(elapsed > 0, "elapsed_us should be non-zero after a call");
+    }
+}
+
+#[cfg(test)]
+mod head_symbol_listing_tests {
+    use super::*;
+    use ohara_core::storage::StorageWrite;
+    use ohara_core::types::Symbol;
+    use ohara_core::types::SymbolKind;
+
+    fn sym(name: &str) -> Symbol {
+        Symbol {
+            file_path: "src/a.rs".into(),
+            language: "rust".into(),
+            kind: SymbolKind::Function,
+            name: name.into(),
+            qualified_name: None,
+            sibling_names: Vec::new(),
+            span_start: 0,
+            span_end: 1,
+            blob_sha: "b".into(),
+            source_text: format!("fn {name}() {{}}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn head_symbol_names_lists_the_current_snapshot_sorted() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = SqliteStorage::open(dir.path().join("i.sqlite"))
+            .await
+            .unwrap();
+        let id = RepoId::from_parts("first", "/repo");
+        s.open_repo(&id, "/repo", "first").await.unwrap();
+        assert!(s.head_symbol_names().await.unwrap().is_empty());
+        s.put_head_symbols(&id, &[sym("zeta"), sym("alpha")])
+            .await
+            .unwrap();
+        s.put_head_symbols(&id, &[sym("beta"), sym("alpha")])
+            .await
+            .unwrap();
+        assert_eq!(
+            s.head_symbol_names().await.unwrap(),
+            vec!["alpha".to_string(), "beta".to_string()]
+        );
     }
 }

@@ -15,6 +15,48 @@ mod tests {
     use super::*;
     use crate::codec::pool::{apply_pragmas, load_vec_extension};
 
+    fn fresh_conn() -> Connection {
+        crate::codec::pool::register_vec_auto_extension().unwrap();
+        let c = Connection::open_in_memory().unwrap();
+        apply_pragmas(&c).unwrap();
+        load_vec_extension(&c).unwrap();
+        c
+    }
+
+    fn run_to_version(c: &mut Connection, v: u32) {
+        embedded::migrations::runner()
+            .set_target(refinery::Target::Version(v))
+            .run(c)
+            .unwrap();
+    }
+
+    fn query_all(c: &Connection, sql: &str) -> Vec<(String, String, String)> {
+        let mut stmt = c.prepare(sql).unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    #[test]
+    fn v7_backfills_indexed_tip_from_legacy_watermark() {
+        let mut c = fresh_conn();
+        run_to_version(&mut c, 6);
+        c.execute(
+            "INSERT INTO repo (id, path, first_commit_sha, last_indexed_commit, indexed_at, schema_version)
+             VALUES ('r1', '/p', 'f', 'aaaa', '2026-01-01T00:00:00Z', 1),
+                    ('r2', '/q', 'g', NULL, NULL, 1)",
+            [],
+        )
+        .unwrap();
+        run(&mut c).unwrap();
+        let rows = query_all(
+            &c,
+            "SELECT repo_id, worktree_key, sha FROM indexed_tip ORDER BY repo_id",
+        );
+        assert_eq!(rows, vec![("r1".into(), "".into(), "aaaa".into())]);
+    }
+
     #[test]
     fn migrations_create_hunk_and_vec_hunk_tables_on_fresh_db() {
         crate::codec::pool::register_vec_auto_extension().unwrap(); // register vec extension before opening any connection

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ohara_core::storage::{HunkHit, HunkRecord};
 use ohara_core::types::{CommitMeta, Hunk};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction};
 
 use crate::codec::row_codec::{change_kind_to_str, str_to_change_kind, upsert_file_path};
 use crate::codec::vec_codec::vec_to_bytes;
@@ -56,6 +56,13 @@ pub fn put_many(c: &mut Connection, records: &[HunkRecord]) -> Result<()> {
         return Ok(());
     }
     let tx = c.transaction()?;
+    put_many_tx(&tx, records)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Write `records` inside the caller's transaction. See [`put_many`].
+pub fn put_many_tx(tx: &Transaction<'_>, records: &[HunkRecord]) -> Result<()> {
     // Resume safety: drop any hunks (and their FTS5 + vec mirrors) that
     // already exist for the commits we're about to write. The indexer
     // calls put_many once per commit, but this also handles batched
@@ -86,7 +93,7 @@ pub fn put_many(c: &mut Connection, records: &[HunkRecord]) -> Result<()> {
         tx.execute("DELETE FROM hunk WHERE commit_sha = ?1", params![sha])?;
     }
     for r in records {
-        let fp_id = upsert_file_path(&tx, &r.hunk.file_path, r.hunk.language.as_deref())?;
+        let fp_id = upsert_file_path(tx, &r.hunk.file_path, r.hunk.language.as_deref())?;
         // Plan 11: persist the semantic-text representation alongside
         // the raw diff. Empty semantic_text from a legacy caller falls
         // back to diff_text via COALESCE so the FTS lane never sees
@@ -134,9 +141,8 @@ pub fn put_many(c: &mut Connection, records: &[HunkRecord]) -> Result<()> {
         // cascades to hunk_symbol via the ON DELETE CASCADE on the
         // foreign key, so re-indexing the same commit doesn't leak
         // stale rows.
-        crate::tables::hunk_symbol::put_for_hunk(&tx, hunk_id, &r.symbols)?;
+        crate::tables::hunk_symbol::put_for_hunk(tx, hunk_id, &r.symbols)?;
     }
-    tx.commit()?;
     Ok(())
 }
 
@@ -730,7 +736,7 @@ mod proptests {
                 }],
             )
             .unwrap();
-            symbol::put_many(
+            symbol::replace_all(
                 &mut c,
                 &[Symbol {
                     file_path: "src/lib.rs".into(),

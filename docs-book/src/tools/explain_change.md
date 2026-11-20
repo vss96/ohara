@@ -96,12 +96,32 @@ Notes on the `_meta.explain` block:
 - `lines_queried` reflects the **clamped** range (the server clamps
   `line_end` to the file's actual length).
 - `blame_coverage` is the fraction of queried lines that resolved to
-  a commit the local index knows about. Less than `1.0` means at
-  least one line landed on a SHA older than the current watermark
-  (re-run `ohara index` to backfill).
+  a commit: one the local index knows about, or one read from git by
+  the fallback below. Less than `1.0` means at least one line landed
+  on a commit that neither source could resolve (re-run `ohara index`
+  to backfill).
 - `limitation` is a free-form note when the result set is constrained
   (e.g. "file does not exist in HEAD" or "file was renamed; pre-rename
   history not reached").
+
+### Commits not indexed yet
+
+Blame runs against the checkout's working tree, so it can name commits
+the index hasn't caught up with — a commit made a moment ago, or one
+on a worktree whose tip hasn't been indexed. Instead of dropping those
+lines, `explain_change` reads the commit's message, author and date
+straight from git and returns it as a normal `EXACT` hit with an empty
+`diff_excerpt` (`diff_truncated: false`). The `limitation` field then
+names them, with SHAs shortened to 7 characters:
+
+```text
+2 commit(s) not yet indexed: metadata from git, no diff excerpt (a1b2c3d, e4f5a6b)
+```
+
+If the same response also skipped commits that git couldn't resolve,
+both notes appear, joined by `"; "`, the skipped note first. Run
+`ohara index` (or let the post-commit hook do it) to get diff excerpts
+for them.
 - `related_commits` (plan 12) is the file-scope context list — commits
   that touched the same file near each blame anchor. **These are NOT
   proof of line-level ownership**; they're labelled

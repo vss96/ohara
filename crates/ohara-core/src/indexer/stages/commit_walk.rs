@@ -2,6 +2,7 @@
 
 use crate::indexer::CommitSource;
 use crate::types::CommitMeta;
+use crate::worktree::CommitSha;
 use crate::Result;
 
 /// The commit-walk stage: asks the source for commits since `watermark`
@@ -27,6 +28,21 @@ impl CommitWalkStage {
     ) -> Result<Vec<CommitMeta>> {
         let since = watermark.map(|w| w.commit_sha.as_str());
         source.list_commits(since).await
+    }
+
+    /// Plan 33: walk from `from` (the live HEAD when `None`) hiding every
+    /// tip in `hide` (all worktrees' indexed tips) instead of resuming from
+    /// a single watermark.
+    pub async fn run_hiding(
+        source: &dyn CommitSource,
+        from: Option<&CommitSha>,
+        hide: &[CommitSha],
+    ) -> Result<Vec<CommitMeta>> {
+        let hide: Vec<String> = hide.iter().map(|s| s.as_str().to_string()).collect();
+        match from {
+            Some(f) => source.list_commits_from_hiding(f.as_str(), &hide).await,
+            None => source.list_commits_hiding(&hide).await,
+        }
     }
 }
 

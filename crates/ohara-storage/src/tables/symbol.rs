@@ -62,24 +62,6 @@ fn put_one(tx: &rusqlite::Transaction<'_>, fp_id: i64, s: &Symbol) -> Result<()>
     Ok(())
 }
 
-/// Drop all symbol rows (and their FTS5 mirror) for the repo's HEAD
-/// snapshot. `ohara index --force` calls this before re-running
-/// `put_head_symbols` so repeated re-extracts don't accumulate
-/// duplicate rows. The schema-level cascade also clears the related
-/// `vec_symbol` rows.
-pub fn clear_all(c: &mut Connection) -> Result<()> {
-    let tx = c.transaction()?;
-    // Drop FTS5 + vec mirrors first (they reference symbol.id), then symbol.
-    // V1 has fts_symbol (qualified_name + source_text); V2 added
-    // fts_symbol_name (kind + name + sibling_names); both must clear.
-    tx.execute("DELETE FROM fts_symbol", [])?;
-    tx.execute("DELETE FROM fts_symbol_name", [])?;
-    tx.execute("DELETE FROM vec_symbol", [])?;
-    tx.execute("DELETE FROM symbol", [])?;
-    tx.commit()?;
-    Ok(())
-}
-
 /// Replace HEAD-frame symbols for a repo. The `symbol` table holds only
 /// the latest HEAD snapshot — historical symbols are never kept — so
 /// every call atomically clears existing rows (and their FTS5 + vec
@@ -87,8 +69,16 @@ pub fn clear_all(c: &mut Connection) -> Result<()> {
 /// `ohara index` (and every post-commit hook fire) would append a
 /// fresh duplicate set, causing the table to grow linearly with index
 /// runs.
-pub fn put_many(c: &mut Connection, symbols: &[Symbol]) -> Result<()> {
+pub fn replace_all(c: &mut Connection, symbols: &[Symbol]) -> Result<()> {
     let tx = c.transaction()?;
+    replace_all_tx(&tx, symbols)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// [`replace_all`] inside the caller's transaction, so the caller can
+/// write the snapshot's provenance atomically with it.
+pub fn replace_all_tx(tx: &rusqlite::Transaction<'_>, symbols: &[Symbol]) -> Result<()> {
     // Clear stale HEAD symbols + their mirrors first. Order matters:
     // FTS5 + vec virtual tables hold rowid references into `symbol`,
     // so they're cleared before the parent rows.
@@ -97,11 +87,17 @@ pub fn put_many(c: &mut Connection, symbols: &[Symbol]) -> Result<()> {
     tx.execute("DELETE FROM vec_symbol", [])?;
     tx.execute("DELETE FROM symbol", [])?;
     for s in symbols {
-        let fp_id = upsert_file_path(&tx, &s.file_path, Some(&s.language))?;
-        put_one(&tx, fp_id, s)?;
+        let fp_id = upsert_file_path(tx, &s.file_path, Some(&s.language))?;
+        put_one(tx, fp_id, s)?;
     }
-    tx.commit()?;
     Ok(())
+}
+
+/// Every symbol name in the HEAD snapshot, sorted by name.
+pub fn names(c: &mut Connection) -> Result<Vec<String>> {
+    let mut stmt = c.prepare("SELECT name FROM symbol ORDER BY name")?;
+    let rows = stmt.query_map([], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
 }
 
 /// BM25 over `fts_symbol_name`, joined to the touched-file's hunk +

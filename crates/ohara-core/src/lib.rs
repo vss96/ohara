@@ -20,6 +20,8 @@ pub mod query_understanding;
 pub mod retriever;
 pub mod storage;
 pub mod types;
+pub mod visibility;
+pub mod worktree;
 
 pub use diff_text::{count_lines, truncate_diff, DIFF_EXCERPT_MAX_LINES};
 pub use embed::{EmbedMode, EmbeddingProvider};
@@ -36,7 +38,7 @@ pub use indexer::stages::{
 };
 pub use indexer::{
     CommitSource, Indexer, IndexerReport, NullProgress, PhaseTimings, ProgressSink, SymbolSource,
-    MAX_ATTRIBUTABLE_SOURCE_BYTES,
+    TipContext, MAX_ATTRIBUTABLE_SOURCE_BYTES,
 };
 pub use query::*;
 pub use retriever::{RankingWeights, Retriever};
@@ -47,4 +49,9 @@ pub use storage::{
 pub use types::{
     ulid_for_commit, AttributionKind, ChangeKind, CommitMeta, ContentHash, Hunk, HunkSymbol,
     Provenance, RepoId, Symbol, SymbolKind,
+};
+pub use visibility::{CommitVisibility, VisibilityScope};
+pub use worktree::{
+    head_symbols_stale, main_needs_first_run, owns_head_symbols, CommitSha, HeadSymbolSnapshot,
+    IndexedTip, TipStore, WorktreeKey,
 };

@@ -33,6 +33,14 @@ impl Client {
         }
     }
 
+    /// Whether a connection to the daemon socket can be opened right now.
+    ///
+    /// Lets a caller tell "the request never reached the daemon" (safe to
+    /// fall back in-process) apart from a failure after the request was sent.
+    pub async fn reachable(&self) -> bool {
+        UnixStream::connect(&self.socket).await.is_ok()
+    }
+
     /// Send `req` to the daemon and return the parsed [`Response`].
     ///
     /// Opens a fresh connection per call, writes one length-prefixed frame,

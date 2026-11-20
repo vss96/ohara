@@ -8,9 +8,12 @@ use std::sync::Arc;
 use super::provider::{resolve_provider, ProviderArg};
 use crate::resources::{apply_intensity, detect_host, pick_resources, ResourcePlan, ResourcesArg};
 
+pub(crate) mod daemon_route;
+mod force;
+pub(crate) mod notify;
 mod rebuild;
 mod summary;
-use rebuild::{assert_rebuild_safe, delete_index_files};
+mod up_to_date;
 use summary::{failed_commits_notice, index_summary_human, phase_timings_json};
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
@@ -47,11 +50,11 @@ pub struct Args {
     /// Used by the post-commit hook so empty re-indexes are nearly free.
     #[arg(long)]
     pub incremental: bool,
-    /// Force a full re-walk of HEAD symbols even when the watermark
-    /// already points at HEAD. Clears existing symbol rows first so the
-    /// new AST sibling-merge chunker (Plan 3 / Track C) populates the
-    /// index without duplicates. Mutually exclusive with `--incremental`
-    /// (force wins if both are set).
+    /// Force a full re-extract of HEAD symbols even when HEAD is already
+    /// indexed; the new snapshot replaces the old one atomically. A linked
+    /// worktree leaves the snapshot to the main checkout once main has a
+    /// tip. Mutually exclusive with `--incremental` (force wins if both
+    /// are set).
     #[arg(long)]
     pub force: bool,
     /// Plan 13: delete the existing index for this repo and rebuild
@@ -175,7 +178,7 @@ fn noop_report() -> IndexerReport {
     }
 }
 
-pub async fn run(args: Args) -> Result<IndexerReport> {
+pub async fn run(args: Args, no_daemon: bool) -> Result<IndexerReport> {
     // Interactive front-end: when `-i` is set, the wizard owns the
     // tuning surface. It returns a fully-assembled `Args` to run, an
     // equivalent command to print (user declined to run), or a cancel.
@@ -199,7 +202,9 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
     // covers the whole command — embedder load (which can be 15-25s
     // on first run) is part of "how long did `ohara index` take".
     let cmd_start = std::time::Instant::now();
-    let (repo_id, canonical, first_commit) = super::resolve_repo_id(&args.path)?;
+    let id = super::resolve_repo_id(&args.path)?;
+    let repo_id = id.repo_id.clone();
+    let canonical = id.worktree_path.clone();
     let db_path = super::index_db_path(&repo_id)?;
     tracing::info!(repo = %canonical.display(), id = repo_id.as_str(), db = %db_path.display(), "indexing");
 
@@ -210,17 +215,7 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
     // sidecars; then fall through to the normal index flow, which
     // will re-run migrations and rebuild every row from scratch.
     if args.rebuild {
-        if !args.yes {
-            bail!(
-                "refusing to --rebuild without --yes: would delete {}.\n\
-                 Re-run with `--rebuild --yes` to confirm.",
-                db_path.display(),
-            );
-        }
-        let home = ohara_core::paths::ohara_home()?;
-        assert_rebuild_safe(&db_path, &home)?;
-        tracing::warn!(db = %db_path.display(), "rebuilding: deleting existing index DB");
-        delete_index_files(&db_path)?;
+        rebuild::drop_index(args.yes, &db_path, &id.worktree)?;
     }
 
     // Resolve the resource plan up front so the chosen values are
@@ -244,7 +239,7 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
 
     let storage = Arc::new(ohara_storage::SqliteStorage::open(&db_path).await?);
     storage
-        .open_repo(&repo_id, &canonical.to_string_lossy(), &first_commit)
+        .open_repo(&repo_id, &id.id_path, &id.first_commit_sha)
         .await?;
 
     // Plan 27: guard against embed_input_mode mismatch on incremental runs.
@@ -277,28 +272,29 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         }
     }
 
-    // --force: clear existing HEAD symbol rows so the v0.3 AST sibling-merge
-    // chunker (Track C) can repopulate without duplicates. The watermark and
-    // commit/hunk history are untouched — only HEAD-snapshot symbols are
-    // re-extracted. `force` wins over `incremental`.
+    // --force: a full pass whose HEAD-symbol step (when this worktree owns
+    // the snapshot) replaces the snapshot atomically, so nothing is cleared
+    // up front. Commit/hunk history is untouched. `force` wins over
+    // `incremental`.
     if args.force {
-        tracing::info!("force: clearing existing HEAD symbol rows");
-        storage.clear_head_symbols(&repo_id).await?;
+        let tips = ohara_core::TipStore::indexed_tips(storage.as_ref(), &repo_id).await?;
+        if let Some(note) = force::force_note(&id.worktree, &tips) {
+            println!("{note}");
+        }
     }
 
-    // Fast path: when --incremental is set and storage's last_indexed_commit
-    // matches HEAD, return immediately without booting the FastEmbed model
-    // (which costs ~hundreds of ms even when cached). This is what makes the
-    // post-commit hook nearly free on no-op re-indexes.
-    if args.incremental && !args.force {
-        let st = storage.get_index_status(&repo_id).await?;
-        let walker = ohara_git::GitWalker::open(&canonical)?;
-        let head = walker.head_commit_sha()?;
-        if st.last_indexed_commit.as_deref() == Some(head.as_str()) {
-            tracing::info!(sha = %head, "incremental: index up-to-date, skipping embedder init");
-            println!("index up-to-date at {head}");
-            return Ok(noop_report());
-        }
+    // Fast path: with --incremental and nothing to walk (every commit is under
+    // an indexed tip), return without booting the embedder.
+    if args.incremental && !args.force && up_to_date::nothing_to_walk(storage.as_ref(), &id).await?
+    {
+        let head = up_to_date::head_sha(&id)?;
+        tracing::info!(sha = %head.as_str(), "incremental: index up-to-date, skipping embedder init");
+        println!("index up-to-date at {}", head.as_str());
+        return Ok(noop_report());
+    }
+
+    if let Some(report) = daemon_route::try_route(&args, no_daemon, &id).await? {
+        return Ok(report);
     }
 
     // Apply --threads before the embedder loads so the ort runtime
@@ -367,7 +363,11 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
     );
 
     let commit_source = std::sync::Arc::new(ohara_git::GitCommitSource::open(&canonical)?);
-    let symbol_source = std::sync::Arc::new(ohara_parse::GitSymbolSource::open(&canonical)?);
+    // Pin the walk start, the HEAD-symbol snapshot and the recorded tip to
+    // one commit, so a HEAD that moves mid-pass cannot split them.
+    let head = up_to_date::head_sha(&id)?;
+    let symbol_source =
+        std::sync::Arc::new(ohara_parse::GitSymbolSource::open_at(&canonical, &head)?);
 
     // Plan 13: build the runtime metadata snapshot up front so a
     // successful pass records "this index was built with X embedder /
@@ -398,6 +398,12 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         // Plan 26: load `.oharaignore` / `.gitattributes` from the repo
         // root so the indexer respects the ignore filter automatically.
         .with_repo_root(canonical.clone())
+        .with_tip_context(ohara_core::TipContext {
+            tips: storage.clone(),
+            visibility: Arc::new(ohara_git::GitVisibility::open(&canonical)?),
+            worktree: id.worktree.clone(),
+            head,
+        })
         // Plan 27: wire the chosen embed-cache mode into the indexer so
         // the coordinator picks the right cache key strategy.
         .with_embed_mode(args.embed_cache.into());
@@ -436,37 +442,8 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
     if let Some(notice) = failed_commits_notice(report.commits_failed as u64) {
         eprintln!("{notice}");
     }
-    notify_daemons_of_invalidation(&canonical).await;
+    notify::notify_daemons_of_invalidation(&canonical, None).await;
     Ok(report)
-}
-
-/// Best-effort: notify every alive daemon that `repo_path` was re-indexed.
-///
-/// Failures at any step (registry missing, daemon down, IPC error) are
-/// silently discarded — the next `list_alive` call prunes stale records.
-async fn notify_daemons_of_invalidation(repo_path: &std::path::Path) {
-    use ohara_engine::client::{registry_path, Client};
-    use ohara_engine::ipc::{Request, RequestMethod};
-    use ohara_engine::registry::Registry;
-
-    let Ok(reg_path) = registry_path() else {
-        return;
-    };
-    let Ok(reg) = Registry::open(&reg_path) else {
-        return;
-    };
-    let Ok(alive) = reg.list_alive() else {
-        return;
-    };
-    for d in alive {
-        let req = Request {
-            id: 1,
-            repo_path: Some(repo_path.to_string_lossy().to_string()),
-            method: RequestMethod::InvalidateRepo,
-        };
-        // Best-effort. Daemon down → next list_alive prunes it.
-        let _ = Client::connect(&d.socket_path).call(req).await;
-    }
 }
 
 #[cfg(test)]

@@ -11,8 +11,9 @@
 //! - [`migrations`]: refinery wrapper that runs `migrations/*.sql` on
 //!   open.
 //! - [`storage_impl`]: the `Storage` impl ([`SqliteStorage`]). Resume-safe:
-//!   per-commit writes are DELETE-then-INSERT into `vec_*` and `fts_*`
-//!   so a crashed-mid-commit run replays cleanly.
+//!   a commit and its hunks are written in one transaction
+//!   (`put_commit_with_hunks`), and the writes are DELETE-then-INSERT into
+//!   `vec_*` and `fts_*`, so a crashed-mid-commit run replays cleanly.
 //! - [`tables`]: per-table query helpers (commit, hunk, symbol, vec_*,
 //!   fts_*, index_metadata).
 //! - [`metrics`]: lightweight counters for index/query timing.
@@ -23,6 +24,8 @@ pub mod codec;
 pub mod metrics;
 pub mod migrations;
 pub mod storage_impl;
+mod storage_write;
 pub mod tables;
+pub mod tip_store;
 
 pub use storage_impl::SqliteStorage;

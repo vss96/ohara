@@ -11,9 +11,17 @@
 
 pub mod blame;
 pub mod diff;
+pub mod head;
+pub mod identity;
+pub mod visibility;
 pub mod walker;
 
 pub use blame::Blamer;
+pub use head::read_head;
+pub use identity::RepoIdentity;
+pub use visibility::{
+    any_unreachable, checkout_heads, merge_base, reachable_commit_shas, GitVisibility,
+};
 pub use walker::GitWalker;
 
 use anyhow::Result;
@@ -82,6 +90,43 @@ impl CommitSource for GitCommitSource {
         })
         .await
         .map_err(|e| ohara_core::OhraError::Git(format!("list_commits: join: {e}")))?
+    }
+
+    #[tracing::instrument(skip(self), fields(repo = %self.repo_path.display()))]
+    async fn list_commits_hiding(&self, hide: &[String]) -> ohara_core::Result<Vec<CommitMeta>> {
+        let hide = hide.to_vec();
+        let path = self.repo_path.clone();
+        tokio::task::spawn_blocking(move || -> ohara_core::Result<Vec<CommitMeta>> {
+            let w = GitWalker::open(&path).map_err(|e| {
+                ohara_core::OhraError::Git(format!("list_commits_hiding: open: {e}"))
+            })?;
+            let hide: Vec<&str> = hide.iter().map(String::as_str).collect();
+            w.list_commits_hiding(&hide)
+                .map_err(|e| ohara_core::OhraError::Git(format!("list_commits_hiding: {e}")))
+        })
+        .await
+        .map_err(|e| ohara_core::OhraError::Git(format!("list_commits_hiding: join: {e}")))?
+    }
+
+    #[tracing::instrument(skip(self), fields(repo = %self.repo_path.display()))]
+    async fn list_commits_from_hiding(
+        &self,
+        from: &str,
+        hide: &[String],
+    ) -> ohara_core::Result<Vec<CommitMeta>> {
+        let from = from.to_string();
+        let hide = hide.to_vec();
+        let path = self.repo_path.clone();
+        tokio::task::spawn_blocking(move || -> ohara_core::Result<Vec<CommitMeta>> {
+            let w = GitWalker::open(&path).map_err(|e| {
+                ohara_core::OhraError::Git(format!("list_commits_from_hiding: open: {e}"))
+            })?;
+            let hide: Vec<&str> = hide.iter().map(String::as_str).collect();
+            w.list_commits_from_hiding(&from, &hide)
+                .map_err(|e| ohara_core::OhraError::Git(format!("list_commits_from_hiding: {e}")))
+        })
+        .await
+        .map_err(|e| ohara_core::OhraError::Git(format!("list_commits_from_hiding: join: {e}")))?
     }
 
     #[tracing::instrument(skip(self), fields(repo = %self.repo_path.display()))]
@@ -188,6 +233,22 @@ impl CommitsBehind for GitCommitsBehind {
         })
         .await
         .map_err(|e| ohara_core::OhraError::Git(format!("count_since: join: {e}")))?
+    }
+
+    async fn count_hiding(&self, hide: &[String]) -> ohara_core::Result<u64> {
+        let hide = hide.to_vec();
+        let path = self.repo_path.clone();
+        tokio::task::spawn_blocking(move || -> ohara_core::Result<u64> {
+            let w = GitWalker::open(&path)
+                .map_err(|e| ohara_core::OhraError::Git(format!("count_hiding: open: {e}")))?;
+            let hide: Vec<&str> = hide.iter().map(String::as_str).collect();
+            let cs = w
+                .list_commits_hiding(&hide)
+                .map_err(|e| ohara_core::OhraError::Git(format!("count_hiding: {e}")))?;
+            Ok(cs.len() as u64)
+        })
+        .await
+        .map_err(|e| ohara_core::OhraError::Git(format!("count_hiding: join: {e}")))?
     }
 }
 

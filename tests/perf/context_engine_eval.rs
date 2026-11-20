@@ -327,13 +327,14 @@ async fn context_engine_eval_passes_thresholds() -> Result<()> {
         embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
         workers: None,
     };
-    ohara_cli::commands::index::run(index_args)
+    ohara_cli::commands::index::run(index_args, true)
         .await
         .context("index eval fixture")?;
 
     // Build a Retriever with the same components the CLI uses.
-    let (repo_id, _, _) =
-        ohara_cli::commands::resolve_repo_id(&fixture).context("resolve repo id")?;
+    let repo_id = ohara_cli::commands::resolve_repo_id(&fixture)
+        .context("resolve repo id")?
+        .repo_id;
     let db_path = ohara_cli::commands::index_db_path(&repo_id).context("resolve db path")?;
     let storage = Arc::new(
         ohara_storage::SqliteStorage::open(&db_path)

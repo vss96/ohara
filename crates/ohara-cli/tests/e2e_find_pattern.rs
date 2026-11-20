@@ -48,10 +48,10 @@ async fn find_pattern_returns_retry_commit_first() {
         workers: None,
         interactive: false,
     };
-    ohara_cli::commands::index::run(args).await.unwrap();
+    ohara_cli::commands::index::run(args, true).await.unwrap();
 
     // build a Retriever directly to avoid parsing CLI stdout
-    let (repo_id, _, _) = ohara_cli::commands::resolve_repo_id(&repo).unwrap();
+    let repo_id = ohara_cli::commands::resolve_repo_id(&repo).unwrap().repo_id;
     let db = ohara_cli::commands::index_db_path(&repo_id).unwrap();
     let storage = std::sync::Arc::new(ohara_storage::SqliteStorage::open(&db).await.unwrap());
     let embedder = std::sync::Arc::new(

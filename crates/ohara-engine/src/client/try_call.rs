@@ -5,6 +5,8 @@
 use crate::client::outcome::DaemonCallResult;
 use crate::client::{Client, DaemonHandle};
 use crate::ipc::Request;
+use std::path::Path;
+use std::time::Duration;
 
 /// Try to route `req` through a running daemon.
 ///
@@ -41,6 +43,33 @@ pub async fn try_daemon_call(
     match resp.result {
         Some(value) => DaemonCallResult::Ok(value),
         None => DaemonCallResult::ConnectFailed("daemon response missing result".into()),
+    }
+}
+
+/// Send an index-writing `req` to the daemon on `socket`, telling "never
+/// reached the daemon" apart from "failed after send".
+///
+/// A connection probe that fails yields [`DaemonCallResult::ConnectFailed`]
+/// (safe to run in-process). Once the probe succeeds, a timeout or a
+/// transport/decode failure yields [`DaemonCallResult::Interrupted`]: the
+/// daemon may still be writing. Route the result with
+/// [`DaemonCallResult::route_write`].
+pub async fn try_daemon_write(socket: &Path, req: Request, timeout: Duration) -> DaemonCallResult {
+    let client = Client::connect(socket);
+    if !client.reachable().await {
+        tracing::debug!(socket = %socket.display(), "daemon unreachable; running in-process");
+        return DaemonCallResult::ConnectFailed(format!("connect {}", socket.display()));
+    }
+    let resp = match client.call_with_timeout(req, timeout).await {
+        Ok(r) => r,
+        Err(e) => return DaemonCallResult::Interrupted(e.to_string()),
+    };
+    if let Some(err) = resp.error {
+        return DaemonCallResult::DaemonErrored(err);
+    }
+    match resp.result {
+        Some(value) => DaemonCallResult::Ok(value),
+        None => DaemonCallResult::Interrupted("daemon response missing result".into()),
     }
 }
 
@@ -88,6 +117,59 @@ mod try_call_tests {
         assert!(
             matches!(resp, DaemonCallResult::ConnectFailed(_)),
             "connect to dead socket must be ConnectFailed"
+        );
+    }
+
+    fn ping() -> Request {
+        Request {
+            id: 1,
+            repo_path: None,
+            method: RequestMethod::Ping,
+        }
+    }
+
+    #[tokio::test]
+    async fn write_to_unreachable_socket_is_connect_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let resp = try_daemon_write(
+            &dir.path().join("absent.sock"),
+            ping(),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            matches!(resp, DaemonCallResult::ConnectFailed(_)),
+            "got {resp:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_dropped_after_send_is_interrupted() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("drop.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let (got_request, request_seen) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            // The probe closes before sending a frame; the request
+            // connection is read in full, then dropped unanswered.
+            let mut got_request = Some(got_request);
+            while let Ok((mut conn, _)) = listener.accept().await {
+                if let Ok(Some(_)) = crate::ipc::read_frame_or_eof(&mut conn).await {
+                    if let Some(tx) = got_request.take() {
+                        let _ = tx.send(());
+                    }
+                }
+                drop(conn);
+            }
+        });
+        let resp = try_daemon_write(&sock, ping(), std::time::Duration::from_secs(5)).await;
+        assert!(
+            request_seen.await.is_ok(),
+            "the daemon side must have received the whole request"
+        );
+        assert!(
+            matches!(resp, DaemonCallResult::Interrupted(_)),
+            "got {resp:?}"
         );
     }
 }

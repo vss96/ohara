@@ -1,8 +1,8 @@
 {
   "_meta": {
     "explain": {
-      "blame_coverage": 0.0,
-      "commits_unique": 0,
+      "blame_coverage": 1.0,
+      "commits_unique": 1,
       "limitation": "<normalised>",
       "lines_queried": [
         1,
@@ -16,5 +16,19 @@
       "last_indexed_commit": null
     }
   },
-  "hits": []
+  "hits": [
+    {
+      "blame_lines": [
+        1
+      ],
+      "commit_author": "a",
+      "commit_date": "<normalised>",
+      "commit_message": "initial commit",
+      "commit_sha": "<normalised>",
+      "diff_excerpt": "",
+      "diff_truncated": false,
+      "file_path": "a.rs",
+      "provenance": "EXACT"
+    }
+  ]
 }

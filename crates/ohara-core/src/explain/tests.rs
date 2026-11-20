@@ -620,3 +620,153 @@ async fn explain_handles_single_line_range() {
     assert_eq!(last.1, 5);
     assert_eq!(last.2, 5);
 }
+
+// ----- Git fallback for unindexed commits (plan-33 Task 10) ------------
+
+/// `CommitLookup` fake backed by a map; unknown SHAs resolve to `None`.
+struct MapLookup(HashMap<String, CommitMeta>);
+
+#[async_trait]
+impl CommitLookup for MapLookup {
+    async fn commit_meta(&self, sha: &str) -> Result<Option<CommitMeta>> {
+        Ok(self.0.get(sha).cloned())
+    }
+}
+
+fn fallback_query() -> ExplainQuery {
+    ExplainQuery {
+        file: "src/a.rs".into(),
+        line_start: 1,
+        line_end: 3,
+        k: 5,
+        include_diff: true,
+        include_related: false,
+    }
+}
+
+fn fallback_ranges(indexed: &str, unindexed: &str) -> Vec<BlameRange> {
+    vec![
+        BlameRange {
+            commit_sha: indexed.into(),
+            lines: vec![1, 2],
+        },
+        BlameRange {
+            commit_sha: unindexed.into(),
+            lines: vec![3],
+        },
+    ]
+}
+
+#[tokio::test]
+async fn unindexed_blame_commit_is_hydrated_from_git() {
+    let mut storage = FakeStorageOrch::new();
+    storage.seed_commit(cm("aaaaaaaaaaaa", 1_000, "indexed change"));
+    storage.seed_hunk("aaaaaaaaaaaa", "src/a.rs", "+    a();\n");
+    let u = "uuuuuuuuuuuuuuuu";
+    let lookup = MapLookup(HashMap::from([(u.to_string(), cm(u, 2_000, "from git"))]));
+    let id = RepoId::from_parts("first", "/r");
+    let q = fallback_query();
+    let h = hydrator::hydrate_blame_results(hydrator::HydrateInputs {
+        storage: &storage,
+        blame_ranges: fallback_ranges("aaaaaaaaaaaa", u),
+        query: &q,
+        repo_id: &id,
+        git_fallback: Some(&lookup),
+    })
+    .await
+    .unwrap();
+    assert_eq!(h.hits.len(), 2);
+    let hit = h.hits.iter().find(|x| x.commit_sha == u).unwrap();
+    assert_eq!(hit.commit_message, "from git");
+    assert_eq!(hit.commit_author.as_deref(), Some("alice"));
+    assert_eq!(hit.blame_lines, vec![3]);
+    assert_eq!(hit.diff_excerpt, "");
+    assert!(!hit.diff_truncated);
+    assert_eq!(hit.provenance, Provenance::Exact);
+    assert!((h.coverage - 1.0).abs() < 1e-6);
+    assert_eq!(
+        h.limitation,
+        Some(format!(
+            "1 commit(s) not yet indexed: metadata from git, no diff excerpt ({})",
+            &u[..7]
+        ))
+    );
+}
+
+#[tokio::test]
+async fn commit_unknown_to_both_storage_and_git_is_still_skipped() {
+    let mut storage = FakeStorageOrch::new();
+    storage.seed_commit(cm("aaaaaaaaaaaa", 1_000, "indexed change"));
+    storage.seed_hunk("aaaaaaaaaaaa", "src/a.rs", "+    a();\n");
+    let id = RepoId::from_parts("first", "/r");
+    let q = fallback_query();
+    let with_empty = MapLookup(HashMap::new());
+    let a = hydrator::hydrate_blame_results(hydrator::HydrateInputs {
+        storage: &storage,
+        blame_ranges: fallback_ranges("aaaaaaaaaaaa", "missing"),
+        query: &q,
+        repo_id: &id,
+        git_fallback: Some(&with_empty),
+    })
+    .await
+    .unwrap();
+    let b = hydrator::hydrate_blame_results(hydrator::HydrateInputs {
+        storage: &storage,
+        blame_ranges: fallback_ranges("aaaaaaaaaaaa", "missing"),
+        query: &q,
+        repo_id: &id,
+        git_fallback: None,
+    })
+    .await
+    .unwrap();
+    assert_eq!(a.hits.len(), 1);
+    assert_eq!(a.hits.len(), b.hits.len());
+    assert_eq!(a.coverage, b.coverage);
+    assert_eq!(a.limitation, b.limitation);
+}
+
+#[tokio::test]
+async fn no_fallback_keeps_legacy_behaviour() {
+    let mut storage = FakeStorageOrch::new();
+    storage.seed_commit(cm("aaaaaaaaaaaa", 1_000, "indexed change"));
+    storage.seed_hunk("aaaaaaaaaaaa", "src/a.rs", "+    a();\n");
+    let id = RepoId::from_parts("first", "/r");
+    let q = fallback_query();
+    let h = hydrator::hydrate_blame_results(hydrator::HydrateInputs {
+        storage: &storage,
+        blame_ranges: fallback_ranges("aaaaaaaaaaaa", "missing"),
+        query: &q,
+        repo_id: &id,
+        git_fallback: None,
+    })
+    .await
+    .unwrap();
+    assert_eq!(h.hits.len(), 1);
+    assert!((h.coverage - 2.0 / 3.0).abs() < 1e-6);
+    let lim = h.limitation.unwrap();
+    assert!(
+        lim.contains("older than the local index watermark"),
+        "{lim}"
+    );
+}
+
+#[tokio::test]
+async fn explain_change_with_fallback_hydrates_unindexed_commits_from_git() {
+    let mut storage = FakeStorageOrch::new();
+    storage.seed_commit(cm("aaaaaaaaaaaa", 1_000, "indexed change"));
+    storage.seed_hunk("aaaaaaaaaaaa", "src/a.rs", "+    a();\n");
+    let u = "uuuuuuuuuuuuuuuu";
+    let lookup = MapLookup(HashMap::from([(u.to_string(), cm(u, 2_000, "from git"))]));
+    let blamer = ScriptedBlamer {
+        out: fallback_ranges("aaaaaaaaaaaa", u),
+        last_args: Mutex::new(None),
+    };
+    let id = RepoId::from_parts("first", "/r");
+    let (hits, meta) =
+        explain_change_with_fallback(&storage, &blamer, Some(&lookup), &id, &fallback_query())
+            .await
+            .unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].commit_sha, u, "the git-hydrated commit is newest");
+    assert!((meta.blame_coverage - 1.0).abs() < 1e-6);
+}

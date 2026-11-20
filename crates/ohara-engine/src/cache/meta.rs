@@ -1,11 +1,16 @@
 use ohara_core::query::ResponseMeta;
 use ohara_core::types::RepoId;
+use ohara_core::WorktreeKey;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// TTL-bounded cache for [`ResponseMeta`] keyed by [`RepoId`].
+/// Cache key: one entry per worktree of a repository (plan-33), because
+/// freshness (`commits_behind_head`) is per worktree.
+type Key = (RepoId, WorktreeKey);
+
+/// TTL-bounded cache for [`ResponseMeta`] keyed by `(RepoId, WorktreeKey)`.
 ///
 /// Thread-safe: wraps the inner map in a [`Mutex`] so it can be shared
 /// across async tasks via `Arc<MetaCache>`. Intended to memoize the `_meta`
@@ -13,7 +18,7 @@ use std::time::{Duration, Instant};
 /// every MCP tool call.
 pub struct MetaCache {
     ttl: Duration,
-    inner: Mutex<HashMap<RepoId, (Instant, ResponseMeta)>>,
+    inner: Mutex<HashMap<Key, (Instant, ResponseMeta)>>,
     /// Number of `get` calls served from a fresh (non-expired) entry.
     hits: AtomicU64,
 }
@@ -28,12 +33,12 @@ impl MetaCache {
         }
     }
 
-    /// Return the cached value for `k` if it exists and is still within the
-    /// TTL window. Returns `None` on a miss, an expired entry, or a poisoned
-    /// lock.
-    pub fn get(&self, k: &RepoId) -> Option<ResponseMeta> {
+    /// Return the cached value for `(repo_id, worktree)` if it exists and is
+    /// still within the TTL window. Returns `None` on a miss, an expired
+    /// entry, or a poisoned lock.
+    pub fn get(&self, repo_id: &RepoId, worktree: &WorktreeKey) -> Option<ResponseMeta> {
         let g = self.inner.lock().ok()?;
-        let (t, v) = g.get(k)?;
+        let (t, v) = g.get(&(repo_id.clone(), worktree.clone()))?;
         if t.elapsed() > self.ttl {
             return None;
         }
@@ -47,18 +52,20 @@ impl MetaCache {
         self.hits.load(Ordering::Relaxed)
     }
 
-    /// Insert or overwrite the cached value for `k`, stamping it with the
-    /// current instant. Silently no-ops on a poisoned lock.
-    pub fn put(&self, k: RepoId, v: ResponseMeta) {
+    /// Insert or overwrite the cached value for `(repo_id, worktree)`,
+    /// stamping it with the current instant. Silently no-ops on a poisoned
+    /// lock.
+    pub fn put(&self, repo_id: RepoId, worktree: WorktreeKey, v: ResponseMeta) {
         if let Ok(mut g) = self.inner.lock() {
-            g.insert(k, (Instant::now(), v));
+            g.insert((repo_id, worktree), (Instant::now(), v));
         }
     }
 
-    /// Remove any cached entry for `k`. Silently no-ops on a poisoned lock.
-    pub fn invalidate(&self, k: &RepoId) {
+    /// Remove the cached entries of every worktree of `repo_id`. Silently
+    /// no-ops on a poisoned lock.
+    pub fn invalidate(&self, repo_id: &RepoId) {
         if let Ok(mut g) = self.inner.lock() {
-            g.remove(k);
+            g.retain(|(r, _), _| r != repo_id);
         }
     }
 }
@@ -81,13 +88,17 @@ mod tests {
         RepoId::from_parts("abc", "/x")
     }
 
+    fn main_wt() -> WorktreeKey {
+        WorktreeKey::main()
+    }
+
     #[test]
     fn put_get_within_ttl_returns_value() {
         let cache = MetaCache::new(Duration::from_secs(5));
         let key = make_key();
         let meta = make_meta("hello");
-        cache.put(key.clone(), meta.clone());
-        let got = cache.get(&key).unwrap();
+        cache.put(key.clone(), main_wt(), meta.clone());
+        let got = cache.get(&key, &main_wt()).unwrap();
         assert_eq!(got.hint.as_deref(), Some("hello"));
     }
 
@@ -96,40 +107,59 @@ mod tests {
         // Zero-duration TTL: every entry is immediately expired.
         let cache = MetaCache::new(Duration::from_nanos(0));
         let key = make_key();
-        cache.put(key.clone(), make_meta("stale"));
+        cache.put(key.clone(), main_wt(), make_meta("stale"));
         // Spin briefly so elapsed() > 0 ns.
         std::thread::sleep(Duration::from_millis(1));
-        assert!(cache.get(&key).is_none(), "expired entry must return None");
+        assert!(
+            cache.get(&key, &main_wt()).is_none(),
+            "expired entry must return None"
+        );
     }
 
     #[test]
     fn invalidate_removes_entry() {
         let cache = MetaCache::new(Duration::from_secs(60));
         let key = make_key();
-        cache.put(key.clone(), make_meta("present"));
+        cache.put(key.clone(), main_wt(), make_meta("present"));
         assert!(
-            cache.get(&key).is_some(),
+            cache.get(&key, &main_wt()).is_some(),
             "must be present before invalidate"
         );
         cache.invalidate(&key);
-        assert!(cache.get(&key).is_none(), "must be absent after invalidate");
+        assert!(
+            cache.get(&key, &main_wt()).is_none(),
+            "must be absent after invalidate"
+        );
+    }
+
+    #[test]
+    fn worktrees_do_not_share_entries_and_invalidate_drops_all() {
+        let cache = MetaCache::new(Duration::from_secs(60));
+        let key = make_key();
+        let slot = WorktreeKey::linked("slot-1").unwrap();
+        cache.put(key.clone(), main_wt(), make_meta("main"));
+        assert!(cache.get(&key, &slot).is_none(), "must not cross worktrees");
+        cache.put(key.clone(), slot.clone(), make_meta("slot"));
+        cache.invalidate(&key);
+        assert!(cache.get(&key, &main_wt()).is_none());
+        assert!(cache.get(&key, &slot).is_none());
     }
 
     #[test]
     fn hits_count_only_fresh_cache_hits() {
         let cache = MetaCache::new(Duration::from_secs(60));
         let key = make_key();
-        assert!(cache.get(&key).is_none());
+        assert!(cache.get(&key, &main_wt()).is_none());
         assert_eq!(cache.hits(), 0, "a miss is not a hit");
-        cache.put(key.clone(), make_meta("x"));
-        cache.get(&key).unwrap();
-        cache.get(&key).unwrap();
+        cache.put(key.clone(), main_wt(), make_meta("x"));
+        cache.get(&key, &main_wt()).unwrap();
+        cache.get(&key, &main_wt()).unwrap();
         assert_eq!(cache.hits(), 2);
 
         let expired = MetaCache::new(Duration::from_nanos(0));
-        expired.put(key.clone(), make_meta("stale"));
+        expired.put(key.clone(), main_wt(), make_meta("stale"));
         std::thread::sleep(Duration::from_millis(1));
-        assert!(expired.get(&key).is_none());
+        assert!(expired.get(&key, &main_wt()).is_none());
         assert_eq!(expired.hits(), 0, "an expired entry is not a hit");
     }
 }

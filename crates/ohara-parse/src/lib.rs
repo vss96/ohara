@@ -168,12 +168,26 @@ pub fn symbol_line_span(symbol: &Symbol, source: &str) -> (u32, u32) {
 /// from files in supported languages.
 pub struct GitSymbolSource {
     repo_path: PathBuf,
+    /// Commit to extract; `None` reads the live HEAD.
+    at: Option<String>,
 }
 
 impl GitSymbolSource {
+    /// Extract from whatever HEAD points at when extraction runs.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         Ok(Self {
             repo_path: path.as_ref().to_path_buf(),
+            at: None,
+        })
+    }
+
+    /// Extract the snapshot of commit `sha` rather than the live HEAD, so
+    /// an index pass's snapshot matches the commit it walked from and
+    /// records as its tip even when HEAD moves mid-pass.
+    pub fn open_at<P: AsRef<Path>>(path: P, sha: &ohara_core::CommitSha) -> Result<Self> {
+        Ok(Self {
+            repo_path: path.as_ref().to_path_buf(),
+            at: Some(sha.as_str().to_string()),
         })
     }
 }
@@ -183,11 +197,17 @@ impl SymbolSource for GitSymbolSource {
     #[tracing::instrument(skip(self), fields(repo = %self.repo_path.display()))]
     async fn extract_head_symbols(&self) -> ohara_core::Result<Vec<Symbol>> {
         let path = self.repo_path.clone();
+        let at = self.at.clone();
         tokio::task::spawn_blocking(move || -> ohara_core::Result<Vec<Symbol>> {
-            let repo = git2::Repository::discover(&path)
-                .map_err(|e| ohara_core::OhraError::Git(e.to_string()))?;
-            let head = repo.head().map_err(|e| ohara_core::OhraError::Git(e.to_string()))?;
-            let tree = head.peel_to_tree().map_err(|e| ohara_core::OhraError::Git(e.to_string()))?;
+            let git = |e: git2::Error| ohara_core::OhraError::Git(e.to_string());
+            let repo = git2::Repository::discover(&path).map_err(git)?;
+            let tree = match at {
+                Some(sha) => {
+                    let oid = git2::Oid::from_str(&sha).map_err(git)?;
+                    repo.find_commit(oid).and_then(|c| c.tree()).map_err(git)?
+                }
+                None => repo.head().and_then(|h| h.peel_to_tree()).map_err(git)?,
+            };
             let mut out = Vec::new();
             tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
                 if entry.kind() == Some(git2::ObjectType::Blob) {
@@ -224,6 +244,45 @@ impl SymbolSource for GitSymbolSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Commit `body` as `a.rs` on HEAD of the repo at `dir`.
+    fn commit_a_rs(repo: &git2::Repository, body: &str) -> git2::Oid {
+        let dir = repo.workdir().unwrap().to_path_buf();
+        std::fs::write(dir.join("a.rs"), body).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("a.rs")).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("a", "a@a").unwrap();
+        let parents: Vec<git2::Commit> = repo
+            .head()
+            .ok()
+            .and_then(|h| h.peel_to_commit().ok())
+            .into_iter()
+            .collect();
+        let parents: Vec<&git2::Commit> = parents.iter().collect();
+        repo.commit(Some("HEAD"), &sig, &sig, "m", &tree, &parents)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn open_at_extracts_the_given_commit_not_the_live_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        let first = commit_a_rs(&repo, "fn alpha() {}\n");
+        commit_a_rs(&repo, "fn beta() {}\n");
+        let sha = ohara_core::CommitSha::parse(&first.to_string()).unwrap();
+        let source = GitSymbolSource::open_at(dir.path(), &sha).unwrap();
+        let names: Vec<String> = source
+            .extract_head_symbols()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert!(names.contains(&"alpha".to_string()), "{names:?}");
+        assert!(!names.contains(&"beta".to_string()), "{names:?}");
+    }
 
     #[test]
     fn extract_atomic_symbols_dispatches_javascript_extensions() {

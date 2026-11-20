@@ -19,8 +19,8 @@ ohara index [PATH] [-i | --interactive] [--incremental] [--force] \
 |------|---------|-------------|
 | `PATH` (positional) | `.` | Path to the repo. |
 | `-i`, `--interactive` | off | Launch a guided wizard that prompts for embedding provider, resource intensity, index mode, and (opt-in) advanced knobs, previews the equivalent command, then runs it. Requires a TTY. Other tuning flags are ignored when `-i` is set — the wizard owns the tuning. |
-| `--incremental` | off | Skip the indexer (and embedder init) when the storage watermark already points at HEAD. Used by the post-commit hook to make no-op re-indexes nearly free. |
-| `--force` | off | Clear existing HEAD symbol rows and re-extract from scratch. Used after upgrades that change the AST chunker. Wins over `--incremental` if both are set; commit/hunk history is untouched. |
+| `--incremental` | off | Skip the indexer (and embedder init) when every commit reachable from HEAD is already covered by an indexed tip. Used by the post-commit hook to make no-op re-indexes nearly free. When there is work and an `ohara serve` daemon of the same version is running, the pass runs in the daemon (see [Worktrees](#worktrees)). |
+| `--force` | off | Re-extract HEAD symbols and replace the snapshot in one transaction (the old one stays until the new one is ready). Used after upgrades that change the AST chunker. Wins over `--incremental` if both are set; commit/hunk history is untouched. In a linked worktree it leaves HEAD symbols alone once the main checkout has been indexed (they follow the main checkout). |
 | `--rebuild` | off | **Destructive.** Delete the entire index for this repo and rebuild from scratch. Stronger than `--force` (which only refreshes HEAD-symbol rows). Used when `ohara status` reports `compatibility: needs rebuild` (the binary's embedder dimension or model differs from what the index was built with). Requires `--yes` to confirm; conflicts with `--incremental` and `--force`. |
 | `--yes` | off | Confirm a destructive operation. Currently only valid alongside `--rebuild`. |
 | `--commit-batch` | from `--resources` | Commits per storage transaction. Smaller = less peak RAM and more frequent fsyncs; larger = faster but uses more memory. When unset, `--resources` picks a value from host core count. |
@@ -68,6 +68,13 @@ Full rebuild after an embedder/dimension change (`status` says
 ohara index --rebuild --yes
 ```
 
+Before rebuilding, stop `ohara serve` and any other `ohara` process
+using the index: the rebuild deletes the database files before writing
+the new index, and a process that still has them open keeps working
+against the deleted files. The rebuild indexes only the current
+worktree's HEAD; afterwards run `ohara index` in each other linked
+worktree of the clone to restore its commits.
+
 Cap embedder threads on a shared box, larger batches for speed:
 
 ```sh
@@ -101,6 +108,47 @@ Trade off resource intensity against the rest of the box —
 ohara index --resources conservative
 ohara index --resources aggressive --commit-batch 1024   # explicit flag still wins
 ```
+
+## Worktrees
+
+A git clone and all of its linked worktrees (`git worktree add`) share
+one index. Running `ohara index` inside a linked worktree resolves to
+the main clone's index, embeds only the commits no other worktree has
+indexed yet, and records the worktree's own indexed tip. Queries from
+each worktree only see commits its own `HEAD` reaches.
+
+- The head-snapshot symbol lane describes the main checkout. Once the
+  main checkout has been indexed, indexing from a linked worktree
+  never extracts or replaces HEAD symbols, and `--force` there prints
+  `HEAD symbols follow the main worktree; not refreshing them here`.
+  Until then (the shared index was first built from a linked
+  worktree) linked worktrees write them, `--force` there refreshes
+  them like it does in the main checkout, and the
+  main checkout's first `ohara index --incremental` always runs a pass
+  that records its tip and takes the HEAD symbols over.
+- `--rebuild` inside a linked worktree deletes the index shared by the
+  main clone and every linked worktree. It prints
+  `warning: --rebuild from linked worktree '<name>' drops the index shared by all worktrees of this clone`
+  on stderr before deleting. Only that worktree's HEAD is re-indexed;
+  run `ohara index` in every other worktree afterwards.
+- `--incremental` runs in a running same-version `ohara serve` daemon
+  when there is one, so the daemon stays the single writer and its
+  warm embedder is reused. `ohara index` never starts a daemon for
+  this. It indexes in-process when no daemon is running, the daemon
+  can't be reached, or the repo has no index yet. If the daemon
+  accepted the request and then timed out or replied `needs rebuild`,
+  the command fails instead of indexing in-process. Tuning flags
+  (`--threads`, `--workers`, `--commit-batch`, `--embed-batch`,
+  `--embed-cache`, a non-CPU `--embed-provider`), `--force` and
+  `--rebuild` always run in-process.
+
+- Commits that no branch, tag or worktree reaches any more (deleted
+  branches, removed worktrees, rewritten history) stay indexed until
+  [`ohara prune`](./prune.md) runs; a running daemon prunes on its own
+  after an index pass once some retired tip has become unreachable.
+
+See [Worktrees and the daemon writer](../architecture/indexing.md#worktrees-and-the-daemon-writer)
+for the details and known limits.
 
 ## Interactive walkthrough
 
@@ -228,7 +276,8 @@ follows the summary:
 
 ## Resume safety
 
-Killed mid-walk? The watermark advances every 100 commits inside the
-indexer. Worst case on resume is re-doing ~100 commits — `put_hunks`
-clears any previously-written hunks for those SHAs first, so duplicates
-never accumulate. See [Indexing & abort-resume](../architecture/indexing.md).
+Killed mid-walk? Re-run the same command. The walk skips every commit
+already stored, so only the commits that never landed are embedded
+again, and `put_hunks` clears any partially-written hunks for a SHA
+first, so duplicates never accumulate. The worktree's indexed tip is
+recorded only at the end of a clean pass. See [Indexing & abort-resume](../architecture/indexing.md).

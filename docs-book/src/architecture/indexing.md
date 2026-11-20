@@ -1,22 +1,33 @@
 # Indexing & abort-resume
 
-`ohara index` is the only writer to the SQLite index. This page walks
-through what it does end-to-end, the two fast-paths
-(`--incremental` and `--force`), and the abort-resume contract.
+Two processes write the SQLite index: the `ohara index` CLI, and a
+running `ohara serve` daemon for incremental work (see
+[Worktrees and the daemon writer](#worktrees-and-the-daemon-writer)).
+This page walks through what an index pass does end-to-end, the two
+fast-paths (`--incremental` and `--force`), how linked git worktrees
+share one index, and the abort-resume contract.
 
 ## End-to-end
 
 A full pass, in order:
 
-1. **Resolve repo id.** Hash the canonical repo path + the SHA of the
-   first commit on `HEAD`. Yields a stable `repo_id` used as the
-   directory name under `$OHARA_HOME/`.
+1. **Resolve repo identity.** A plain clone hashes its canonical path
+   + the SHA of the first commit on `HEAD`. A linked git worktree
+   resolves through git's `commondir` to its main clone and takes the
+   main clone's id, so a clone and all its worktrees share one
+   `repo_id` (the directory name under `$OHARA_HOME/`) and one
+   `index.sqlite`. The worktree itself is identified by a worktree
+   key: `''` for the main checkout, the name of the worktree's admin
+   dir (`.git/worktrees/<name>`) for a linked one.
 2. **Open / migrate the index.** `SqliteStorage::open` runs any
    pending refinery migrations (`migrations/V*.sql`) before returning.
-3. **List new commits.** `CommitSource::list_commits(after =
-   watermark)` walks `git log` from the storage watermark to `HEAD`.
-   On a fresh index the watermark is `None` and the walker returns
-   every commit.
+3. **List new commits.** The walker starts at this worktree's `HEAD`
+   and hides every indexed tip of every worktree (the `indexed_tip`
+   table). What remains is exactly the history no worktree has
+   indexed yet, so a commit shared by two worktrees is embedded once.
+   On a fresh index there are no tips and the walker returns every
+   commit. Commits that already have a `commit_record` row are skipped
+   too (see [Abort-resume contract](#abort-resume-contract)).
 4. **For each commit (batched by `--commit-batch`, default 512):**
     1. Extract hunks via `CommitSource::hunks_for_commit`.
     2. Embed `[commit_message, hunk_1.diff_text, …]` in a single
@@ -24,17 +35,32 @@ A full pass, in order:
     3. `put_commit` (commit row + `vec_commit` + `fts_commit`).
     4. `put_hunks` (hunk rows + `vec_hunk` + `fts_hunk_text`,
        DELETE-then-INSERT scoped by `commit_sha`).
-    5. Every 100 commits, advance `repo.last_indexed_commit` and emit
-       a `tracing::info!` progress event.
-5. **Extract HEAD symbols.** `SymbolSource::extract_head_symbols`
-   walks the working tree, parses each supported file with
-   tree-sitter, runs the AST sibling-merge chunker, and produces one
-   `Symbol` per chunk.
-6. **`put_head_symbols`.** Replaces the entire `symbol` /
-   `vec_symbol` / `fts_symbol` / `fts_symbol_name` content for the
-   repo (HEAD is a snapshot, not history).
-7. **Final watermark advance.** Set `last_indexed_commit` to the
-   newest commit walked.
+    5. Every 100 commits, emit a `tracing::info!` progress event.
+5. **Extract HEAD symbols (main checkout, or any worktree until main
+   has a tip).** `SymbolSource::extract_head_symbols` walks the
+   working tree, parses each supported file with tree-sitter, runs
+   the AST sibling-merge chunker, and produces one `Symbol` per
+   chunk. The head-snapshot symbol lane describes the main
+   checkout's `HEAD`, so once the main checkout has a tip a linked
+   worktree skips this step. Until then (a shared index first built
+   from a linked worktree, or a bare repo with only linked
+   worktrees) whichever worktree indexes writes it, so the lane is
+   never empty.
+6. **`put_head_symbols`.** Replaces the `symbol` / `vec_symbol` /
+   `fts_symbol` / `fts_symbol_name` content for the repo (HEAD is a
+   snapshot, not history) in one transaction, after extraction has
+   finished: a failed extraction leaves the previous snapshot intact,
+   and queries never see an empty lane mid-run. The main checkout's
+   first pass replaces whatever a linked worktree wrote.
+7. **Record the tip.** When every commit indexed cleanly, set this
+   worktree's row in `indexed_tip` to the `HEAD` the pass started
+   from (the walk in step 3 also starts from that commit, not from a
+   `HEAD` that moved mid-pass). If the worktree's previous tip is not
+   an ancestor of the new one (branch switch, `reset`, a slot reused
+   for another run), the previous tip is kept as a *retired tip*
+   first; see [Retired tips](#retired-tips). A pass with failed
+   commits leaves the tip where it was, so the next pass retries
+   them.
 
 ## Chunk-level embed cache (`--embed-cache`)
 
@@ -96,8 +122,8 @@ patterns before applying, especially on repos where the most-touched
 top-level directory is the engine itself.
 
 When a commit's changed paths are 100% ignored, the indexer skips it
-entirely (no rows written) but advances `last_indexed_commit` past it,
-so `--incremental` runs work normally.
+entirely (no rows written). The worktree's tip still moves past it at
+the end of the pass, so `--incremental` runs work normally.
 
 ## `--incremental` fast path
 
@@ -105,24 +131,109 @@ Used by the [`ohara init`](../cli/init.md) post-commit hook and any
 caller that wants a no-op re-index to be cheap.
 
 Before booting the embedder (which costs hundreds of milliseconds
-even when the model is cached), `ohara index --incremental` reads
-`repo.last_indexed_commit` and compares to `HEAD`. If they match, it
-prints `index up-to-date at <sha>` and returns immediately — no
-embedder init, no walker boot, no SQLite write transaction.
+even when the model is cached), `ohara index --incremental` counts the
+commits reachable from `HEAD` that no indexed tip covers. If there are
+none, it prints `index up-to-date at <sha>` and returns immediately —
+no embedder init, no walker boot, no SQLite write transaction.
 
-When they don't match, the pass proceeds normally and walks just the
+When there is work, the pass goes to a running daemon if there is one
+(next section), and otherwise proceeds in-process and walks just the
 new commits.
+
+## Worktrees and the daemon writer
+
+A clone and its linked worktrees share one index (see step 1 above).
+Each worktree has its own row in `indexed_tip`; the main checkout's
+key is `''`. Indexing a worktree embeds only the commits no other
+worktree has indexed, and queries from a worktree only see commits
+its own `HEAD` can reach (see
+[Retrieval pipeline → worktree visibility](./retrieval-pipeline.md#worktree-visibility-filter)).
+
+When an `ohara serve` daemon built from the same ohara version is
+already running, `ohara index --incremental` hands the pass to it
+instead of indexing in-process: one writer per store, and the
+daemon's warm embedder is reused. The CLI never spawns a daemon for
+this. It falls back to indexing in-process only when no such daemon
+is registered, the daemon can't be reached, or the daemon replies
+that the repo has no index yet. Once the daemon has accepted the
+request, a timeout or a `needs rebuild` reply is reported as an
+error and nothing runs in-process, because the daemon may still be
+writing. Runs that tune the indexer (`--threads`, `--workers`,
+`--commit-batch`, `--embed-batch`, `--embed-cache`, a non-CPU
+`--embed-provider`), `--force` and `--rebuild` always run in-process.
+
+The daemon's index work:
+
+- **`EnsureIndexed { sha }`** — block until `sha` is covered by some
+  indexed tip, indexing this worktree's `HEAD` if needed. This is
+  what `ohara index --incremental` calls.
+- **`IndexTip`** — queue a background pass for this worktree.
+  Repeated requests for a worktree coalesce while it waits.
+- **`PruneUnreachable`** — delete indexed commits that no ref and no
+  worktree `HEAD` (detached ones included) reaches any more, then
+  tidy the tips: a retired tip is dropped once nothing reaches it; a
+  linked worktree that no longer exists has its tip retired while a
+  ref still reaches it, and dropped otherwise. A tip of the main
+  checkout or of a live worktree whose commit is being deleted (the
+  checkout was reset away from it) is rewound to the merge base of that
+  tip and the checkout's current `HEAD`, or removed when that merge base
+  is missing or not indexed; the checkout's next pass then records a
+  fresh tip (the daemon accepts a pass on a store whose last tip was
+  removed this way). Tips are settled before any commit is deleted, and
+  each edit is a compare-and-swap on the tip prune read, so a tip
+  another writer moved meanwhile is left alone. [`ohara prune`](../cli/prune.md) sends this to a running
+  same-version daemon, or runs the same step in-process (no models
+  loaded) when none is reachable.
+
+The main checkout is never treated as covered before it has its own
+tip: its first `EnsureIndexed` (or `ohara index --incremental`) runs a
+pass that records the tip and takes over the HEAD symbols, even when
+linked worktrees' tips already reach its `HEAD`.
+
+### Retired tips
+
+A worktree's commits stay in the index after the worktree moves to a
+commit that does not descend from its old tip, so the old tip keeps
+counting as a tip: it is stored in `indexed_tip` under the reserved key
+`<worktree>/<sha>` (git worktree names never contain `/`, so it cannot
+collide with a real worktree). Retired tips are hidden by the walk,
+count for coverage, and — the reason they exist — make retrieval apply
+the visibility filter whenever one is not reachable from the querying
+`HEAD`. Without them a reused slot whose new run was merged into main
+would make every tip visible from main, the filter would be skipped,
+and the old run's unmerged commits would leak into main's results.
+They are not worktrees: `status`, a worktree's own-tip lookup and
+`_meta.index_status` ignore them. Prune drops a retired tip once no
+ref reaches it (its commits are pruned in the same pass). After each
+successful index pass the daemon checks, under the same per-repo job
+lock, whether some retired tip has become unreachable, and prunes only
+then; a no-op request (the commit was already covered) runs no pass
+and so does not prune, and a failed auto-prune is logged and does not
+fail the index job. Without a daemon, run
+[`ohara prune`](../cli/prune.md).
+
+Jobs are serialised per repository. The daemon never builds an index
+from scratch (run `ohara index` once first), and it refuses to write
+unless the stored index is fully `compatible` *and* its own loaded
+embedder matches the stored model and dimension, so it never appends
+mismatched vectors.
 
 ## `--force` rebuild path
 
-Clears existing HEAD symbol rows before the pass and re-extracts from
-scratch. Used after upgrading to a new ohara that changed the AST
-chunker (e.g. the v0.3 sibling-merge chunker would otherwise produce
-duplicate symbols when run over a v0.2-era index).
+Re-extracts HEAD symbols even when `HEAD` is already indexed; like
+every pass, the new snapshot replaces the old one in one transaction
+after extraction, so nothing is cleared up front. Used after
+upgrading to a new ohara that changed the AST chunker (e.g. the v0.3
+sibling-merge chunker would otherwise produce duplicate symbols when
+run over a v0.2-era index).
 
 `--force` only touches HEAD symbols. Commit and hunk history are
 untouched — they're append-only and embed-stable. `--force` wins over
-`--incremental` if both flags are set.
+`--incremental` if both flags are set. In a linked worktree `--force`
+leaves the HEAD symbols alone once the main checkout has a tip (they
+follow the main checkout) and says so; run it from the main checkout
+to refresh them. Before main has a tip the linked worktree owns the
+snapshot and `--force` refreshes it.
 
 ## Index compatibility (v0.7)
 
@@ -158,26 +269,30 @@ way that would invalidate previously-indexed rows.
 
 ## Abort-resume contract
 
-The watermark advances every 100 commits during the commit walk. That,
-plus `put_hunks`'s DELETE-then-INSERT semantics, gives the contract:
+A worktree's tip is recorded only at the end of a clean pass. Resume
+safety comes from two other mechanisms:
 
-- A Ctrl-C / kill / crash mid-walk loses **at most ~100 commits** of
-  progress.
-- Re-running `ohara index` after an abort re-does those ≤ 100 commits.
-  The DELETE step in `put_hunks` clears any partially-written hunks
-  for those SHAs first, so no duplicate rows accumulate.
-- Anything outside the commit walk (HEAD-symbol extraction, the final
-  watermark advance) is small enough to redo cleanly.
+- **Per-commit skip.** The walker drops any commit that already has a
+  `commit_record` row (a sub-millisecond PK lookup), so re-running
+  `ohara index` after a Ctrl-C / kill / crash re-walks the history
+  since the last tip but re-embeds only the commits that never landed.
+- **One transaction per commit.** The persist stage writes a commit's
+  row and all of its hunks with `put_commit_with_hunks`, which the
+  SQLite backend runs as a single transaction. An interrupted write
+  leaves nothing behind, so the per-commit skip never trusts a commit
+  row whose hunks are missing; the commit is redone on the next pass.
+  The writes themselves are DELETE-then-INSERT, so a redo never
+  duplicates rows.
 
-The watermark is a single SHA, so on resume the indexer also
-short-circuits per-commit when `commit_record` already has a row for
-the SHA being walked (v0.6.3). This matters on merge-heavy histories:
-`git2::Revwalk::hide(watermark)` only excludes the watermark and its
-strict ancestor chain, so commits reachable via a different parent
-path — feature-branch merges, octopus merges, history rewrites — would
-otherwise be re-walked and re-embedded even though they're already in
-the index. A sub-millisecond PK lookup avoids that wasted embedder
-cost. See
+Anything outside the commit walk (HEAD-symbol extraction, recording
+the tip) is small enough to redo cleanly.
+
+The per-commit skip also matters on merge-heavy histories:
+`git2::Revwalk::hide(tip)` only excludes the tip and its ancestors,
+so commits reachable via a different parent path — feature-branch
+merges, octopus merges, history rewrites — would otherwise be
+re-walked and re-embedded even though they're already in the index.
+See
 [`docs/superpowers/specs/2026-05-02-ohara-v0.6.3-resume-skip-rfc.md`](https://github.com/vss96/ohara/blob/main/docs/superpowers/specs/2026-05-02-ohara-v0.6.3-resume-skip-rfc.md)
 for the design.
 
@@ -238,6 +353,59 @@ plan-27) is warm — most chunks then become cache lookups and parse
 becomes the dominant per-commit cost, fanning out across workers.
 
 ## Known limits
+
+- **Running and failed passes leave untipped commits.** A worktree's
+  tip is recorded only when its pass ends cleanly, but the pass stores
+  each commit as soon as it is embedded. When every tip is visible from
+  a querying worktree's `HEAD`, retrieval skips the visibility filter,
+  so commits stored by another worktree's pass can show up in results:
+  for the whole of a pass that is still running (not just a short race
+  with the tip read), and after a pass with failed commits until that
+  worktree's next clean pass. A prune removes such commits only once no
+  ref or worktree `HEAD` reaches them; while the worktree's `HEAD` still
+  reaches them, only a clean pass there records the tip that hides
+  them. (A worktree that *moves* off indexed commits is covered: its
+  old tip is kept as a [retired tip](#retired-tips). Commits that never
+  got a tip at all are not.)
+- **Retired tips keep the filter on until a prune runs.** Every
+  reset, amend, rebase or branch switch of an indexed worktree leaves
+  a retired tip. One that the querying `HEAD` can't reach keeps
+  retrieval on the (slower) visibility-filtered path until a prune
+  removes it. The daemon auto-prunes after a successful index pass,
+  but only when some retired tip has become unreachable; no-op
+  "already covered" requests don't prune. An index run only by the CLI
+  (no daemon) needs an explicit [`ohara prune`](../cli/prune.md).
+- **A reachable retired tip is never pruned.** A retired tip that a
+  branch still reaches (say, after switching a worktree to a new
+  branch while the old branch survives) keeps the filter on for every
+  `HEAD` that can't reach it, until that branch is deleted; the next
+  index pass or `ohara prune` after the deletion drops it.
+- **No cross-process writer lock.** The daemon serialises its own
+  jobs, but a CLI `--force` or `--rebuild`, an in-process
+  `ohara prune`, or a second daemon briefly overlapping the first
+  during shutdown or a version upgrade,
+  can write while the daemon does. So can a CLI `--incremental` run
+  while a daemon is stopping: the daemon removes its socket before its
+  queued background job finishes, so the CLI finds no daemon and
+  indexes in-process next to that job. SQLite keeps the data
+  consistent (a commit and its hunks are one transaction, and prune
+  edits tips with compare-and-swap); expect `SQLITE_BUSY` errors or
+  duplicated work.
+- **Unopenable worktrees are skipped when pruning.** A worktree whose
+  directory git can't open is skipped with a warning when computing
+  reachability, so commits only that worktree reaches can be pruned.
+- **Index the main checkout from its root.** The index id is derived
+  from the history's root commit and the main checkout's path. Indexing the main checkout from a subdirectory
+  (`ohara index src/`) keys it by that subdirectory, so it does not
+  share the index its linked worktrees use (they always resolve to the
+  main checkout's root). This predates shared worktree indexes and is
+  kept so existing subdirectory indexes stay valid.
+- **An unborn main `HEAD` splits the index.** The index id is derived
+  from the main checkout's history. While the main checkout's branch
+  has no commits yet, each linked worktree derives the id from its own
+  history, so worktrees on unrelated histories get separate indexes.
+  Likewise, moving the main checkout to an unrelated (orphan) history
+  changes the id.
 
 `ohara index` is currently single-process. On large polyglot
 codebases the embed phase saturates a few cores for a burst, then

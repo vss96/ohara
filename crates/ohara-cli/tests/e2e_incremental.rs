@@ -78,7 +78,7 @@ async fn incremental_on_fresh_repo_indexes_everything() {
         workers: None,
         interactive: false,
     };
-    let report = ohara_cli::commands::index::run(args).await.unwrap();
+    let report = ohara_cli::commands::index::run(args, true).await.unwrap();
     assert_eq!(
         report.new_commits, 3,
         "fresh incremental run should index all commits"
@@ -104,23 +104,26 @@ async fn incremental_after_partial_index_only_walks_new_commits() {
     );
     make_commit(&repo, repo_dir.path(), "b.rs", "fn beta() {}\n", "add beta");
 
-    let first = ohara_cli::commands::index::run(ohara_cli::commands::index::Args {
-        path: repo_dir.path().to_path_buf(),
-        incremental: false,
-        force: false,
-        rebuild: false,
-        yes: false,
-        commit_batch: Some(512),
-        threads: Some(0),
-        no_progress: true,
-        profile: false,
-        embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
-        resources: ohara_cli::resources::ResourcesArg::Auto,
-        embed_batch: None,
-        embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
-        workers: None,
-        interactive: false,
-    })
+    let first = ohara_cli::commands::index::run(
+        ohara_cli::commands::index::Args {
+            path: repo_dir.path().to_path_buf(),
+            incremental: false,
+            force: false,
+            rebuild: false,
+            yes: false,
+            commit_batch: Some(512),
+            threads: Some(0),
+            no_progress: true,
+            profile: false,
+            embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
+            resources: ohara_cli::resources::ResourcesArg::Auto,
+            embed_batch: None,
+            embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
+            workers: None,
+            interactive: false,
+        },
+        true,
+    )
     .await
     .unwrap();
     assert_eq!(first.new_commits, 2);
@@ -141,23 +144,26 @@ async fn incremental_after_partial_index_only_walks_new_commits() {
         "add delta",
     );
 
-    let second = ohara_cli::commands::index::run(ohara_cli::commands::index::Args {
-        path: repo_dir.path().to_path_buf(),
-        incremental: true,
-        force: false,
-        rebuild: false,
-        yes: false,
-        commit_batch: Some(512),
-        threads: Some(0),
-        no_progress: true,
-        profile: false,
-        embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
-        resources: ohara_cli::resources::ResourcesArg::Auto,
-        embed_batch: None,
-        embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
-        workers: None,
-        interactive: false,
-    })
+    let second = ohara_cli::commands::index::run(
+        ohara_cli::commands::index::Args {
+            path: repo_dir.path().to_path_buf(),
+            incremental: true,
+            force: false,
+            rebuild: false,
+            yes: false,
+            commit_batch: Some(512),
+            threads: Some(0),
+            no_progress: true,
+            profile: false,
+            embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
+            resources: ohara_cli::resources::ResourcesArg::Auto,
+            embed_batch: None,
+            embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
+            workers: None,
+            interactive: false,
+        },
+        true,
+    )
     .await
     .unwrap();
     assert_eq!(
@@ -192,23 +198,26 @@ async fn index_force_rebuilds_chunked_symbols_and_reembeds() {
 
     // First run populates the index (and writes symbols with merged
     // sibling_names since Track C is already landed).
-    let first = ohara_cli::commands::index::run(ohara_cli::commands::index::Args {
-        path: repo_dir.path().to_path_buf(),
-        incremental: false,
-        force: false,
-        rebuild: false,
-        yes: false,
-        commit_batch: Some(512),
-        threads: Some(0),
-        no_progress: true,
-        profile: false,
-        embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
-        resources: ohara_cli::resources::ResourcesArg::Auto,
-        embed_batch: None,
-        embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
-        workers: None,
-        interactive: false,
-    })
+    let first = ohara_cli::commands::index::run(
+        ohara_cli::commands::index::Args {
+            path: repo_dir.path().to_path_buf(),
+            incremental: false,
+            force: false,
+            rebuild: false,
+            yes: false,
+            commit_batch: Some(512),
+            threads: Some(0),
+            no_progress: true,
+            profile: false,
+            embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
+            resources: ohara_cli::resources::ResourcesArg::Auto,
+            embed_batch: None,
+            embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
+            workers: None,
+            interactive: false,
+        },
+        true,
+    )
     .await
     .unwrap();
     assert!(first.head_symbols > 0, "first index should write symbols");
@@ -216,23 +225,26 @@ async fn index_force_rebuilds_chunked_symbols_and_reembeds() {
     // Second run with --force must re-walk symbols even though the
     // watermark already points at HEAD; head_symbols > 0 demonstrates the
     // re-walk happened.
-    let report = ohara_cli::commands::index::run(ohara_cli::commands::index::Args {
-        path: repo_dir.path().to_path_buf(),
-        incremental: false,
-        force: true,
-        rebuild: false,
-        yes: false,
-        commit_batch: Some(512),
-        threads: Some(0),
-        no_progress: true,
-        profile: false,
-        embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
-        resources: ohara_cli::resources::ResourcesArg::Auto,
-        embed_batch: None,
-        embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
-        workers: None,
-        interactive: false,
-    })
+    let report = ohara_cli::commands::index::run(
+        ohara_cli::commands::index::Args {
+            path: repo_dir.path().to_path_buf(),
+            incremental: false,
+            force: true,
+            rebuild: false,
+            yes: false,
+            commit_batch: Some(512),
+            threads: Some(0),
+            no_progress: true,
+            profile: false,
+            embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
+            resources: ohara_cli::resources::ResourcesArg::Auto,
+            embed_batch: None,
+            embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
+            workers: None,
+            interactive: false,
+        },
+        true,
+    )
     .await
     .unwrap();
     assert!(
@@ -243,7 +255,9 @@ async fn index_force_rebuilds_chunked_symbols_and_reembeds() {
     // Inspect the database directly: the rebuilt rows must include at
     // least one symbol whose `sibling_names` is non-empty (the AST
     // chunker merged the three trio fns).
-    let (repo_id, _, _) = ohara_cli::commands::resolve_repo_id(repo_dir.path()).unwrap();
+    let repo_id = ohara_cli::commands::resolve_repo_id(repo_dir.path())
+        .unwrap()
+        .repo_id;
     let db = ohara_cli::commands::index_db_path(&repo_id).unwrap();
     let storage = ohara_storage::SqliteStorage::open(&db).await.unwrap();
     let pool = storage.pool().clone();
@@ -300,43 +314,49 @@ async fn incremental_at_head_is_noop_and_skips_embedder_init() {
         "add alpha",
     );
 
-    let _first = ohara_cli::commands::index::run(ohara_cli::commands::index::Args {
-        path: repo_dir.path().to_path_buf(),
-        incremental: true,
-        force: false,
-        rebuild: false,
-        yes: false,
-        commit_batch: Some(512),
-        threads: Some(0),
-        no_progress: true,
-        profile: false,
-        embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
-        resources: ohara_cli::resources::ResourcesArg::Auto,
-        embed_batch: None,
-        embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
-        workers: None,
-        interactive: false,
-    })
+    let _first = ohara_cli::commands::index::run(
+        ohara_cli::commands::index::Args {
+            path: repo_dir.path().to_path_buf(),
+            incremental: true,
+            force: false,
+            rebuild: false,
+            yes: false,
+            commit_batch: Some(512),
+            threads: Some(0),
+            no_progress: true,
+            profile: false,
+            embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
+            resources: ohara_cli::resources::ResourcesArg::Auto,
+            embed_batch: None,
+            embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
+            workers: None,
+            interactive: false,
+        },
+        true,
+    )
     .await
     .unwrap();
 
-    let second = ohara_cli::commands::index::run(ohara_cli::commands::index::Args {
-        path: repo_dir.path().to_path_buf(),
-        incremental: true,
-        force: false,
-        rebuild: false,
-        yes: false,
-        commit_batch: Some(512),
-        threads: Some(0),
-        no_progress: true,
-        profile: false,
-        embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
-        resources: ohara_cli::resources::ResourcesArg::Auto,
-        embed_batch: None,
-        embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
-        workers: None,
-        interactive: false,
-    })
+    let second = ohara_cli::commands::index::run(
+        ohara_cli::commands::index::Args {
+            path: repo_dir.path().to_path_buf(),
+            incremental: true,
+            force: false,
+            rebuild: false,
+            yes: false,
+            commit_batch: Some(512),
+            threads: Some(0),
+            no_progress: true,
+            profile: false,
+            embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
+            resources: ohara_cli::resources::ResourcesArg::Auto,
+            embed_batch: None,
+            embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
+            workers: None,
+            interactive: false,
+        },
+        true,
+    )
     .await
     .unwrap();
     assert_eq!(

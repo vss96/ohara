@@ -1,12 +1,21 @@
 use anyhow::Result;
 use ohara_core::storage::CommitRecord;
 use ohara_core::types::CommitMeta;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::codec::vec_codec;
 
 pub fn put(c: &mut Connection, record: &CommitRecord) -> Result<()> {
     let tx = c.transaction()?;
+    put_tx(&tx, record)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Write one commit row (and its vec / FTS mirrors) inside the caller's
+/// transaction. See [`put`]; [`crate::tables::hunk::put_many_tx`] shares
+/// the transaction when a commit and its hunks are written together.
+pub fn put_tx(tx: &Transaction<'_>, record: &CommitRecord) -> Result<()> {
     // Resume safety: clear sqlite-vec + FTS5 mirrors first, then INSERT.
     // sqlite-vec's vec0 virtual tables do NOT honor `INSERT OR REPLACE`
     // — re-inserting the same `commit_sha` raises "UNIQUE constraint
@@ -44,7 +53,6 @@ pub fn put(c: &mut Connection, record: &CommitRecord) -> Result<()> {
         "INSERT INTO fts_commit (sha, message) VALUES (?1, ?2)",
         params![&record.meta.commit_sha, &record.meta.message],
     )?;
-    tx.commit()?;
     Ok(())
 }
 

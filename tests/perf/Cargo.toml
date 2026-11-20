@@ -46,6 +46,14 @@ name = "context_engine_eval"
 path = "context_engine_eval.rs"
 
 [[test]]
+# Plan 33 Task 15 — worktree visibility filter latency guard: 200
+# find_pattern calls from a main clone with the ancestry filter active
+# vs bypassed. `#[ignore]`'d; opt in via:
+#   cargo test -p ohara-perf-tests -- --ignored visibility_filter --nocapture
+name = "visibility_filter_bench"
+path = "visibility_filter_bench.rs"
+
+[[test]]
 # Plan 23 Task A.1 — rerank-pool sweep over the context-engine eval
 # fixture. `#[ignore]`'d; opt in via:
 #   cargo test -p ohara-perf-tests -- --ignored rerank_pool_sweep --nocapture
@@ -158,6 +166,7 @@ coreml = ["dep:ort"]
 ohara-cli = { path = "../../crates/ohara-cli" }
 ohara-core = { path = "../../crates/ohara-core" }
 ohara-embed = { path = "../../crates/ohara-embed" }
+ohara-engine = { path = "../../crates/ohara-engine", features = ["perf-hooks"] }
 ohara-mcp = { path = "../../crates/ohara-mcp" }
 ohara-storage = { path = "../../crates/ohara-storage" }
 anyhow.workspace = true

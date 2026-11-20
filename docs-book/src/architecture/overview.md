@@ -83,7 +83,8 @@ chunks under a 500-token budget. See
 The `ohara` binary. One subcommand per file under
 `src/commands/`: [`init`](../cli/init.md), [`index`](../cli/index.md),
 [`query`](../cli/query.md), [`explain`](../cli/explain.md),
-[`status`](../cli/status.md), [`update`](../cli/update.md). Each
+[`status`](../cli/status.md), [`prune`](../cli/prune.md),
+[`update`](../cli/update.md). Each
 command builds the same core/storage/embed/git/parse stack.
 
 ### `ohara-mcp`

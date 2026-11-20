@@ -118,10 +118,6 @@ impl crate::storage::StorageWrite for FakeStorage {
     async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> crate::Result<()> {
         Ok(())
     }
-
-    async fn clear_head_symbols(&self, _: &RepoId) -> crate::Result<()> {
-        unreachable!("retriever tests should not exercise clear_head_symbols")
-    }
 }
 
 #[async_trait]

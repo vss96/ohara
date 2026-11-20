@@ -13,6 +13,11 @@ impl GitWalker {
         Ok(Self { repo })
     }
 
+    /// Wrap an already-opened repository (e.g. a linked worktree's main repo).
+    pub fn from_repository(repo: Repository) -> Self {
+        Self { repo }
+    }
+
     /// Walk first-parent chain from HEAD to the topological root commit.
     ///
     /// Used for `RepoId::from_parts` — chosen over author-time-oldest because
@@ -53,19 +58,7 @@ impl GitWalker {
         for oid in walk {
             let oid = oid?;
             let c = self.repo.find_commit(oid)?;
-            let parent_sha = if c.parent_count() > 0 {
-                c.parent(0).ok().map(|p| p.id().to_string())
-            } else {
-                None
-            };
-            let meta = CommitMeta {
-                commit_sha: oid.to_string(),
-                parent_sha: parent_sha.clone(),
-                is_merge: c.parent_count() > 1,
-                author: Some(c.author().name().unwrap_or("").to_string()).filter(|s| !s.is_empty()),
-                ts: c.time().seconds(),
-                message: c.message().unwrap_or("").to_string(),
-            };
+            let meta = commit_meta(&c);
 
             paths_buf.clear();
             collect_changed_paths(&self.repo, &c, &mut paths_buf)?;
@@ -74,34 +67,65 @@ impl GitWalker {
         Ok(())
     }
 
+    /// Commits reachable from HEAD, oldest first, excluding `since` and
+    /// its ancestors when given.
     pub fn list_commits(&self, since: Option<&str>) -> Result<Vec<CommitMeta>> {
-        let mut walk = self.repo.revwalk()?;
-        walk.set_sorting(Sort::TOPOLOGICAL | Sort::REVERSE)?;
-        walk.push_head()?;
         if let Some(s) = since {
-            // Hide the watermark and its ancestors so we get only newer commits.
-            let oid = git2::Oid::from_str(s)?;
+            // Preserve the historical contract: a malformed watermark is an error.
+            git2::Oid::from_str(s)?;
+        }
+        self.list_commits_hiding(since.as_slice())
+    }
+
+    /// Commits reachable from HEAD and from none of `hide`, oldest first.
+    /// A hide entry that is not a valid oid or whose object is missing is skipped.
+    pub fn list_commits_hiding(&self, hide: &[&str]) -> Result<Vec<CommitMeta>> {
+        let mut walk = self.repo.revwalk()?;
+        walk.push_head()?;
+        self.walk_hiding(walk, hide)
+    }
+
+    /// Commits reachable from `from` and from none of `hide`, oldest first.
+    /// Same hide rules as [`Self::list_commits_hiding`].
+    pub fn list_commits_from_hiding(&self, from: &str, hide: &[&str]) -> Result<Vec<CommitMeta>> {
+        let mut walk = self.repo.revwalk()?;
+        walk.push(git2::Oid::from_str(from)?)?;
+        self.walk_hiding(walk, hide)
+    }
+
+    fn walk_hiding(&self, mut walk: git2::Revwalk<'_>, hide: &[&str]) -> Result<Vec<CommitMeta>> {
+        walk.set_sorting(Sort::TOPOLOGICAL | Sort::REVERSE)?;
+        for s in hide {
+            let Ok(oid) = git2::Oid::from_str(s) else {
+                continue;
+            };
+            if self.repo.find_commit(oid).is_err() {
+                continue;
+            }
             walk.hide(oid)?;
         }
         let mut out = Vec::new();
         for oid in walk {
-            let oid = oid?;
-            let c = self.repo.find_commit(oid)?;
-            let parent_sha = if c.parent_count() > 0 {
-                c.parent(0).ok().map(|p| p.id().to_string())
-            } else {
-                None
-            };
-            out.push(CommitMeta {
-                commit_sha: oid.to_string(),
-                parent_sha,
-                is_merge: c.parent_count() > 1,
-                author: Some(c.author().name().unwrap_or("").to_string()).filter(|s| !s.is_empty()),
-                ts: c.time().seconds(),
-                message: c.message().unwrap_or("").to_string(),
-            });
+            let c = self.repo.find_commit(oid?)?;
+            out.push(commit_meta(&c));
         }
         Ok(out)
+    }
+}
+
+pub(crate) fn commit_meta(c: &git2::Commit<'_>) -> CommitMeta {
+    let parent_sha = if c.parent_count() > 0 {
+        c.parent(0).ok().map(|p| p.id().to_string())
+    } else {
+        None
+    };
+    CommitMeta {
+        commit_sha: c.id().to_string(),
+        parent_sha,
+        is_merge: c.parent_count() > 1,
+        author: Some(c.author().name().unwrap_or("").to_string()).filter(|s| !s.is_empty()),
+        ts: c.time().seconds(),
+        message: c.message().unwrap_or("").to_string(),
     }
 }
 
@@ -262,5 +286,118 @@ mod tests {
             cs[1].parent_sha.is_some(),
             "non-root commit should have a parent"
         );
+    }
+
+    /// c1 -> c2 -> c3 on main, `feat` branched from c2 with f1, HEAD on feat.
+    /// Returns (c1, c2, c3, f1) as sha strings.
+    fn branched_fixture(dir: &std::path::Path) -> (String, String, String, String) {
+        let repo = Repository::init(dir).unwrap();
+        let sig = Signature::now("a", "a@a").unwrap();
+        let commit_file = |name: &str, parent: Option<git2::Oid>, refname: &str| {
+            fs::write(dir.join(name), name).unwrap();
+            let mut idx = repo.index().unwrap();
+            idx.add_path(std::path::Path::new(name)).unwrap();
+            idx.write().unwrap();
+            let tree = repo.find_tree(idx.write_tree().unwrap()).unwrap();
+            let parents: Vec<git2::Commit> = parent
+                .iter()
+                .map(|p| repo.find_commit(*p).unwrap())
+                .collect();
+            let refs: Vec<&git2::Commit> = parents.iter().collect();
+            repo.commit(Some(refname), &sig, &sig, name, &tree, &refs)
+                .unwrap()
+        };
+        let c1 = commit_file("c1", None, "refs/heads/main");
+        let c2 = commit_file("c2", Some(c1), "refs/heads/main");
+        let c3 = commit_file("c3", Some(c2), "refs/heads/main");
+        let f1 = commit_file("f1", Some(c2), "refs/heads/feat");
+        repo.set_head("refs/heads/feat").unwrap();
+        (
+            c1.to_string(),
+            c2.to_string(),
+            c3.to_string(),
+            f1.to_string(),
+        )
+    }
+
+    fn msgs(cs: &[CommitMeta]) -> Vec<String> {
+        cs.iter().map(|c| c.message.trim().to_string()).collect()
+    }
+
+    #[test]
+    fn hiding_several_tips_returns_only_commits_none_of_them_reach() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_c1, c2, c3, _f1) = branched_fixture(dir.path());
+        let w = GitWalker::open(dir.path()).unwrap();
+        assert_eq!(msgs(&w.list_commits_hiding(&[&c3]).unwrap()), ["f1"]);
+        assert_eq!(msgs(&w.list_commits_hiding(&[&c2, &c3]).unwrap()), ["f1"]);
+        assert_eq!(
+            msgs(&w.list_commits_hiding(&[]).unwrap()),
+            ["c1", "c2", "f1"]
+        );
+    }
+
+    #[test]
+    fn each_of_two_divergent_hide_tips_excludes_its_own_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_c1, _c2, c3, f1) = branched_fixture(dir.path());
+        // Merge c3 into feat: HEAD = m with parents f1 and c3, which
+        // diverge after c2.
+        let repo = git2::Repository::open(dir.path()).unwrap();
+        let sig = git2::Signature::now("a", "a@a").unwrap();
+        let f1_commit = repo.find_commit(git2::Oid::from_str(&f1).unwrap()).unwrap();
+        let c3_commit = repo.find_commit(git2::Oid::from_str(&c3).unwrap()).unwrap();
+        let tree = f1_commit.tree().unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &sig,
+            &sig,
+            "m",
+            &tree,
+            &[&f1_commit, &c3_commit],
+        )
+        .unwrap();
+        let w = GitWalker::open(dir.path()).unwrap();
+        assert_eq!(msgs(&w.list_commits_hiding(&[&f1]).unwrap()), ["c3", "m"]);
+        assert_eq!(msgs(&w.list_commits_hiding(&[&c3]).unwrap()), ["f1", "m"]);
+        assert_eq!(
+            msgs(&w.list_commits_hiding(&[&f1, &c3]).unwrap()),
+            ["m"],
+            "the second tip must hide its own branch too"
+        );
+    }
+
+    #[test]
+    fn walk_from_a_given_commit_ignores_where_head_has_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c1, _c2, c3, _f1) = branched_fixture(dir.path());
+        // HEAD is `feat` (f1); walking from c3 must not see f1.
+        let w = GitWalker::open(dir.path()).unwrap();
+        assert_eq!(
+            msgs(&w.list_commits_from_hiding(&c3, &[&c1]).unwrap()),
+            ["c2", "c3"]
+        );
+    }
+
+    #[test]
+    fn missing_or_malformed_hide_entries_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_c1, c2, _c3, _f1) = branched_fixture(dir.path());
+        let w = GitWalker::open(dir.path()).unwrap();
+        let got = w
+            .list_commits_hiding(&["0123456789abcdef0123456789abcdef01234567", "not-a-sha", &c2])
+            .unwrap();
+        assert_eq!(msgs(&got), ["f1"]);
+    }
+
+    #[test]
+    fn list_commits_since_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c1, _c2, _c3, _f1) = branched_fixture(dir.path());
+        let repo = Repository::open(dir.path()).unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        let w = GitWalker::open(dir.path()).unwrap();
+        assert_eq!(msgs(&w.list_commits(Some(&c1)).unwrap()), ["c2", "c3"]);
+        assert_eq!(msgs(&w.list_commits(None).unwrap()), ["c1", "c2", "c3"]);
     }
 }

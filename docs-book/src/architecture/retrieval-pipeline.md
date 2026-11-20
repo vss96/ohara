@@ -15,6 +15,9 @@ find_pattern(query, k=5)
     └─► FTS5 symbol-name top-100 (BM25 on tree-sitter symbol names)
     │
     ▼
+Worktree visibility filter (drop commits the querying HEAD can't reach)
+    │
+    ▼
 Reciprocal Rank Fusion (k = 60) → top-50 candidates
     │
     ▼
@@ -37,6 +40,39 @@ Dispatched in parallel via `tokio::join!` from the `Retriever`:
   identifiers from HEAD. Top-100.
 
 Each lane returns a best-first list of `HunkId`s.
+
+## Worktree visibility filter
+
+A git clone and its linked worktrees share one index, so the index can
+hold commits that only another worktree's branch contains. Before
+fusion, the retriever drops every candidate whose commit is not the
+querying worktree's `HEAD` or one of its ancestors. It runs before the
+rerank pool is cut. On the filtered path each lane over-fetches three
+times its usual size (capped at 255) and is cut back to its usual size
+after filtering, so invisible hits rarely take a lane's slots; a lane
+whose over-fetched candidates are nearly all invisible (a heavy branch
+in another worktree matching the query best) can still lose recall.
+
+- **Fast path.** First the engine checks every indexed tip (each
+  worktree's, plus [retired tips](./indexing.md#retired-tips) left
+  behind when a worktree moved off indexed commits) against the
+  querying `HEAD`. When all of them are reachable (always the case with
+  a single checkout that never rewrote history) no candidate can be
+  invisible, and the filter is skipped entirely. An unborn `HEAD`
+  returns no hits.
+- **Filtered path.** Otherwise the distinct commits among the
+  candidates are checked in one batch with libgit2 ancestry tests.
+  "Visible" verdicts are kept in an engine-wide LRU keyed by
+  `(head, commit)` (65,536 entries); once a commit is an ancestor of a
+  `HEAD` it stays one, so those entries are never invalidated. "Not
+  visible" is not cached: it can change when a commit object missing
+  from a shallow or partial clone is fetched later.
+
+Visibility is keyed on the `HEAD` commit, never on a branch name, so
+detached-`HEAD` worktrees work the same way. The filter adds well under
+5 ms at p95 in `tests/perf/visibility_filter_bench.rs`, which measures
+one warmed query repeatedly with the cross-encoder rerank off
+(`no_rerank: true`); with rerank on, the rerank dominates query time.
 
 ## Stage 2: Reciprocal Rank Fusion
 
