@@ -57,6 +57,8 @@ pub(crate) struct IndexService {
     locks: std::sync::Mutex<HashMap<RepoId, Arc<tokio::sync::Mutex<()>>>>,
     /// Index / prune jobs currently running (any repo).
     active: AtomicUsize,
+    /// Full prunes run by the auto-prune step after an index job.
+    auto_prunes: AtomicUsize,
     queue: IndexQueue,
 }
 
@@ -129,6 +131,26 @@ impl IndexService {
         }
     }
 
+    /// Full prunes the auto-prune step has run (test seam).
+    #[cfg(test)]
+    pub(crate) fn auto_prune_runs(&self) -> usize {
+        self.auto_prunes.load(Ordering::SeqCst)
+    }
+
+    /// One incremental pass, then the auto-prune step. Caller holds the
+    /// repo's job lock.
+    async fn index_then_tidy(
+        &self,
+        engine: &RetrievalEngine,
+        handle: &RepoHandle,
+    ) -> crate::Result<u64> {
+        let new_commits = index_locked(engine, handle).await?;
+        if prune_retired_after_index(engine, handle).await {
+            self.auto_prunes.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(new_commits)
+    }
+
     /// Whether any index or prune job is running.
     pub(crate) fn is_busy(&self) -> bool {
         self.active.load(Ordering::SeqCst) > 0
@@ -191,7 +213,7 @@ impl IndexService {
         if covered(engine, &handle, sha).await? {
             return Ok(outcome(false, 0, start));
         }
-        let new_commits = index_locked(engine, &handle).await?;
+        let new_commits = self.index_then_tidy(engine, &handle).await?;
         if !covered(engine, &handle, sha).await? {
             return Err(EngineError::Internal(format!(
                 "commit {} is not reachable from this worktree's HEAD",
@@ -212,7 +234,7 @@ impl IndexService {
         let handle = engine.open_repo(repo_path).await?;
         let lock = self.lock_for(&handle.repo_id)?;
         let _job = lock.lock().await;
-        let new_commits = index_locked(engine, &handle).await?;
+        let new_commits = self.index_then_tidy(engine, &handle).await?;
         Ok(outcome(true, new_commits, start))
     }
 
@@ -298,8 +320,7 @@ fn no_index(handle: &RepoHandle) -> EngineError {
 
 /// One incremental pass over `handle`'s worktree. Caller holds the repo's
 /// job lock. Refuses unless the stored index is fully `Compatible` so
-/// mismatched vectors are never appended. A successful pass then prunes
-/// under the same lock when the repo has a retired tip.
+/// mismatched vectors are never appended.
 async fn index_locked(engine: &RetrievalEngine, handle: &RepoHandle) -> crate::Result<u64> {
     let store = &handle.store;
     let has_tips = !store
@@ -390,6 +411,5 @@ async fn index_locked(engine: &RetrievalEngine, handle: &RepoHandle) -> crate::R
         new_commits = report.new_commits,
         "indexed worktree"
     );
-    prune_retired_after_index(engine, handle).await;
     Ok(report.new_commits as u64)
 }

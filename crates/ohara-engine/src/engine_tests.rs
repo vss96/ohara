@@ -1399,3 +1399,51 @@ async fn daemon_index_after_an_amend_prunes_the_retired_tip_and_restores_the_fas
         .expect("find_pattern");
     assert_eq!(engine.ancestry_filtered_queries(), 0, "fast path is back");
 }
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn auto_prune_skips_a_reachable_retired_tip_and_runs_once_its_branch_is_gone() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (main, slot1) = repo_with_worktree().await;
+    let main_repo = git2::Repository::open(main.path()).unwrap();
+    let main_head = main_repo.head().unwrap().peel_to_commit().unwrap().id();
+    let wt = git2::Repository::open(&slot1).unwrap();
+    let a1 = commit_file(&wt, "c.rs", "fn three() {}\n", "run A").to_string();
+    index_checkout(&slot1).await;
+
+    // Branch switch: slot-1's tip a1 is retired, but branch `slot-1`
+    // still reaches it, so prune could not drop it. No full prune runs.
+    switch_to_new_branch(&wt, "run-b", main_head);
+    commit_file(&wt, "d.rs", "fn four() {}\n", "run B");
+    let (_rec, engine) = recording_engine();
+    engine.index_worktree(&slot1).await.expect("index run B");
+    commit_file(&wt, "e.rs", "fn five() {}\n", "run B again");
+    engine
+        .index_worktree(&slot1)
+        .await
+        .expect("index run B again");
+    let retired = format!("slot-1/{a1}");
+    assert!(all_tips(main.path())
+        .await
+        .iter()
+        .any(|(k, _)| k == &retired));
+    assert_eq!(engine.index_service.auto_prune_runs(), 0);
+
+    // Delete the branch: the next index job notices and prunes.
+    main_repo
+        .find_branch("slot-1", git2::BranchType::Local)
+        .unwrap()
+        .delete()
+        .unwrap();
+    commit_file(&wt, "f.rs", "fn six() {}\n", "run B third");
+    engine
+        .index_worktree(&slot1)
+        .await
+        .expect("index after delete");
+    assert_eq!(engine.index_service.auto_prune_runs(), 1);
+    let tips = all_tips(main.path()).await;
+    assert!(tips.iter().all(|(k, _)| k != &retired), "got {tips:?}");
+    assert!(!stored_commits(main.path()).await.contains(&a1));
+}

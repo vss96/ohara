@@ -65,21 +65,26 @@ pub async fn prune_unreachable_in_process(repo_path: &Path) -> crate::Result<Pru
 /// After a successful index job: when the repo has a retired tip (left by
 /// a reset, amend or rebase), prune so an unreachable one stops keeping
 /// the visibility fast path off. Caller holds the repo's job lock. A
-/// failure is logged and never fails the index job.
-pub(super) async fn prune_retired_after_index(engine: &RetrievalEngine, handle: &RepoHandle) {
+/// failure is logged and never fails the index job. Returns whether a
+/// full prune ran.
+pub(super) async fn prune_retired_after_index(
+    engine: &RetrievalEngine,
+    handle: &RepoHandle,
+) -> bool {
     let tips = match handle.store.tips.indexed_tips(&handle.repo_id).await {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!(error = %e, "auto-prune: could not list tips");
-            return;
+            return false;
         }
     };
     if !tips.iter().any(|t| t.worktree.is_retired()) {
-        return;
+        return false;
     }
     if let Err(e) = prune_and_refresh(engine, handle).await {
         tracing::warn!(error = %e, "auto-prune after index failed");
     }
+    true
 }
 
 /// Prune body over the store of `repo_id`, with git liveness read from
