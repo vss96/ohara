@@ -18,6 +18,7 @@ The workspace is organised as a set of focused crates under `crates/`:
 | `ohara-git` | Git interaction (libgit2) | Library |
 | `ohara-parse` | Tree-sitter parsing | Library |
 | `ohara-engine` | RetrievalEngine + per-repo store / per-worktree handle cache + daemon IPC + registry + daemon-side incremental indexing; thin extraction of `ohara-mcp::OharaServer` so the daemon (`ohara serve`) and MCP server share the same in-process engine | Library |
+| `ohara-harness` | Outcome harness: task supervisor, workflow runner, agent runtimes (depends on `ohara-core`, never on `ohara-storage`) | Library |
 | `ohara-cli` | End-user CLI binary | Binary |
 | `ohara-mcp` | MCP server binary | Binary |
 | `tests/perf` | Performance benchmarks | Test crate |
@@ -164,6 +165,7 @@ Long `if` / `else if` ladders are a refactor signal.
 - Migrations live in `crates/ohara-storage/migrations/` and follow `refinery`'s `V{N}__snake_case_description.sql` naming.
 - Migrations are **append-only**. Once a migration has been merged to the main branch, it **MUST NOT** be edited. Fix mistakes by adding a new migration.
 - Schema-touching changes **MUST** include a migration in the same PR.
+- `harness.sqlite` (the outcome-harness task log) has its own append-only migration set in `crates/ohara-storage/harness_migrations/`, embedded separately from the index migrations; the same rules apply.
 
 ---
 

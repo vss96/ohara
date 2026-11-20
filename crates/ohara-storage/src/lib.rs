@@ -21,6 +21,7 @@
 //! [`ohara_core::Storage`]: ../ohara_core/storage/trait.Storage.html
 
 pub mod codec;
+pub mod harness;
 pub mod metrics;
 pub mod migrations;
 pub mod storage_impl;
@@ -28,4 +29,5 @@ mod storage_write;
 pub mod tables;
 pub mod tip_store;
 
+pub use harness::SqliteTaskStore;
 pub use storage_impl::SqliteStorage;
