@@ -16,7 +16,7 @@ tree-sitter-javascript.workspace = true
 tree-sitter-kotlin-ng.workspace = true
 tree-sitter-typescript.workspace = true
 tracing.workspace = true
-async-trait = "0.1"
+async-trait.workspace = true
 tokio.workspace = true
 git2.workspace = true
 

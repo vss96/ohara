@@ -83,7 +83,7 @@ pub async fn write_frame<W: AsyncWriteExt + Unpin>(writer: &mut W, payload: &[u8
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
