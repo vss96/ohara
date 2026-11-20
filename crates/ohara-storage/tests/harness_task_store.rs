@@ -3,8 +3,8 @@ use ohara_core::task::decision::{
     Assumption, CostIfWrong, DecisionId, DecisionRecord, DecisionState, Evidence, Verdict,
 };
 use ohara_core::task::{
-    ContractHash, CostCents, Deadline, Outcome, Role, RuntimeName, StepRecord, StepState,
-    TaskId, TaskRecord, TaskState, TaskStore,
+    ContractHash, CostCents, Deadline, Outcome, Role, RuntimeName, StepRecord, StepState, TaskId,
+    TaskRecord, TaskState, TaskStore,
 };
 use ohara_storage::SqliteTaskStore;
 use std::path::PathBuf;
@@ -115,7 +115,13 @@ async fn list_tasks_newest_first() {
     for t in [&a, &b, &c] {
         s.create_task(t).await.unwrap();
     }
-    let ids: Vec<_> = s.list_tasks().await.unwrap().into_iter().map(|t| t.id).collect();
+    let ids: Vec<_> = s
+        .list_tasks()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.id)
+        .collect();
     assert_eq!(ids, vec![b.id, c.id, a.id]);
 }
 
@@ -127,7 +133,9 @@ async fn record_step_upserts_on_key() {
     s.create_task(&t).await.unwrap();
     let mut st = step(t.id, 1, 1, StepState::Running);
     s.record_step(&st).await.unwrap();
-    s.record_step(&step(t.id, 1, 2, StepState::Running)).await.unwrap();
+    s.record_step(&step(t.id, 1, 2, StepState::Running))
+        .await
+        .unwrap();
     st.state = StepState::Passed;
     st.finished_at = Some(ts(5_000));
     st.summary = Some("done".into());
