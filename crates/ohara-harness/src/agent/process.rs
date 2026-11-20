@@ -318,6 +318,28 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn closed_pipes_still_hit_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let soon = Deadline(Utc::now() + chrono::Duration::seconds(1));
+        let start = std::time::Instant::now();
+        let exit = run_streaming(
+            &sh("exec >&- 2>&-; sleep 60"),
+            None,
+            dir.path(),
+            soon,
+            &dir.path().join("t.log"),
+        )
+        .await
+        .unwrap();
+        assert!(exit.killed_at_deadline);
+        assert!(
+            start.elapsed() < Duration::from_secs(7),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
     #[test]
     fn tail_is_bounded() {
         let mut tail = Vec::new();
