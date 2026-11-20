@@ -380,3 +380,175 @@ async fn unload_idle_reranker_with_dummy_is_false() {
     // DummyReranker uses the trait default — nothing to unload.
     assert!(!engine.unload_idle_reranker(std::time::Duration::ZERO).await);
 }
+
+// ---- plan-33: one store per repo, one handle per worktree ----
+
+/// Commit `body` as `file` on the current HEAD of `repo`.
+fn commit_file(repo: &git2::Repository, file: &str, body: &str, msg: &str) -> git2::Oid {
+    let wd = repo.workdir().unwrap().to_path_buf();
+    std::fs::write(wd.join(file), body).unwrap();
+    let mut idx = repo.index().unwrap();
+    idx.add_path(Path::new(file)).unwrap();
+    idx.write().unwrap();
+    let tree = repo.find_tree(idx.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("a", "a@a").unwrap();
+    let parent = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &[&parent])
+        .unwrap()
+}
+
+/// Index the checkout at `path` into the shared store, recording its tip
+/// under its own worktree key (main → "", linked → its name).
+async fn index_checkout(path: &Path) {
+    let id = ohara_git::RepoIdentity::resolve(path).unwrap();
+    let db_path = ohara_core::paths::index_db_path(&id.repo_id).unwrap();
+    let sqlite = Arc::new(ohara_storage::SqliteStorage::open(&db_path).await.unwrap());
+    ohara_core::Storage::open_repo(
+        sqlite.as_ref(),
+        &id.repo_id,
+        &id.id_path,
+        &id.first_commit_sha,
+    )
+    .await
+    .unwrap();
+    let head = git2::Repository::open(&id.worktree_path)
+        .unwrap()
+        .head()
+        .unwrap()
+        .peel_to_commit()
+        .unwrap()
+        .id()
+        .to_string();
+    let commit_src = Arc::new(ohara_git::GitCommitSource::open(&id.worktree_path).unwrap());
+    let symbol_src = Arc::new(ohara_parse::GitSymbolSource::open(&id.worktree_path).unwrap());
+    let indexer = ohara_core::Indexer::new(sqlite.clone(), Arc::new(DummyEmbedder))
+        .with_tip_context(ohara_core::TipContext {
+            tips: sqlite.clone(),
+            worktree: id.worktree.clone(),
+            head: ohara_core::CommitSha::parse(&head).unwrap(),
+        });
+    indexer
+        .run(&id.repo_id, commit_src, symbol_src)
+        .await
+        .unwrap();
+}
+
+/// Main clone with two commits, indexed, plus a linked worktree `slot-1`
+/// on a new branch at main's HEAD. Caller must have set `OHARA_HOME`.
+async fn repo_with_worktree() -> (tempfile::TempDir, std::path::PathBuf) {
+    let main = tempfile::tempdir().unwrap();
+    build_test_repo(main.path());
+    let repo = git2::Repository::open(main.path()).unwrap();
+    commit_file(&repo, "b.rs", "fn two() {}\n", "second");
+    index_checkout(main.path()).await;
+    let parent = main.path().join(".wt");
+    std::fs::create_dir_all(&parent).unwrap();
+    let wt = parent.join("slot-1");
+    repo.worktree("slot-1", &wt, None).unwrap();
+    (main, std::fs::canonicalize(wt).unwrap())
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn worktree_and_main_share_one_store_but_not_one_handle() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (main, wt) = repo_with_worktree().await;
+    let engine = make_test_engine();
+    let m = engine.open_repo(main.path()).await.expect("open main");
+    let w = engine.open_repo(&wt).await.expect("open worktree");
+    assert!(Arc::ptr_eq(&m.store, &w.store), "store must be shared");
+    assert_eq!(m.repo_id, w.repo_id);
+    assert_ne!(m.repo_path, w.repo_path);
+    assert_eq!(w.worktree.as_str(), "slot-1");
+    assert!(m.worktree.is_main());
+    assert_ne!(m.blamer.repo_path(), w.blamer.repo_path());
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn worktree_needs_no_reindex_to_report_fresh() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (_main, wt) = repo_with_worktree().await;
+    let engine = make_test_engine();
+    let meta = engine.index_status(&wt).await.expect("index_status");
+    assert_eq!(meta.index_status.commits_behind_head, 0);
+    assert!(meta.index_status.last_indexed_commit.is_some());
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn commits_behind_is_per_worktree() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (main, wt) = repo_with_worktree().await;
+    let wt_repo = git2::Repository::open(&wt).unwrap();
+    commit_file(&wt_repo, "c.rs", "fn three() {}\n", "worktree only");
+    let engine = make_test_engine();
+    let w = engine.index_status(&wt).await.expect("worktree status");
+    let m = engine.index_status(main.path()).await.expect("main status");
+    assert_eq!(w.index_status.commits_behind_head, 1);
+    assert_eq!(m.index_status.commits_behind_head, 0);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn invalidate_repo_drops_every_worktree_handle() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (main, wt) = repo_with_worktree().await;
+    let engine = make_test_engine();
+    let m1 = engine.open_repo(main.path()).await.expect("open main");
+    let w1 = engine.open_repo(&wt).await.expect("open worktree");
+    engine.invalidate_repo(&wt).await.expect("invalidate");
+    let m2 = engine.open_repo(main.path()).await.expect("reopen main");
+    assert!(!Arc::ptr_eq(&m1.store, &m2.store), "store must be reopened");
+    assert!(!Arc::ptr_eq(&m1, &m2), "main handle must be dropped");
+    let w2 = engine.open_repo(&wt).await.expect("reopen worktree");
+    assert!(!Arc::ptr_eq(&w1, &w2), "worktree handle must be dropped");
+    assert!(Arc::ptr_eq(&m2.store, &w2.store));
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn blame_cache_does_not_cross_worktrees() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (main, wt) = repo_with_worktree().await;
+    // Rewrite a.rs line 1 in the worktree, then restore it: same blob at
+    // both HEADs, but the worktree's line 1 is last touched by a
+    // worktree-only commit.
+    let wt_repo = git2::Repository::open(&wt).unwrap();
+    commit_file(&wt_repo, "a.rs", "fn changed() {}\n", "rewrite");
+    commit_file(&wt_repo, "a.rs", "fn one() {}\n", "restore");
+    index_checkout(&wt).await;
+    let engine = make_test_engine();
+    let q = ohara_core::explain::ExplainQuery {
+        file: "a.rs".into(),
+        line_start: 1,
+        line_end: 1,
+        k: 5,
+        include_diff: false,
+        include_related: false,
+    };
+    let m = engine
+        .explain_change(main.path(), q.clone())
+        .await
+        .expect("explain main");
+    let w = engine
+        .explain_change(&wt, q)
+        .await
+        .expect("explain worktree");
+    assert_eq!(m.hits.len(), 1);
+    assert_eq!(w.hits.len(), 1);
+    assert_ne!(
+        m.hits[0].commit_sha, w.hits[0].commit_sha,
+        "worktree blame must not be served from main's cache entry"
+    );
+}
