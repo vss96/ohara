@@ -57,13 +57,117 @@ pub struct HarnessConfig {
     pub roles: RoleMap,
 }
 
+/// On-disk shape. Unknown top-level tables (e.g. a future `[poc]`) are
+/// ignored: serde skips unrecognised fields by default.
+#[derive(Debug, Deserialize)]
+struct RawConfig {
+    #[serde(default)]
+    runtimes: BTreeMap<RuntimeName, RuntimeSpec>,
+    #[serde(default)]
+    roles: RoleMap,
+}
+
+const ALL_ROLES: [Role; 5] = [
+    Role::Contract,
+    Role::Planner,
+    Role::Builder,
+    Role::Judge,
+    Role::Reviewer,
+];
+
+fn default_runtime_name() -> RuntimeName {
+    RuntimeName("claude".to_string())
+}
+
 impl HarnessConfig {
-    pub fn load(_path: &Path) -> Result<Self> {
-        Err(Error::Config("unimplemented".into()))
+    /// Built-in config: one `claude` runtime serving every role.
+    pub fn builtin_default() -> Self {
+        let claude = default_runtime_name();
+        let spec = RuntimeSpec {
+            kind: RuntimeKind::ClaudeCode,
+            model: None,
+            command: None,
+            prompt: None,
+            done: None,
+        };
+        let roles = ALL_ROLES
+            .iter()
+            .map(|r| (*r, vec![claude.clone()]))
+            .collect();
+        Self {
+            runtimes: BTreeMap::from([(claude, spec)]),
+            roles: RoleMap(roles),
+        }
     }
 
+    /// Load and validate a config file. A missing file yields the built-in
+    /// default.
+    pub fn load(path: &Path) -> Result<Self> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::builtin_default())
+            }
+            Err(e) => return Err(Error::Io(e)),
+        };
+        let raw: RawConfig =
+            toml::from_str(&text).map_err(|e| Error::Config(format!("{}: {e}", path.display())))?;
+        Self::from_raw(raw)
+    }
+
+    /// Load `$OHARA_HOME/config.toml`.
     pub fn load_default() -> Result<Self> {
-        Err(Error::Config("unimplemented".into()))
+        let home = ohara_core::paths::ohara_home()?;
+        Self::load(&home.join("config.toml"))
+    }
+
+    fn from_raw(raw: RawConfig) -> Result<Self> {
+        let mut runtimes = raw.runtimes;
+        if runtimes.is_empty() {
+            runtimes = Self::builtin_default().runtimes;
+        }
+        let mut roles = raw.roles.0;
+        let claude = default_runtime_name();
+        for role in ALL_ROLES {
+            if !roles.contains_key(&role) && runtimes.contains_key(&claude) {
+                roles.insert(role, vec![claude.clone()]);
+            }
+        }
+        let cfg = Self {
+            runtimes,
+            roles: RoleMap(roles),
+        };
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    fn validate(&self) -> Result<()> {
+        for (name, spec) in &self.runtimes {
+            let missing_command = spec.kind == RuntimeKind::Generic
+                && spec.command.as_ref().is_none_or(|c| c.is_empty());
+            if missing_command {
+                return Err(Error::Config(format!(
+                    "runtimes.{}: kind \"generic\" requires `command`",
+                    name.0
+                )));
+            }
+        }
+        for (role, list) in &self.roles.0 {
+            let key = serde_json::to_value(role)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_else(|| format!("{role:?}"));
+            if list.is_empty() {
+                return Err(Error::Config(format!("roles.{key}: runtime list is empty")));
+            }
+            if let Some(unknown) = list.iter().find(|n| !self.runtimes.contains_key(*n)) {
+                return Err(Error::Config(format!(
+                    "roles.{key}: unknown runtime \"{}\"",
+                    unknown.0
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -149,8 +253,9 @@ builders = ["codex", "claude"]     # optional: POCs of one decision rotate acros
 
     #[test]
     fn role_referencing_unknown_runtime_is_error_naming_it() {
-        let err = load_str("[runtimes.claude]\nkind = \"claude-code\"\n[roles]\nbuilder = [\"ghost\"]\n")
-            .unwrap_err();
+        let err =
+            load_str("[runtimes.claude]\nkind = \"claude-code\"\n[roles]\nbuilder = [\"ghost\"]\n")
+                .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("ghost"), "{msg}");
         assert!(msg.contains("builder"), "{msg}");
