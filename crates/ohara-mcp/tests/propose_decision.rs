@@ -138,3 +138,32 @@ async fn tool_absent_without_harness_flag() {
     assert!(names.contains(&"find_pattern".to_string()));
     assert!(without.propose_decision(input()).await.is_err());
 }
+
+#[tokio::test]
+async fn malformed_assumption_check_is_tool_error() {
+    let (_d, store, task, svc) = fixture(1, TaskState::Running).await;
+    let with_check = |check: Vec<String>| {
+        let mut i = input();
+        i.assumptions = vec![AssumptionInput {
+            text: "x".into(),
+            check: Some(check),
+        }];
+        i
+    };
+
+    // Empty argv, empty program, too many args, too many bytes.
+    assert!(svc.propose_decision(with_check(vec![])).await.is_err());
+    assert!(svc
+        .propose_decision(with_check(vec!["".into()]))
+        .await
+        .is_err());
+    let many = (0..65).map(|_| "a".to_string()).collect();
+    assert!(svc.propose_decision(with_check(many)).await.is_err());
+    let big = vec!["echo".to_string(), "x".repeat(8 * 1024)];
+    assert!(svc.propose_decision(with_check(big)).await.is_err());
+    assert!(store.list_decisions(&task.id).await.unwrap().is_empty());
+
+    // The limits are inclusive: 64 args and exactly 8 KiB are fine.
+    let at_cap: Vec<String> = (0..64).map(|_| "a".to_string()).collect();
+    assert!(svc.propose_decision(with_check(at_cap)).await.is_ok());
+}
