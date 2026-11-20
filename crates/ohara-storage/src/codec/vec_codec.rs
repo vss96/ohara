@@ -57,4 +57,23 @@ mod tests {
         let v: Vec<f32> = (0..384).map(|i| i as f32 * 0.1).collect();
         assert_eq!(bytes_to_vec(&vec_to_bytes(&v)), v);
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn round_trip_preserves_exact_ieee754_bits(
+                raw_bits in proptest::collection::vec(any::<u32>(), 0..=384)
+            ) {
+                let floats: Vec<f32> = raw_bits.iter().copied().map(f32::from_bits).collect();
+                let bytes = vec_to_bytes(&floats);
+                prop_assert_eq!(bytes.len(), floats.len() * 4);
+                let decoded = bytes_to_vec(&bytes);
+                let recovered_bits: Vec<u32> = decoded.into_iter().map(f32::to_bits).collect();
+                prop_assert_eq!(recovered_bits, raw_bits);
+            }
+        }
+    }
 }

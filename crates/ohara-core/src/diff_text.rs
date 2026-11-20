@@ -96,4 +96,44 @@ mod tests {
         assert_eq!(count_lines("a\nb"), 2);
         assert_eq!(count_lines("a\nb\n"), 2);
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn count_lines_matches_newline_invariant(s in "\\PC*") {
+                let got = count_lines(&s);
+                if s.is_empty() {
+                    prop_assert_eq!(got, 0);
+                } else {
+                    let newlines = s.bytes().filter(|&b| b == b'\n').count() as u32;
+                    let expected = if s.ends_with('\n') { newlines } else { newlines + 1 };
+                    prop_assert_eq!(got, expected);
+                }
+            }
+
+            #[test]
+            fn truncate_diff_is_consistent_with_count_lines(
+                s in "([^\n]{0,20}\n){0,25}[^\n]{0,20}",
+                max_lines in 1usize..=30
+            ) {
+                let total = count_lines(&s) as usize;
+                let (excerpt, truncated) = truncate_diff(&s, max_lines);
+                if total <= max_lines {
+                    prop_assert!(!truncated);
+                    prop_assert_eq!(excerpt, s);
+                } else {
+                    prop_assert!(truncated);
+                    let extra = total - max_lines;
+                    let suffix = format!("... ({extra} more lines)\n");
+                    prop_assert!(excerpt.ends_with(&suffix));
+                    prop_assert_eq!(count_lines(&excerpt) as usize, max_lines + 1);
+                    let prefix = &excerpt[..excerpt.len() - suffix.len()];
+                    prop_assert!(s.starts_with(prefix));
+                }
+            }
+        }
+    }
 }

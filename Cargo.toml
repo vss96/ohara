@@ -71,6 +71,7 @@ fs2 = "0.4"
 # type-compatible with the embedder session (ohara-embed overrides the
 # padding strategy on the CoreML fixed-shape path).
 tokenizers = "=0.22.2"
+proptest = "1"
 
 [profile.release]
 lto = "thin"

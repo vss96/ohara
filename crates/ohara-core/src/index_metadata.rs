@@ -608,4 +608,75 @@ mod tests {
             "expected NeedsRebuild, got {assessment:?}"
         );
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn assess_obeys_verdict_dominance_and_bge_equivalence(
+                mutate_vector in any::<bool>(),
+                mutate_derived in any::<bool>(),
+                drop_key in proptest::option::of(prop_oneof![
+                    Just("embedding_model"),
+                    Just("chunker_version"),
+                    Just("parser_rust"),
+                ]),
+                use_quantized_stored in any::<bool>(),
+                use_quantized_runtime in any::<bool>(),
+            ) {
+                let mut runtime = runtime_baseline();
+                runtime.embedding_model = if use_quantized_runtime {
+                    "bge-small-en-v1.5-q".into()
+                } else {
+                    "bge-small-en-v1.5".into()
+                };
+                let mut stored = stored_complete(&runtime);
+                stored.components.insert(
+                    "embedding_model".into(),
+                    if use_quantized_stored {
+                        "bge-small-en-v1.5-q".into()
+                    } else {
+                        "bge-small-en-v1.5".into()
+                    },
+                );
+
+                if mutate_vector {
+                    stored
+                        .components
+                        .insert("embedding_dimension".into(), "768".into());
+                }
+                if mutate_derived {
+                    stored
+                        .components
+                        .insert("chunker_version".into(), "999".into());
+                }
+                if let Some(k) = drop_key {
+                    stored.components.remove(k);
+                }
+
+                let verdict = CompatibilityStatus::assess(&runtime, &stored);
+                if mutate_vector {
+                    let is_rebuild = matches!(verdict, CompatibilityStatus::NeedsRebuild { .. });
+                    prop_assert!(is_rebuild, "expected NeedsRebuild, got {:?}", verdict);
+                } else if mutate_derived && drop_key != Some("chunker_version") {
+                    let is_refresh = matches!(
+                        verdict,
+                        CompatibilityStatus::QueryCompatibleNeedsRefresh { .. }
+                    );
+                    prop_assert!(
+                        is_refresh,
+                        "expected QueryCompatibleNeedsRefresh, got {:?}",
+                        verdict
+                    );
+                } else if drop_key.is_some() {
+                    let is_unknown = matches!(verdict, CompatibilityStatus::Unknown { .. });
+                    prop_assert!(is_unknown, "expected Unknown, got {:?}", verdict);
+                } else {
+                    prop_assert_eq!(verdict, CompatibilityStatus::Compatible);
+                }
+            }
+        }
+    }
 }

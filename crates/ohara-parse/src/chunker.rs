@@ -215,4 +215,80 @@ mod tests {
             vec!["fn_1".to_string(), "fn_2".to_string(), "fn_3".to_string()]
         );
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn chunk_symbols_conserves_atoms_order_and_token_budget(
+                sizes in proptest::collection::vec(1usize..=400, 0..=25),
+                max_tokens in 1usize..=500,
+            ) {
+                let (atoms, source) = make_atoms(&sizes);
+                let expected_names: Vec<String> = atoms.iter().map(|a| a.name.clone()).collect();
+                let chunks = chunk_symbols(atoms, max_tokens, &source);
+
+                let mut recovered_names = Vec::new();
+                for chunk in &chunks {
+                    recovered_names.push(chunk.name.clone());
+                    recovered_names.extend(chunk.sibling_names.iter().cloned());
+                    prop_assert!(chunk.span_start <= chunk.span_end);
+                    if !chunk.sibling_names.is_empty() {
+                        prop_assert!(
+                            estimate_tokens(&chunk.source_text) <= max_tokens,
+                            "multi-atom chunk exceeded max_tokens: {} > {}",
+                            estimate_tokens(&chunk.source_text),
+                            max_tokens
+                        );
+                    }
+                }
+                prop_assert_eq!(recovered_names, expected_names);
+            }
+
+            #[test]
+            #[ignore = "tracked in #121: chunk_symbols does not count inter-atom gap bytes in source against max_tokens when slicing span_start..span_end"]
+            fn chunk_symbols_respects_max_tokens_with_inter_atom_comments(
+                sizes in proptest::collection::vec(10usize..=100, 2..=8),
+                gap_tokens in 20usize..=150,
+                max_tokens in 50usize..=250,
+            ) {
+                let mut source = String::new();
+                let mut atoms = Vec::new();
+                let gap = "/".repeat(gap_tokens * CHARS_PER_TOKEN);
+                for (i, &tok) in sizes.iter().enumerate() {
+                    if i > 0 {
+                        source.push_str(&gap);
+                    }
+                    let start = source.len();
+                    let body = "x".repeat(tok * CHARS_PER_TOKEN);
+                    source.push_str(&body);
+                    let end = source.len();
+                    atoms.push(Symbol {
+                        file_path: "a.rs".into(),
+                        language: "rust".into(),
+                        kind: SymbolKind::Function,
+                        name: format!("fn_{i}"),
+                        qualified_name: None,
+                        sibling_names: Vec::new(),
+                        span_start: start as u32,
+                        span_end: end as u32,
+                        blob_sha: "sha".into(),
+                        source_text: body,
+                    });
+                }
+                let chunks = chunk_symbols(atoms, max_tokens, &source);
+                for chunk in &chunks {
+                    if !chunk.sibling_names.is_empty() {
+                        let actual_tokens = estimate_tokens(&chunk.source_text);
+                        prop_assert!(
+                            actual_tokens <= max_tokens,
+                            "merged chunk source_text has {actual_tokens} tokens > max_tokens {max_tokens}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

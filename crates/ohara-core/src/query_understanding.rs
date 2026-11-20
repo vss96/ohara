@@ -625,4 +625,98 @@ mod tests {
             );
         }
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn parse_query_is_deterministic_and_serde_round_trips(q in "\\PC{0,150}") {
+                let before = chrono::Utc::now().timestamp();
+                let first = parse_query(&q);
+                let second = parse_query(&q);
+                let after = chrono::Utc::now().timestamp();
+                prop_assert_eq!(first.intent, second.intent);
+                prop_assert_eq!(first.confidence, second.confidence);
+                prop_assert_eq!(&first.language, &second.language);
+                prop_assert_eq!(&first.path_terms, &second.path_terms);
+                prop_assert_eq!(&first.symbol_terms, &second.symbol_terms);
+                prop_assert_eq!(&first.matched_rules, &second.matched_rules);
+                if let (Some(t1), Some(t2)) = (first.since_unix, second.since_unix) {
+                    // Each parse derives its cutoff from its own `Utc::now()`, so the
+                    // two cutoffs may differ by at most the wall-clock time elapsed.
+                    prop_assert!((t1 - t2).abs() <= after - before);
+                } else {
+                    prop_assert_eq!(first.since_unix, second.since_unix);
+                }
+
+                let encoded = serde_json::to_string(&first).expect("serialize ParsedQuery");
+                let decoded: ParsedQuery =
+                    serde_json::from_str(&encoded).expect("deserialize ParsedQuery");
+                prop_assert_eq!(decoded, first);
+            }
+
+            #[test]
+            fn parse_query_extracts_backtick_symbols_without_contractions(
+                prefix in "[a-zA-Z0-9_ ]{0,25}",
+                symbols in proptest::collection::vec("[a-zA-Z_][a-zA-Z0-9_]{2,15}", 1..=4),
+                lang in proptest::option::of(prop_oneof![
+                    Just("rust"),
+                    Just("python"),
+                    Just("java"),
+                    Just("kotlin"),
+                ]),
+            ) {
+                // A language word in the prefix would compete with the `in <lang>` hint.
+                let lower_prefix = prefix.to_lowercase();
+                prop_assume!(!["rust", "python", "java", "kotlin"]
+                    .iter()
+                    .any(|l| lower_prefix.contains(l)));
+                let quoted: Vec<String> = symbols.iter().map(|s| format!("`{s}`")).collect();
+                let lang_suffix = lang.map(|l| format!(" in {l}")).unwrap_or_default();
+                let query = format!("{prefix} {} {lang_suffix}", quoted.join(" "));
+                let parsed = parse_query(&query);
+                prop_assert_eq!(parsed.symbol_terms, symbols);
+                if let Some(expected_lang) = lang {
+                    prop_assert_eq!(parsed.language.as_deref(), Some(expected_lang));
+                }
+            }
+
+            #[test]
+            fn parse_query_respects_intent_priority_order(
+                high_phrase in prop_oneof![
+                    Just("where do we configure"),
+                    Just("where did we configure"),
+                    Just("load configuration"),
+                ],
+                low_phrase in prop_oneof![
+                    Just("how did we fix"),
+                    Just("usages of"),
+                    Just("pattern for"),
+                ],
+                tail in "[a-z]{3,12}",
+            ) {
+                let query = format!("{low_phrase} {tail} {high_phrase} {tail}");
+                let parsed = parse_query(&query);
+                prop_assert_eq!(parsed.intent, QueryIntent::Configuration);
+                prop_assert_eq!(parsed.confidence, Confidence::High);
+            }
+
+            #[test]
+            #[ignore = "tracked in #119: apostrophe in contraction before backtick-quoted symbol swallows the symbol in extract_quoted_symbols"]
+            fn parse_query_extracts_backtick_symbol_after_contraction(
+                contraction in prop_oneof![Just("what's"), Just("don't"), Just(" where's"), Just("isn't")],
+                symbol in "[a-zA-Z_][a-zA-Z0-9_]{2,15}",
+            ) {
+                let query = format!("{contraction} the caller of `{symbol}`");
+                let parsed = parse_query(&query);
+                prop_assert!(
+                    parsed.symbol_terms.contains(&symbol),
+                    "expected symbol {symbol:?} to be extracted from {query:?}, got {:?}",
+                    parsed.symbol_terms
+                );
+            }
+        }
+    }
 }

@@ -403,4 +403,60 @@ mod tests {
         let seen = behind.last_seen_since.lock().unwrap().clone();
         assert_eq!(seen, Some(Some("deadbeef".to_string())));
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::BTreeSet;
+
+        proptest! {
+            #[test]
+            fn rrf_conserves_exact_set_union_without_duplicates(
+                raw_lanes in proptest::collection::vec(
+                    proptest::collection::vec(1i64..=50, 0..=20),
+                    0..=6
+                ),
+                k in 1u32..=120,
+            ) {
+                let mut lanes = Vec::with_capacity(raw_lanes.len());
+                let mut expected_union = BTreeSet::new();
+                for lane in raw_lanes {
+                    let mut seen = BTreeSet::new();
+                    let deduped: Vec<HunkId> = lane
+                        .into_iter()
+                        .filter(|id| seen.insert(*id))
+                        .collect();
+                    expected_union.extend(deduped.iter().copied());
+                    lanes.push(deduped);
+                }
+
+                let fused = reciprocal_rank_fusion(&lanes, k);
+                prop_assert_eq!(fused.len(), expected_union.len());
+                let fused_set: BTreeSet<HunkId> = fused.into_iter().collect();
+                prop_assert_eq!(fused_set, expected_union);
+            }
+
+            #[test]
+            fn rrf_adding_top_appearance_in_extra_lane_never_worsens_rank(
+                lane1 in proptest::collection::btree_set(1i64..=30, 2..=15),
+                lane2 in proptest::collection::btree_set(1i64..=30, 1..=15),
+                k in 1u32..=120,
+            ) {
+                let v1: Vec<HunkId> = lane1.into_iter().collect();
+                let v2: Vec<HunkId> = lane2.into_iter().collect();
+                let target = *v1.last().unwrap();
+
+                let before = reciprocal_rank_fusion(&[v1.clone(), v2.clone()], k);
+                let pos_before = before.iter().position(|&id| id == target).unwrap();
+
+                let after = reciprocal_rank_fusion(&[v1, v2, vec![target]], k);
+                let pos_after = after.iter().position(|&id| id == target).unwrap();
+
+                prop_assert!(
+                    pos_after <= pos_before,
+                    "adding target {target} to an extra lane worsened its rank from {pos_before} to {pos_after}"
+                );
+            }
+        }
+    }
 }
