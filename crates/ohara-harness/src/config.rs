@@ -8,14 +8,19 @@ use serde::Deserialize;
 
 use crate::error::{Error, Result};
 
+/// Which adapter drives a runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum RuntimeKind {
+    /// The Claude Code CLI.
     #[serde(rename = "claude-code")]
     ClaudeCode,
+    /// The Codex CLI.
     #[serde(rename = "codex")]
     Codex,
+    /// The Antigravity CLI.
     #[serde(rename = "agy")]
     Agy,
+    /// A user-defined command described by `command`, `prompt` and `done`.
     #[serde(rename = "generic")]
     Generic,
     /// Scripted test runtime; absent from release builds.
@@ -24,29 +29,41 @@ pub enum RuntimeKind {
     Fake,
 }
 
+/// How a generic runtime receives its prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptMode {
+    /// Substituted into the `{prompt}` argv placeholder.
     Arg,
+    /// Written to the child process stdin.
     Stdin,
 }
 
+/// When a generic runtime run counts as completed.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct DoneRule {
+    /// Exit code that signals success.
     pub exit_code: i32,
+    /// Optional text the output must also contain.
     #[serde(default)]
     pub output_contains: Option<String>,
 }
 
+/// Configuration for one named runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct RuntimeSpec {
+    /// Adapter used to run this runtime.
     pub kind: RuntimeKind,
+    /// Model override passed to the agent, if any.
     #[serde(default)]
     pub model: Option<String>,
+    /// Argv for a generic runtime.
     #[serde(default)]
     pub command: Option<Vec<String>>,
+    /// Prompt delivery mode for a generic runtime.
     #[serde(default)]
     pub prompt: Option<PromptMode>,
+    /// Completion rule for a generic runtime.
     #[serde(default)]
     pub done: Option<DoneRule>,
 }
@@ -55,9 +72,12 @@ pub struct RuntimeSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 pub struct RoleMap(pub BTreeMap<Role, Vec<RuntimeName>>);
 
+/// Validated harness configuration: runtimes and role assignments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HarnessConfig {
+    /// Runtimes by name.
     pub runtimes: BTreeMap<RuntimeName, RuntimeSpec>,
+    /// Runtime order per role.
     pub roles: RoleMap,
 }
 

@@ -25,10 +25,14 @@ const DRAIN_GRACE: Duration = Duration::from_millis(200);
 
 const READ_CHUNK: usize = 8 * 1024;
 
+/// How a streamed child process ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessExit {
+    /// Exit code, if the child exited normally.
     pub code: Option<i32>,
+    /// Tail of the combined output, capped at `STDOUT_TAIL_CAP`.
     pub stdout_tail: String,
+    /// True if the deadline forced a kill.
     pub killed_at_deadline: bool,
 }
 

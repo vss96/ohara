@@ -21,6 +21,7 @@ pub struct FakeRuntime {
 }
 
 impl FakeRuntime {
+    /// Create a fake that returns `outcomes` in order.
     pub fn new(name: RuntimeName, outcomes: Vec<AgentOutcome>) -> Self {
         Self {
             name,

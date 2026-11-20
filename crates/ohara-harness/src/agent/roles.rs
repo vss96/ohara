@@ -42,6 +42,7 @@ fn should_fail_over(status: AgentStatus) -> bool {
 }
 
 impl RoleRunner {
+    /// Build a runner, resolving each role's runtimes through `factory`.
     pub fn new(
         config: &HarnessConfig,
         factory: impl Fn(&RuntimeName, &RuntimeSpec) -> Arc<dyn AgentRuntime>,

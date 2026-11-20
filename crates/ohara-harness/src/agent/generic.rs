@@ -10,6 +10,7 @@ use crate::error::{Error, Result};
 
 const PROMPT_PLACEHOLDER: &str = "{prompt}";
 
+/// Runtime that runs a user-configured command.
 pub struct GenericRuntime {
     name: RuntimeName,
     command: Vec<String>,
@@ -18,6 +19,7 @@ pub struct GenericRuntime {
 }
 
 impl GenericRuntime {
+    /// Create a runtime from a `generic` spec; errors on another kind or a missing `command`.
     pub fn new(name: RuntimeName, spec: &RuntimeSpec) -> Result<Self> {
         if spec.kind != RuntimeKind::Generic {
             return Err(Error::Runtime(format!(

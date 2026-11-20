@@ -7,43 +7,67 @@ use ohara_core::task::{CostCents, Deadline, RuntimeName};
 
 use crate::error::Result;
 
+/// Scripted runtime for tests.
 #[cfg(any(test, feature = "test-util"))]
 pub mod fake;
+/// Config-driven generic runtime.
 pub mod generic;
+/// Deadline-bound child process streaming.
 pub mod process;
+/// Role-level runtime selection and failover.
 pub mod roles;
 
 /// One agent invocation.
 #[derive(Debug, Clone)]
 pub struct AgentRequest {
+    /// Working directory the agent runs in.
     pub cwd: PathBuf,
+    /// Prompt text to deliver.
     pub prompt: String,
+    /// MCP config file to hand the agent, if any.
     pub mcp_config: Option<PathBuf>,
+    /// Instant after which the run is killed.
     pub deadline: Deadline,
+    /// File the full output is written to.
     pub transcript: PathBuf,
+    /// Model override for this run.
     pub model: Option<String>,
 }
 
+/// How an agent run ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentStatus {
+    /// The agent finished successfully.
     Completed,
+    /// The deadline passed before the agent finished.
     TimedOut,
+    /// The provider rate-limited or quota-capped the run.
     RateLimited,
+    /// The agent was not authenticated.
     AuthFailed,
+    /// The agent failed for any other reason.
     Crashed,
 }
 
+/// Result of one agent run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentOutcome {
+    /// How the run ended.
     pub status: AgentStatus,
+    /// Last message or output tail from the agent.
     pub final_message: String,
+    /// Reported cost, if the runtime exposes it.
     pub cost: Option<CostCents>,
+    /// Process exit code, if one was observed.
     pub exit_code: Option<i32>,
 }
 
+/// A runnable agent backend.
 #[async_trait]
 pub trait AgentRuntime: Send + Sync {
+    /// Configured name of this runtime.
     fn name(&self) -> &RuntimeName;
+    /// Run the agent once for `req`.
     async fn run(&self, req: AgentRequest) -> Result<AgentOutcome>;
 }
 
