@@ -103,4 +103,22 @@ mod tests {
         cache.invalidate(&key);
         assert!(cache.get(&key).is_none(), "must be absent after invalidate");
     }
+
+    #[test]
+    fn hits_count_only_fresh_cache_hits() {
+        let cache = MetaCache::new(Duration::from_secs(60));
+        let key = make_key();
+        assert!(cache.get(&key).is_none());
+        assert_eq!(cache.hits(), 0, "a miss is not a hit");
+        cache.put(key.clone(), make_meta("x"));
+        cache.get(&key).unwrap();
+        cache.get(&key).unwrap();
+        assert_eq!(cache.hits(), 2);
+
+        let expired = MetaCache::new(Duration::from_nanos(0));
+        expired.put(key.clone(), make_meta("stale"));
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(expired.get(&key).is_none());
+        assert_eq!(expired.hits(), 0, "an expired entry is not a hit");
+    }
 }

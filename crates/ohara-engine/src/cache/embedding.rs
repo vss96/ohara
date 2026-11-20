@@ -102,4 +102,14 @@ mod tests {
             "different models must not share arcs"
         );
     }
+
+    #[test]
+    fn hits_count_only_cache_hits() {
+        let c = EmbeddingCache::new("m", 4);
+        assert!(c.get("q").is_none());
+        assert_eq!(c.hits(), 0);
+        c.put("q", Arc::new(vec![1.0]));
+        assert!(c.get("q").is_some());
+        assert_eq!(c.hits(), 1);
+    }
 }

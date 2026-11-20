@@ -173,4 +173,19 @@ mod tests {
         assert!(c.get(&rid("a"), "f.rs", "h").is_none());
         assert!(c.get(&rid("b"), "f.rs", "h").is_some());
     }
+
+    #[test]
+    fn hits_count_only_cache_hits() {
+        let c = BlameCache::new(8);
+        assert!(c.get(&rid("a"), "f.rs", "h").is_none());
+        assert_eq!(c.hits(), 0);
+        c.put(
+            rid("a"),
+            "f.rs".into(),
+            "h".into(),
+            std::sync::Arc::new(vec![]),
+        );
+        c.get(&rid("a"), "f.rs", "h").expect("hit");
+        assert_eq!(c.hits(), 1);
+    }
 }
