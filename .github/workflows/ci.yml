@@ -57,6 +57,17 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
+      # Cargo 1.100 changed build-script OUT_DIR from
+      # `target/<profile>/build/<pkg>-<hash>/out` (3 levels below target/<profile>)
+      # to `target/<profile>/build/<pkg>/<hash>/out` (4 levels below).
+      # `ort-sys 2.0.0-rc.12` (pulled via `--all-features` / `cuda`) uses
+      # `out_dir.ancestors().nth(3)` in `build/dynamic_link.rs` and symlinks CUDA
+      # shared libs into `<nth(3)>/{,examples,deps}`, which under Cargo 1.100
+      # resolves to `target/debug/build/{examples,deps}` and panics with ENOENT
+      # unless those two directories exist.
+      - name: Work around ort-sys 2.0.0-rc.12 OUT_DIR depth assumption on Cargo 1.100+
+        run: mkdir -p target/debug/build/examples target/debug/build/deps
+
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
