@@ -200,4 +200,38 @@ mod tests {
         assert_eq!(count("xit('a'); describe.skip(", &IGNORE_TOKENS), 2);
         assert_eq!(test_count("xtest('a'); test('b')"), 1);
     }
+
+    #[test]
+    fn commenting_out_a_test_drops_the_count() {
+        let rust_before = "#[test]\nfn a() {}\n";
+        let rust_after = "// #[test]\nfn a() {}\n";
+        let v = compare("t.rs", Some(rust_before), Some(rust_after), false);
+        assert!(v.iter().any(|x| matches!(x, Violation::TestCountDropped { .. })));
+        let py_before = "def test_foo():\n    pass\n";
+        let py_after = "# def test_foo():\n    pass\n";
+        let v = compare("test_a.py", Some(py_before), Some(py_after), false);
+        assert!(v.iter().any(|x| matches!(x, Violation::TestCountDropped { .. })));
+    }
+
+    #[test]
+    fn commenting_out_assertions_drops_the_count() {
+        for (before, after) in [
+            ("assert_eq!(a, b);\n", "// assert_eq!(a, b);\n"),
+            ("assert x\n", "# assert x\n"),
+        ] {
+            let v = compare("t.rs", Some(before), Some(after), false);
+            assert!(
+                v.iter()
+                    .any(|x| matches!(x, Violation::AssertionsDropped { .. })),
+                "{after}"
+            );
+        }
+    }
+
+    #[test]
+    fn attributes_and_shebangs_are_still_counted() {
+        let src = "#[test]\n#[tokio::test]\n#[ignore]\n#!/bin/sh\n";
+        assert_eq!(count(src, &TEST_TOKENS), 2);
+        assert_eq!(count(src, &IGNORE_TOKENS), 1);
+    }
 }

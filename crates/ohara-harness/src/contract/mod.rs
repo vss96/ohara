@@ -172,4 +172,16 @@ scale_max = 10
         let err = Contract::parse(&bad).unwrap_err();
         assert!(err.to_string().contains("empty run"), "{err}");
     }
+
+    #[test]
+    fn degenerate_protected_path_is_rejected() {
+        for bad in ["", "./", "/", "."] {
+            let doc = SAMPLE.replace(
+                r#"protected_paths = ["Cargo.lock"]"#,
+                &format!("protected_paths = [{bad:?}]"),
+            );
+            let err = Contract::parse(&doc).unwrap_err();
+            assert!(err.to_string().contains("protected path"), "{bad:?}: {err}");
+        }
+    }
 }
