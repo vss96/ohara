@@ -45,6 +45,15 @@ fn classify_error_result(result: &str, tail: &str) -> AgentStatus {
     }
 }
 
+/// Status for a parsed result event. A clean result alone is not success:
+/// claude must also have exited 0.
+fn result_status(ev: &ResultEvent, _code: Option<i32>, tail: &str) -> AgentStatus {
+    match ev.is_error {
+        true => classify_error_result(&ev.result, tail),
+        false => AgentStatus::Completed,
+    }
+}
+
 impl ClaudeCodeRuntime {
     /// Build a runtime registered under `name`, optionally pinning `model`.
     pub fn new(name: RuntimeName, model: Option<String>) -> Self {
@@ -152,10 +161,7 @@ impl AgentRuntime for ClaudeCodeRuntime {
                 exit_code: exit.code,
             });
         };
-        let status = match ev.is_error {
-            true => classify_error_result(&ev.result, &exit.stdout_tail),
-            false => AgentStatus::Completed,
-        };
+        let status = result_status(&ev, exit.code, &exit.stdout_tail);
         Ok(AgentOutcome {
             status,
             final_message: ev.result,
@@ -287,6 +293,18 @@ mod tests {
             AgentStatus::RateLimited
         );
         assert_eq!(classify_error_result("error", "boom"), AgentStatus::Crashed);
+    }
+
+    #[test]
+    fn claude_nonzero_exit_is_not_completed() {
+        let ev = parse_result(FIXTURE).unwrap();
+        assert_eq!(result_status(&ev, Some(0), ""), AgentStatus::Completed);
+        assert_eq!(result_status(&ev, Some(1), ""), AgentStatus::Crashed);
+        assert_eq!(result_status(&ev, None, ""), AgentStatus::Crashed);
+        assert_eq!(
+            result_status(&ev, Some(1), "HTTP 429"),
+            AgentStatus::RateLimited
+        );
     }
 
     #[tokio::test]
