@@ -1,0 +1,120 @@
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use git2::{Repository, Signature};
+    use ohara_core::{CommitSha, CommitVisibility};
+
+    struct Fx {
+        dir: tempfile::TempDir,
+        repo: Repository,
+        c: [git2::Oid; 3],
+        f1: git2::Oid,
+    }
+
+    fn commit(
+        repo: &Repository,
+        refname: Option<&str>,
+        parent: Option<git2::Oid>,
+        msg: &str,
+    ) -> git2::Oid {
+        let sig = Signature::now("a", "a@a").unwrap();
+        let tree = repo
+            .find_tree(repo.treebuilder(None).unwrap().write().unwrap())
+            .unwrap();
+        let parents: Vec<git2::Commit> = parent
+            .iter()
+            .map(|p| repo.find_commit(*p).unwrap())
+            .collect();
+        let refs: Vec<&git2::Commit> = parents.iter().collect();
+        repo.commit(refname, &sig, &sig, msg, &tree, &refs).unwrap()
+    }
+
+    fn fixture() -> Fx {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let c1 = commit(&repo, Some("HEAD"), None, "c1");
+        let c2 = commit(&repo, Some("HEAD"), Some(c1), "c2");
+        let c3 = commit(&repo, Some("HEAD"), Some(c2), "c3");
+        let f1 = commit(&repo, Some("refs/heads/feat"), Some(c2), "f1");
+        Fx {
+            dir,
+            repo,
+            c: [c1, c2, c3],
+            f1,
+        }
+    }
+
+    fn sha(o: git2::Oid) -> CommitSha {
+        CommitSha::parse(&o.to_string()).unwrap()
+    }
+
+    fn all(fx: &Fx) -> Vec<CommitSha> {
+        vec![sha(fx.c[0]), sha(fx.c[1]), sha(fx.c[2]), sha(fx.f1)]
+    }
+
+    #[tokio::test]
+    async fn visible_is_head_or_ancestor() {
+        let fx = fixture();
+        let v = GitVisibility::open(fx.dir.path()).unwrap();
+        let got = v.visible(&sha(fx.c[2]), &all(&fx)).await.unwrap();
+        assert_eq!(got, vec![true, true, true, false]);
+        let got = v.visible(&sha(fx.f1), &all(&fx)).await.unwrap();
+        assert_eq!(got, vec![true, true, false, true]);
+    }
+
+    #[tokio::test]
+    async fn detached_head_worktree_is_keyed_on_the_commit() {
+        let fx = fixture();
+        fx.repo.set_head_detached(fx.c[2]).unwrap();
+        let v = GitVisibility::open(fx.dir.path()).unwrap();
+        let got = v.visible(&sha(fx.f1), &all(&fx)).await.unwrap();
+        assert_eq!(got, vec![true, true, false, true]);
+    }
+
+    #[tokio::test]
+    async fn missing_commit_is_invisible_and_missing_head_is_an_error() {
+        let fx = fixture();
+        let v = GitVisibility::open(fx.dir.path()).unwrap();
+        let missing = CommitSha::parse(&"ab".repeat(20)).unwrap();
+        let got = v
+            .visible(&sha(fx.c[2]), &[missing.clone(), sha(fx.c[0])])
+            .await
+            .unwrap();
+        assert_eq!(got, vec![false, true]);
+        assert!(v.visible(&missing, &[sha(fx.c[0])]).await.is_err());
+    }
+
+    #[test]
+    fn reachable_includes_branches_and_detached_worktree_heads_but_not_dangling_commits() {
+        let fx = fixture();
+        let d = commit(&fx.repo, None, Some(fx.c[0]), "dangling");
+        let wt_dir = fx.dir.path().join("../wt-linked");
+        let wt_path = wt_dir.as_path();
+        let _ = std::fs::remove_dir_all(wt_path);
+        let feat = fx
+            .repo
+            .find_branch("feat", git2::BranchType::Local)
+            .unwrap();
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(feat.get()));
+        fx.repo.worktree("wt", wt_path, Some(&opts)).unwrap();
+        let wt_repo = Repository::open(wt_path).unwrap();
+        wt_repo.set_head_detached(fx.f1).unwrap();
+        drop(feat);
+        fx.repo
+            .find_branch("feat", git2::BranchType::Local)
+            .unwrap()
+            .delete()
+            .unwrap();
+
+        let set = reachable_commit_shas(fx.dir.path()).unwrap();
+        for o in [fx.c[0], fx.c[1], fx.c[2], fx.f1] {
+            assert!(set.contains(&o.to_string()), "missing {o}");
+        }
+        assert!(!set.contains(&d.to_string()));
+        // Also works from the linked worktree path.
+        let set2 = reachable_commit_shas(wt_path).unwrap();
+        assert!(set2.contains(&fx.f1.to_string()));
+        let _ = std::fs::remove_dir_all(wt_path);
+    }
+}
