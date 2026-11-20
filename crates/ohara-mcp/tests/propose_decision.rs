@@ -205,6 +205,32 @@ async fn proposal_size_caps_are_tool_errors() {
 }
 
 #[tokio::test]
+async fn runner_up_and_assumption_text_are_capped() {
+    let (_d, store, task, svc) = fixture(1, TaskState::Running).await;
+
+    let mut r = input();
+    r.runner_up = Some("r".repeat(513));
+    assert!(svc.propose_decision(r).await.is_err());
+
+    let mut t = input();
+    t.assumptions = vec![AssumptionInput {
+        text: "t".repeat(2 * 1024 + 1),
+        check: None,
+    }];
+    assert!(svc.propose_decision(t).await.is_err());
+    assert!(store.list_decisions(&task.id).await.unwrap().is_empty());
+
+    // Boundaries are inclusive.
+    let mut ok = input();
+    ok.runner_up = Some("r".repeat(512));
+    ok.assumptions = vec![AssumptionInput {
+        text: "t".repeat(2 * 1024),
+        check: None,
+    }];
+    assert!(svc.propose_decision(ok).await.is_ok());
+}
+
+#[tokio::test]
 async fn proposed_decisions_per_round_are_capped() {
     let (_d, store, task, svc) = fixture(1, TaskState::Running).await;
     for _ in 0..16 {
