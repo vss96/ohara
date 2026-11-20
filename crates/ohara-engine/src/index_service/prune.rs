@@ -62,9 +62,10 @@ pub async fn prune_unreachable_in_process(repo_path: &Path) -> crate::Result<Pru
     })
 }
 
-/// After a successful index job: when the repo has a retired tip (left by
-/// a reset, amend or rebase), prune so an unreachable one stops keeping
-/// the visibility fast path off. Caller holds the repo's job lock. A
+/// After a successful index job: when some retired tip (left by a reset,
+/// amend, rebase or branch switch) has become unreachable, prune so it
+/// stops keeping the visibility fast path off. Checked after every pass,
+/// so a branch deleted later is noticed by the next job. Caller holds the repo's job lock. A
 /// failure is logged and never fails the index job. Returns whether a
 /// full prune ran.
 pub(super) async fn prune_retired_after_index(
@@ -78,13 +79,44 @@ pub(super) async fn prune_retired_after_index(
             return false;
         }
     };
-    if !tips.iter().any(|t| t.worktree.is_retired()) {
+    let retired: Vec<CommitSha> = tips
+        .into_iter()
+        .filter(|t| t.worktree.is_retired())
+        .map(|t| t.sha)
+        .collect();
+    if retired.is_empty() {
+        return false;
+    }
+    // A retired tip a ref still reaches (e.g. after a branch switch) can't
+    // be dropped, so a full prune would free nothing; only prune once one
+    // has become unreachable. Unknown counts as unreachable: prune itself
+    // fails closed.
+    if !retired_tip_unreachable(handle.repo_path.clone(), retired).await {
+        tracing::debug!("auto-prune: every retired tip is still reachable; skipping");
         return false;
     }
     if let Err(e) = prune_and_refresh(engine, handle).await {
         tracing::warn!(error = %e, "auto-prune after index failed");
     }
     true
+}
+
+/// Whether some of `retired` is reached by no ref or worktree HEAD.
+/// Errors are logged and count as `true`.
+async fn retired_tip_unreachable(path: PathBuf, retired: Vec<CommitSha>) -> bool {
+    let res =
+        tokio::task::spawn_blocking(move || ohara_git::any_unreachable(&path, &retired)).await;
+    match res {
+        Ok(Ok(unreachable)) => unreachable,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "auto-prune: reachability check failed; pruning");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "auto-prune: reachability task failed; pruning");
+            true
+        }
+    }
 }
 
 /// Prune body over the store of `repo_id`, with git liveness read from
