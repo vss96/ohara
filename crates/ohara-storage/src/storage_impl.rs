@@ -9,7 +9,7 @@ use ohara_core::{
     query::IndexStatus,
     storage::{
         CommitRecord, HunkHit, HunkId, HunkRecord, Storage, StorageCache, StorageExplain,
-        StorageMetricsSnapshot,
+        StorageMetricsSnapshot, StorageRead,
     },
     types::{CommitMeta, Hunk, HunkSymbol, RepoId, Symbol},
     Result as CoreResult,
@@ -143,6 +143,44 @@ impl Storage for SqliteStorage {
         with_conn(&self.write_pool, crate::tables::symbol::clear_all).await
     }
 
+    async fn get_index_metadata(&self, repo_id: &RepoId) -> CoreResult<StoredIndexMetadata> {
+        let id = repo_id.as_str().to_string();
+        timed_with_conn(
+            &self.pool,
+            &self.counters.get_index_metadata,
+            |m: &StoredIndexMetadata| m.components.len() as u64,
+            move |c| crate::tables::index_metadata::get(c, &id),
+        )
+        .await
+    }
+
+    async fn put_index_metadata(
+        &self,
+        repo_id: &RepoId,
+        components: &[(String, String)],
+    ) -> CoreResult<()> {
+        let id = repo_id.as_str().to_string();
+        let comps = components.to_vec();
+        with_conn(&self.write_pool, move |c| {
+            crate::tables::index_metadata::put_many(c, &id, &comps)
+        })
+        .await
+    }
+
+    fn metrics_snapshot(&self) -> StorageMetricsSnapshot {
+        self.counters.snapshot()
+    }
+
+    async fn latest_indexed_by_ulid(
+        &self,
+        _repo_id: &ohara_core::types::RepoId,
+    ) -> ohara_core::Result<Option<ohara_core::types::CommitMeta>> {
+        with_conn(&self.pool, |c| crate::tables::commit::latest_by_ulid(c)).await
+    }
+}
+
+#[async_trait::async_trait]
+impl StorageRead for SqliteStorage {
     async fn knn_hunks(
         &self,
         _repo_id: &RepoId,
@@ -281,41 +319,6 @@ impl Storage for SqliteStorage {
             move |c| crate::tables::hunk_symbol::get_for_hunks(c, &ids_owned),
         )
         .await
-    }
-
-    async fn get_index_metadata(&self, repo_id: &RepoId) -> CoreResult<StoredIndexMetadata> {
-        let id = repo_id.as_str().to_string();
-        timed_with_conn(
-            &self.pool,
-            &self.counters.get_index_metadata,
-            |m: &StoredIndexMetadata| m.components.len() as u64,
-            move |c| crate::tables::index_metadata::get(c, &id),
-        )
-        .await
-    }
-
-    async fn put_index_metadata(
-        &self,
-        repo_id: &RepoId,
-        components: &[(String, String)],
-    ) -> CoreResult<()> {
-        let id = repo_id.as_str().to_string();
-        let comps = components.to_vec();
-        with_conn(&self.write_pool, move |c| {
-            crate::tables::index_metadata::put_many(c, &id, &comps)
-        })
-        .await
-    }
-
-    fn metrics_snapshot(&self) -> StorageMetricsSnapshot {
-        self.counters.snapshot()
-    }
-
-    async fn latest_indexed_by_ulid(
-        &self,
-        _repo_id: &ohara_core::types::RepoId,
-    ) -> ohara_core::Result<Option<ohara_core::types::CommitMeta>> {
-        with_conn(&self.pool, |c| crate::tables::commit::latest_by_ulid(c)).await
     }
 }
 

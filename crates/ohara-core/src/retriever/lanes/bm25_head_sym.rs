@@ -4,17 +4,17 @@ use super::{LaneId, RetrievalLane};
 use crate::perf_trace::timed_phase;
 use crate::query::PatternQuery;
 use crate::query_understanding::RetrievalProfile;
-use crate::storage::{HunkHit, Storage};
+use crate::storage::{HunkHit, StorageRead};
 use crate::types::RepoId;
 use async_trait::async_trait;
 use std::sync::Arc;
 
 pub struct Bm25HeadSymLane {
-    storage: Arc<dyn Storage>,
+    storage: Arc<dyn StorageRead>,
 }
 
 impl Bm25HeadSymLane {
-    pub fn new(storage: Arc<dyn Storage>) -> Self {
+    pub fn new(storage: Arc<dyn StorageRead>) -> Self {
         Self { storage }
     }
 

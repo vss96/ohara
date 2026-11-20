@@ -5,7 +5,7 @@ use crate::embed::EmbeddingProvider;
 use crate::perf_trace::timed_phase;
 use crate::query::PatternQuery;
 use crate::query_understanding::RetrievalProfile;
-use crate::storage::{HunkHit, Storage};
+use crate::storage::{HunkHit, StorageRead};
 use crate::types::RepoId;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -16,12 +16,12 @@ use std::sync::Arc;
 /// `EmbeddingProvider`. The embed step is inside the lane so the
 /// coordinator does not need to know which lanes require embeddings.
 pub struct VecLane {
-    storage: Arc<dyn Storage>,
+    storage: Arc<dyn StorageRead>,
     embedder: Arc<dyn EmbeddingProvider>,
 }
 
 impl VecLane {
-    pub fn new(storage: Arc<dyn Storage>, embedder: Arc<dyn EmbeddingProvider>) -> Self {
+    pub fn new(storage: Arc<dyn StorageRead>, embedder: Arc<dyn EmbeddingProvider>) -> Self {
         Self { storage, embedder }
     }
 

@@ -21,7 +21,7 @@
 //! file count, hunks-per-file, total fan-out, k, p50_us, p95_us. Paste
 //! it into PR descriptions for any change that touches the lane.
 
-use ohara_core::storage::{CommitRecord, HunkRecord, Storage};
+use ohara_core::storage::{CommitRecord, HunkRecord, Storage, StorageRead};
 use ohara_core::types::{ChangeKind, CommitMeta, Hunk, RepoId, Symbol, SymbolKind};
 use ohara_storage::SqliteStorage;
 use std::time::Instant;

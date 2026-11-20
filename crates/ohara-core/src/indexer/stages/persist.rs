@@ -171,6 +171,16 @@ mod tests {
         async fn clear_head_symbols(&self, _: &RepoId) -> Result<()> {
             Ok(())
         }
+        async fn get_index_metadata(&self, _: &RepoId) -> Result<StoredIndexMetadata> {
+            Ok(StoredIndexMetadata::default())
+        }
+        async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl crate::storage::StorageRead for RecordingStorage {
         async fn knn_hunks(
             &self,
             _: &RepoId,
@@ -181,6 +191,7 @@ mod tests {
         ) -> Result<Vec<HunkHit>> {
             Ok(vec![])
         }
+
         async fn bm25_hunks_by_text(
             &self,
             _: &RepoId,
@@ -191,6 +202,7 @@ mod tests {
         ) -> Result<Vec<HunkHit>> {
             Ok(vec![])
         }
+
         async fn bm25_hunks_by_semantic_text(
             &self,
             _: &RepoId,
@@ -201,6 +213,7 @@ mod tests {
         ) -> Result<Vec<HunkHit>> {
             Ok(vec![])
         }
+
         async fn bm25_hunks_by_symbol_name(
             &self,
             _: &RepoId,
@@ -211,6 +224,7 @@ mod tests {
         ) -> Result<Vec<HunkHit>> {
             Ok(vec![])
         }
+
         async fn bm25_hunks_by_historical_symbol(
             &self,
             _: &RepoId,
@@ -221,21 +235,17 @@ mod tests {
         ) -> Result<Vec<HunkHit>> {
             Ok(vec![])
         }
+
         async fn get_hunk_symbols(&self, _: &RepoId, _: HunkId) -> Result<Vec<HunkSymbol>> {
             Ok(vec![])
         }
+
         async fn get_hunk_symbols_batch(
             &self,
             _: &RepoId,
             _: &[HunkId],
         ) -> Result<std::collections::HashMap<HunkId, Vec<HunkSymbol>>> {
             Ok(std::collections::HashMap::new())
-        }
-        async fn get_index_metadata(&self, _: &RepoId) -> Result<StoredIndexMetadata> {
-            Ok(StoredIndexMetadata::default())
-        }
-        async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> Result<()> {
-            Ok(())
         }
     }
 

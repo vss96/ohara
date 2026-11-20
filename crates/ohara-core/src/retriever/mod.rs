@@ -33,14 +33,14 @@ use std::sync::Arc;
 
 pub struct Retriever {
     weights: RankingWeights,
-    storage: Arc<dyn crate::Storage>,
+    storage: Arc<dyn crate::storage::StorageRead>,
     embedder: Arc<dyn crate::EmbeddingProvider>,
     reranker: Option<Arc<dyn RerankProvider>>,
 }
 
 impl Retriever {
     pub fn new(
-        storage: Arc<dyn crate::Storage>,
+        storage: Arc<dyn crate::storage::StorageRead>,
         embedder: Arc<dyn crate::EmbeddingProvider>,
     ) -> Self {
         Self {
