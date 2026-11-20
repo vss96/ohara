@@ -55,6 +55,9 @@ pub struct RetrievalEngine {
     stores: RwLock<HashMap<RepoId, Arc<RepoStore>>>,
     /// One handle per worktree, keyed by canonical worktree path.
     repos: RwLock<HashMap<PathBuf, Arc<RepoHandle>>>,
+    /// Bumped by `invalidate_repo` under the `stores` write lock, so an
+    /// open that raced it does not cache a store it already evicted.
+    store_generation: AtomicU64,
     /// Repo-independent: keyed by `(model_id, query text)`.
     embed_cache: EmbeddingCache,
     /// Per-repo caches (meta + blame), invalidated as one group.
@@ -84,6 +87,7 @@ impl RetrievalEngine {
             reranker,
             stores: RwLock::new(HashMap::new()),
             repos: RwLock::new(HashMap::new()),
+            store_generation: AtomicU64::new(0),
             embed_cache: EmbeddingCache::new(model_id, 256),
             repo_caches: RepoCaches::new(),
             ancestry: Arc::new(AncestryCache::default()),
@@ -313,7 +317,7 @@ impl RetrievalEngine {
     /// Blame-based explain for a file + line range in a repo's git history.
     ///
     /// Opens (or reuses) the per-repo handle. On a BlameCache hit (same
-    /// HEAD blob OID for the file), skips `Blamer::blame_range` and feeds
+    /// HEAD commit and blob OID for the file), skips `Blamer::blame_range` and feeds
     /// the cached `Vec<BlameRange>` directly to the hydrator. On a miss,
     /// calls the blamer, caches the result, then hydrates.
     ///
@@ -325,7 +329,7 @@ impl RetrievalEngine {
         query: ExplainQuery,
     ) -> crate::Result<ExplainResult> {
         let handle = self.open_repo(repo_path).await?;
-        let content_hash_opt = compute_head_content_hash(&handle.repo_path, &query.file);
+        let content_hash_opt = head_blame_key(&handle.repo_path, &query.file);
 
         // Cache hit path — skip Blamer entirely.
         if let Some(ref hash) = content_hash_opt {
@@ -430,20 +434,24 @@ pub(crate) async fn compose_response_meta(handle: &RepoHandle) -> crate::Result<
     })
 }
 
-/// Compute the git blob OID for `file` at HEAD in `repo_path`.
+/// The blame cache key for `file` at HEAD in `repo_path`: the HEAD commit
+/// plus the file's blob OID. The blob alone is not enough: after a reset,
+/// rebase or branch switch the same content can be last touched by other
+/// commits.
 ///
 /// Returns `None` when the file is absent from HEAD (deleted file,
 /// wrong path) or when the git2 repository can't be opened. Callers
-/// treat `None` as "skip the cache, let the Blamer decide".
-fn compute_head_content_hash(
-    repo_path: &std::path::Path,
-    file: &str,
-) -> Option<ohara_core::types::ContentHash> {
+/// fall through to a direct blame without caching in that case.
+fn head_blame_key(repo_path: &std::path::Path, file: &str) -> Option<String> {
     let repo = git2::Repository::open(repo_path).ok()?;
-    let head = repo.head().ok()?;
-    let tree = head.peel_to_tree().ok()?;
-    let entry = tree.get_path(std::path::Path::new(file)).ok()?;
-    Some(ohara_core::types::ContentHash::from_blob_oid(entry.id()))
+    let commit = repo.head().ok()?.peel_to_commit().ok()?;
+    let entry = commit
+        .tree()
+        .ok()?
+        .get_path(std::path::Path::new(file))
+        .ok()?;
+    let blob = ohara_core::types::ContentHash::from_blob_oid(entry.id());
+    Some(format!("{}:{}", commit.id(), blob.as_str()))
 }
 
 /// Assemble `ExplainResult` from a `HydratedBlame` + the original query.

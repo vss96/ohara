@@ -23,8 +23,9 @@ struct Key {
 /// Thread-safe: wraps the inner [`LruCache`] in a [`Mutex`] so it can be
 /// shared across async tasks via `Arc<BlameCache>`.
 ///
-/// `content_hash` is the HEAD blob OID (40-char hex) for the file, which
-/// changes whenever the file's content changes, providing natural invalidation.
+/// `content_hash` is the HEAD commit plus the file's HEAD blob OID
+/// (`<commit>:<blob>`): it changes whenever the file's content or the
+/// checkout's history changes, providing natural invalidation.
 /// `invalidate_repo` drops every entry whose `RepoId` matches the argument.
 pub struct BlameCache {
     inner: Mutex<LruCache<Key, Arc<Vec<BlameRange>>>>,
