@@ -96,12 +96,16 @@ pub fn reachable_commit_shas(path: &Path) -> Result<HashSet<String>> {
         };
         let head = match wt_repo.head() {
             Ok(h) => h,
-            Err(e) => {
-                tracing::warn!(worktree = %name, error = %e, "skipping worktree with unreadable HEAD");
+            Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {
+                tracing::warn!(worktree = %name, "skipping worktree with unborn HEAD");
                 continue;
+            }
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context(format!("read HEAD of worktree {name}")));
             }
         };
         let Some(oid) = head.target() else {
+            tracing::debug!(worktree = %name, "worktree HEAD has no direct target; skipping");
             continue;
         };
         walk.push(oid)
