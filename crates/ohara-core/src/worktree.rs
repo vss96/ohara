@@ -27,8 +27,17 @@ impl CommitSha {
     }
 }
 
+/// Separates the worktree from the sha in a retired tip's key.
+const RETIRED_SEPARATOR: char = '/';
+
 /// Identifies a worktree within one repo: empty for the main checkout,
 /// a non-empty name for a linked worktree.
+///
+/// A third, reserved form keys a *retired* tip: the tip a worktree had
+/// before it moved to a commit that does not descend from it (branch
+/// switch, reset, slot reuse). Its key is `<worktree>/<sha>`. A worktree
+/// name is a directory under `.git/worktrees/`, so it can never contain
+/// `/`, and a retired key never collides with a real worktree.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WorktreeKey(String);
 
@@ -38,19 +47,49 @@ impl WorktreeKey {
         Self(String::new())
     }
 
-    /// Key of a linked worktree; `name` must be non-empty.
+    /// Key of a linked worktree; `name` must be non-empty and free of `/`
+    /// (git worktree names are directory names).
     pub fn linked(name: &str) -> Result<Self> {
-        if name.is_empty() {
-            return Err(OhraError::InvalidArgument(
-                "linked worktree name must not be empty".into(),
-            ));
+        if name.is_empty() || name.contains(RETIRED_SEPARATOR) {
+            return Err(OhraError::InvalidArgument(format!(
+                "invalid linked worktree name: {name:?}"
+            )));
         }
         Ok(Self(name.to_string()))
+    }
+
+    /// Reserved key for `tip`, the tip `of` held before moving to a commit
+    /// that does not descend from it.
+    pub fn retired(of: &WorktreeKey, tip: &CommitSha) -> Self {
+        Self(format!("{}{RETIRED_SEPARATOR}{}", of.0, tip.as_str()))
+    }
+
+    /// Parse a key as stored: `""` is main, `<name>/<sha>` is retired,
+    /// anything else is a linked worktree name.
+    pub fn from_stored(key: &str) -> Result<Self> {
+        if key.is_empty() {
+            return Ok(Self::main());
+        }
+        let Some((of, sha)) = key.rsplit_once(RETIRED_SEPARATOR) else {
+            return Self::linked(key);
+        };
+        if of.contains(RETIRED_SEPARATOR) {
+            return Err(OhraError::InvalidArgument(format!(
+                "invalid retired tip key: {key:?}"
+            )));
+        }
+        let sha = CommitSha::parse(sha)?;
+        Ok(Self::retired(&Self(of.to_string()), &sha))
     }
 
     /// True for the main checkout.
     pub fn is_main(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// True for a retired tip's reserved key (not a worktree).
+    pub fn is_retired(&self) -> bool {
+        self.0.contains(RETIRED_SEPARATOR)
     }
 
     /// The key string ("" for main).

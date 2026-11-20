@@ -18,12 +18,9 @@ impl TipStore for SqliteStorage {
                 tracing::warn!(worktree_key = %key, "skipping indexed tip with invalid sha");
                 continue;
             };
-            let worktree = match key.is_empty() {
-                true => WorktreeKey::main(),
-                false => match WorktreeKey::linked(&key) {
-                    Ok(w) => w,
-                    Err(_) => continue,
-                },
+            let Ok(worktree) = WorktreeKey::from_stored(&key) else {
+                tracing::warn!(worktree_key = %key, "skipping indexed tip with invalid key");
+                continue;
             };
             tips.push(IndexedTip { worktree, sha });
         }
