@@ -7,17 +7,18 @@ use ohara_core::task::{CostCents, Deadline, RuntimeName};
 
 use crate::error::Result;
 
+/// Claude Code (`claude -p`) runtime adapter.
+pub mod claude;
 /// Scripted runtime for tests.
 #[cfg(any(test, feature = "test-util"))]
 pub mod fake;
-/// Claude Code (`claude -p`) runtime adapter.
-pub mod claude;
 /// Config-driven generic runtime.
 pub mod generic;
 /// Deadline-bound child process streaming.
 pub mod process;
 /// Role-level runtime selection and failover.
 pub mod roles;
+/// Shared helpers for scanning JSON event streams.
 pub mod stream;
 
 /// One agent invocation.
