@@ -59,7 +59,7 @@ pub async fn write_frame<W: AsyncWriteExt + Unpin>(writer: &mut W, payload: &[u8
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -97,5 +97,48 @@ mod tests {
             msg.contains("too large") || msg.contains("internal"),
             "expected oversized-frame write error, got: {msg}"
         );
+    }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            #[test]
+            fn round_trip_preserves_arbitrary_payloads(
+                payload in proptest::collection::vec(any::<u8>(), 0..=65_536)
+            ) {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let (mut writer, mut reader) = tokio::io::duplex(payload.len().max(1) + 16);
+                    write_frame(&mut writer, &payload).await.unwrap();
+                    let received = read_frame(&mut reader).await.unwrap();
+                    prop_assert_eq!(received, payload);
+                    Ok(())
+                })?;
+            }
+
+            #[test]
+            fn read_frame_rejects_any_length_above_max_frame_bytes(
+                oversized_len in (MAX_FRAME_BYTES + 1)..=u32::MAX
+            ) {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let (mut writer, mut reader) = tokio::io::duplex(8);
+                    writer.write_u32(oversized_len).await.unwrap();
+                    let res = read_frame(&mut reader).await;
+                    prop_assert!(res.is_err());
+                    Ok(())
+                })?;
+            }
+        }
     }
 }

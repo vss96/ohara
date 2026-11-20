@@ -51,3 +51,6 @@ coreml = ["dep:ort", "dep:tokenizers"]
 # Enable CUDA execution provider. Requires CUDA toolkit at build time —
 # Linux x86_64 (and Windows) hosts with NVIDIA GPUs only.
 cuda = ["dep:ort", "ort/cuda"]
+
+[dev-dependencies]
+proptest.workspace = true

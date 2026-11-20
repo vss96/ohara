@@ -394,3 +394,353 @@ pub fn bm25_by_text(
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::codec::pool::{apply_pragmas, load_vec_extension, register_vec_auto_extension};
+    use crate::migrations;
+    use crate::tables::{commit, symbol};
+    use ohara_core::storage::{CommitRecord, HunkRecord};
+    use ohara_core::types::{
+        AttributionKind, ChangeKind, CommitMeta, Hunk, HunkSymbol, Symbol, SymbolKind,
+    };
+    use proptest::prelude::*;
+
+    fn open_migrated_in_memory() -> Connection {
+        register_vec_auto_extension().expect("register sqlite-vec");
+        let mut c = Connection::open_in_memory().expect("open in-memory sqlite");
+        apply_pragmas(&c).expect("apply pragmas");
+        load_vec_extension(&c).expect("load vec extension");
+        migrations::run(&mut c).expect("run migrations");
+        c
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct CanonicalSnapshot {
+        commits: Vec<(String, i64, String, Vec<u8>)>,
+        fts_commits: Vec<(String, String)>,
+        hunks: Vec<(String, String, String, String, String, Vec<u8>)>,
+        fts_text: Vec<(String, String, String)>,
+        fts_semantic: Vec<(String, String, String)>,
+        hunk_symbols: Vec<(String, String, String, String, String)>,
+    }
+
+    fn snapshot_db(c: &Connection) -> CanonicalSnapshot {
+        let orphan_vec_hunk: i64 = c
+            .query_row(
+                "SELECT count(*) FROM vec_hunk WHERE hunk_id NOT IN (SELECT id FROM hunk)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphan_vec_hunk, 0, "orphaned vec_hunk rows detected");
+
+        let orphan_fts_text: i64 = c
+            .query_row(
+                "SELECT count(*) FROM fts_hunk_text WHERE hunk_id NOT IN (SELECT id FROM hunk)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphan_fts_text, 0, "orphaned fts_hunk_text rows detected");
+
+        let orphan_fts_sem: i64 = c
+            .query_row(
+                "SELECT count(*) FROM fts_hunk_semantic WHERE hunk_id NOT IN (SELECT id FROM hunk)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            orphan_fts_sem, 0,
+            "orphaned fts_hunk_semantic rows detected"
+        );
+
+        let orphan_hs: i64 = c
+            .query_row(
+                "SELECT count(*) FROM hunk_symbol WHERE hunk_id NOT IN (SELECT id FROM hunk)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphan_hs, 0, "orphaned hunk_symbol rows detected");
+
+        let mut stmt = c
+            .prepare(
+                "SELECT cr.sha, cr.ts, cr.message, vc.message_emb
+                 FROM commit_record cr
+                 JOIN vec_commit vc ON vc.commit_sha = cr.sha
+                 ORDER BY cr.sha ASC",
+            )
+            .unwrap();
+        let commits = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(std::result::Result::unwrap)
+            .collect();
+
+        let mut stmt = c
+            .prepare("SELECT sha, message FROM fts_commit ORDER BY sha ASC, message ASC")
+            .unwrap();
+        let fts_commits = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(std::result::Result::unwrap)
+            .collect();
+
+        let mut stmt = c
+            .prepare(
+                "SELECT h.commit_sha, fp.path, h.change_kind, h.diff_text, h.semantic_text, vh.diff_emb
+                 FROM hunk h
+                 JOIN file_path fp ON fp.id = h.file_path_id
+                 JOIN vec_hunk vh ON vh.hunk_id = h.id
+                 ORDER BY h.commit_sha ASC, fp.path ASC, h.diff_text ASC",
+            )
+            .unwrap();
+        let hunks = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
+            .unwrap()
+            .map(std::result::Result::unwrap)
+            .collect();
+
+        let mut stmt = c
+            .prepare(
+                "SELECT h.commit_sha, fp.path, f.content
+                 FROM fts_hunk_text f
+                 JOIN hunk h ON h.id = f.hunk_id
+                 JOIN file_path fp ON fp.id = h.file_path_id
+                 ORDER BY h.commit_sha ASC, fp.path ASC, f.content ASC",
+            )
+            .unwrap();
+        let fts_text = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(std::result::Result::unwrap)
+            .collect();
+
+        let mut stmt = c
+            .prepare(
+                "SELECT h.commit_sha, fp.path, f.content
+                 FROM fts_hunk_semantic f
+                 JOIN hunk h ON h.id = f.hunk_id
+                 JOIN file_path fp ON fp.id = h.file_path_id
+                 ORDER BY h.commit_sha ASC, fp.path ASC, f.content ASC",
+            )
+            .unwrap();
+        let fts_semantic = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(std::result::Result::unwrap)
+            .collect();
+
+        let mut stmt = c
+            .prepare(
+                "SELECT h.commit_sha, fp.path, hs.symbol_kind, hs.symbol_name, hs.attribution_kind
+                 FROM hunk_symbol hs
+                 JOIN hunk h ON h.id = hs.hunk_id
+                 JOIN file_path fp ON fp.id = h.file_path_id
+                 ORDER BY h.commit_sha ASC, fp.path ASC, hs.symbol_kind ASC, hs.symbol_name ASC",
+            )
+            .unwrap();
+        let hunk_symbols = stmt
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .map(std::result::Result::unwrap)
+            .collect();
+
+        CanonicalSnapshot {
+            commits,
+            fts_commits,
+            hunks,
+            fts_text,
+            fts_semantic,
+            hunk_symbols,
+        }
+    }
+
+    fn is_fts5_reserved(token: &str) -> bool {
+        matches!(token, "AND" | "OR" | "NOT" | "NEAR")
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn sanitize_fts5_query_is_idempotent_and_strips_syntax(q in "\\PC{0,120}") {
+            let once = sanitize_fts5_query(&q);
+            let twice = sanitize_fts5_query(&once);
+            prop_assert_eq!(&once, &twice);
+            prop_assert!(!once.starts_with(' '));
+            prop_assert!(!once.ends_with(' '));
+            prop_assert!(!once.contains("  "));
+            for ch in once.chars() {
+                prop_assert!(ch.is_alphanumeric() || ch == '_' || ch == ' ');
+            }
+        }
+
+        #[test]
+        fn bm25_lanes_succeed_on_non_empty_non_operator_queries(
+            q in "[a-z0-9_ ]{1,50}"
+        ) {
+            let sanitized = sanitize_fts5_query(&q);
+            prop_assume!(!sanitized.is_empty());
+            prop_assume!(!sanitized.split_whitespace().any(is_fts5_reserved));
+
+            let mut c = open_migrated_in_memory();
+            let sha = "a".repeat(40);
+            commit::put(
+                &mut c,
+                &CommitRecord {
+                    ulid: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+                    meta: CommitMeta {
+                        commit_sha: sha.clone(),
+                        parent_sha: None,
+                        is_merge: false,
+                        author: Some("dev".into()),
+                        ts: 1_700_000_000,
+                        message: "retry backoff handler".into(),
+                    },
+                    message_emb: vec![0.1_f32; 384],
+                },
+            )
+            .unwrap();
+            put_many(
+                &mut c,
+                &[HunkRecord {
+                    hunk: Hunk {
+                        commit_sha: sha,
+                        file_path: "src/lib.rs".into(),
+                        language: Some("rust".into()),
+                        change_kind: ChangeKind::Modified,
+                        diff_text: "+fn retry_backoff() {}\n".into(),
+                    },
+                    diff_emb: vec![0.1_f32; 384],
+                    semantic_text: "commit: retry\nfile: src/lib.rs\nadded_lines:\nfn retry_backoff() {}".into(),
+                    symbols: vec![],
+                }],
+            )
+            .unwrap();
+            symbol::put_many(
+                &mut c,
+                &[Symbol {
+                    file_path: "src/lib.rs".into(),
+                    language: "rust".into(),
+                    kind: SymbolKind::Function,
+                    name: "retry_backoff".into(),
+                    qualified_name: None,
+                    sibling_names: vec![],
+                    span_start: 0,
+                    span_end: 21,
+                    blob_sha: "b1".into(),
+                    source_text: "fn retry_backoff() {}".into(),
+                }],
+            )
+            .unwrap();
+
+            prop_assert!(bm25_by_text(&c, &q, 5, None, None).is_ok());
+            prop_assert!(bm25_by_semantic_text(&c, &q, 5, None, None).is_ok());
+            prop_assert!(symbol::bm25_by_name(&c, &q, 5, None, None).is_ok());
+        }
+
+        #[test]
+        #[ignore = "tracked in #118: empty/punctuation queries and uppercase FTS5 operators AND/OR/NOT/NEAR cause fts5 syntax errors in bm25 lanes"]
+        fn bm25_lanes_never_error_on_arbitrary_user_queries(
+            q in prop_oneof![
+                Just(String::new()),
+                Just("???".to_string()),
+                Just("NOT".to_string()),
+                Just("why AND".to_string()),
+                Just("foo AND OR bar".to_string()),
+                "\\PC{0,60}",
+            ]
+        ) {
+            let c = open_migrated_in_memory();
+            prop_assert!(
+                bm25_by_text(&c, &q, 5, None, None).is_ok(),
+                "bm25_by_text errored on query {q:?}"
+            );
+            prop_assert!(
+                bm25_by_semantic_text(&c, &q, 5, None, None).is_ok(),
+                "bm25_by_semantic_text errored on query {q:?}"
+            );
+            prop_assert!(
+                symbol::bm25_by_name(&c, &q, 5, None, None).is_ok(),
+                "symbol::bm25_by_name errored on query {q:?}"
+            );
+        }
+
+        #[test]
+        fn crash_resume_replay_is_idempotent_across_relational_fts_and_vec_tables(
+            ops in proptest::collection::vec(
+                (0u8..=3, 1i64..=10_000, "[a-z]{3,12}", 1usize..=3),
+                1..=10
+            )
+        ) {
+            let mut replay_db = open_migrated_in_memory();
+            let mut dedup_ops: std::collections::BTreeMap<u8, (i64, String, usize)> =
+                std::collections::BTreeMap::new();
+
+            let write_op = |conn: &mut Connection, slot: u8, ts: i64, word: &str, n_hunks: usize| {
+                let sha = format!("{:040x}", slot + 1);
+                let rec = CommitRecord {
+                    ulid: format!("01ARZ3NDEKTSV4RRFFQ69G5FA{slot}"),
+                    meta: CommitMeta {
+                        commit_sha: sha.clone(),
+                        parent_sha: None,
+                        is_merge: false,
+                        author: Some("alice".into()),
+                        ts,
+                        message: format!("msg {word} {ts}"),
+                    },
+                    message_emb: vec![slot as f32 + 0.25; 384],
+                };
+                commit::put(conn, &rec).unwrap();
+
+                let hunks: Vec<HunkRecord> = (0..n_hunks)
+                    .map(|idx| HunkRecord {
+                        hunk: Hunk {
+                            commit_sha: sha.clone(),
+                            file_path: format!("src/f_{idx}.rs"),
+                            language: Some("rust".into()),
+                            change_kind: ChangeKind::Modified,
+                            diff_text: format!("+fn {word}_{idx}() {{}}\n"),
+                        },
+                        diff_emb: vec![(idx + 1) as f32 * 0.1; 384],
+                        semantic_text: format!("commit: msg {word}\nfile: src/f_{idx}.rs"),
+                        symbols: vec![HunkSymbol {
+                            kind: SymbolKind::Function,
+                            name: format!("{word}_{idx}"),
+                            qualified_name: None,
+                            attribution: AttributionKind::ExactSpan,
+                        }],
+                    })
+                    .collect();
+                put_many(conn, &hunks).unwrap();
+            };
+
+            for (slot, ts, word, n_hunks) in ops {
+                write_op(&mut replay_db, slot, ts, &word, n_hunks);
+                dedup_ops.insert(slot, (ts, word, n_hunks));
+            }
+
+            let mut fresh_db = open_migrated_in_memory();
+            for (slot, (ts, word, n_hunks)) in dedup_ops {
+                write_op(&mut fresh_db, slot, ts, &word, n_hunks);
+            }
+
+            prop_assert_eq!(snapshot_db(&replay_db), snapshot_db(&fresh_db));
+        }
+    }
+}

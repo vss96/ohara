@@ -109,4 +109,24 @@ mod tests {
         let out = cross_encode(&reranker, "q", vec![]).await.unwrap();
         assert!(out.is_empty());
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn sigmoid_is_bounded_and_monotonic(x1 in any::<f32>(), x2 in any::<f32>()) {
+                prop_assume!(!x1.is_nan() && !x2.is_nan());
+                let (lo, hi) = if x1 <= x2 { (x1, x2) } else { (x2, x1) };
+                let s_lo = sigmoid(lo);
+                let s_hi = sigmoid(hi);
+                prop_assert!(!s_lo.is_nan());
+                prop_assert!(!s_hi.is_nan());
+                prop_assert!((0.0..=1.0).contains(&s_lo));
+                prop_assert!((0.0..=1.0).contains(&s_hi));
+                prop_assert!(s_lo <= s_hi);
+            }
+        }
+    }
 }

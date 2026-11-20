@@ -335,4 +335,33 @@ mod tests {
         let f = LayeredIgnore::load(dir.path()).expect("load");
         assert!(f.is_ignored("generated.rs"));
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn user_negation_always_overrides_gitattributes_and_builtins(
+                dir_segment in "[a-z]{2,10}",
+                file_stem in "[a-z]{2,10}",
+                ext in prop_oneof![Just("rs"), Just("py"), Just("js"), Just("lock")],
+                attr_flag in prop_oneof![
+                    Just("linguist-generated=true"),
+                    Just("linguist-vendored=true"),
+                ],
+                negate_in_user in any::<bool>(),
+            ) {
+                let rel_path = format!("{dir_segment}/{file_stem}.{ext}");
+                let gitattrs = format!("{rel_path} {attr_flag}\n");
+                let user = if negate_in_user {
+                    format!("!{rel_path}\n")
+                } else {
+                    String::new()
+                };
+                let filter = LayeredIgnore::from_strings(BUILT_IN_DEFAULTS, &gitattrs, &user);
+                prop_assert_eq!(filter.is_ignored(&rel_path), !negate_in_user);
+            }
+        }
+    }
 }

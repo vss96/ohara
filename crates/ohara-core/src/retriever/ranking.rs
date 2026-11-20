@@ -207,4 +207,78 @@ mod tests {
         let out = apply_recency(vec![], 0.05, 90.0, 1_700_000_000);
         assert!(out.is_empty());
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::BTreeSet;
+
+        proptest! {
+            #[test]
+            fn fuse_to_pool_bounds_len_and_reuses_arc_allocations(
+                lanes in proptest::collection::vec(
+                    proptest::collection::vec(1i64..=30, 0..=15),
+                    0..=5
+                ),
+                rrf_k in 1u32..=100,
+                pool_k in 0usize..=40,
+            ) {
+                let mut all_ids = BTreeSet::new();
+                for lane in &lanes {
+                    all_ids.extend(lane.iter().copied());
+                }
+                let by_id = by_id_map(all_ids.iter().map(|&id| make_hit(id, 1_700_000_000, 0.5)));
+                let out = fuse_to_pool(&lanes, &by_id, rrf_k, pool_k);
+                prop_assert_eq!(out.len(), all_ids.len().min(pool_k));
+                for hit in &out {
+                    prop_assert!(Arc::ptr_eq(hit, &by_id[&hit.hunk_id]));
+                }
+            }
+
+            #[test]
+            fn apply_recency_monotonic_by_age_and_identity_at_zero_weight(
+                base_sim in 0.01f32..=1.0,
+                weight in 0.01f32..=2.0,
+                half_life in 1.0f32..=365.0,
+                now in 1_000_000_000i64..=2_000_000_000,
+                older_age_secs in 86_400i64..=50_000_000,
+                newer_age_secs in 0i64..=43_200,
+            ) {
+                let older_ts = now - older_age_secs;
+                let newer_ts = now - newer_age_secs;
+
+                let zero_out = apply_recency(
+                    vec![make_hit(1, older_ts, base_sim), make_hit(2, newer_ts, base_sim)],
+                    0.0,
+                    half_life,
+                    now,
+                );
+                prop_assert_eq!(zero_out[0].hunk_id, 1);
+                prop_assert!((zero_out[0].similarity - base_sim).abs() < 1e-6);
+
+                let weighted_out = apply_recency(
+                    vec![make_hit(1, older_ts, base_sim), make_hit(2, newer_ts, base_sim)],
+                    weight,
+                    half_life,
+                    now,
+                );
+                prop_assert_eq!(weighted_out[0].hunk_id, 2);
+                prop_assert!(weighted_out[0].similarity > weighted_out[1].similarity);
+            }
+
+            #[test]
+            #[ignore = "tracked in #120: apply_recency overflows i64 on (now_unix - ts) and produces NaN when recency_half_life_days == 0.0"]
+            fn apply_recency_never_overflows_or_produces_nan_on_extreme_inputs(
+                ts in any::<i64>(),
+                now in any::<i64>(),
+                sim in -1.0f32..=1.0,
+                weight in 0.0f32..=2.0,
+                half_life in 0.0f32..=365.0,
+            ) {
+                let out = apply_recency(vec![make_hit(1, ts, sim)], weight, half_life, now);
+                prop_assert_eq!(out.len(), 1);
+                prop_assert!(!out[0].similarity.is_nan());
+            }
+        }
+    }
 }
