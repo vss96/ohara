@@ -136,7 +136,7 @@ pub fn get(c: &Connection, sha: &str) -> Result<Option<CommitMeta>> {
 #[cfg(test)]
 mod tests {
     use crate::SqliteStorage;
-    use ohara_core::storage::{CommitRecord, Storage};
+    use ohara_core::storage::{CommitRecord, StorageWrite};
     use ohara_core::types::{CommitMeta, RepoId};
     use ohara_core::ulid_for_commit;
 

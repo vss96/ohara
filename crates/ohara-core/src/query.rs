@@ -1,4 +1,4 @@
-use crate::storage::{HunkId, Storage};
+use crate::storage::HunkId;
 use crate::types::{Provenance, RepoId};
 use crate::Result;
 use async_trait::async_trait;
@@ -111,7 +111,7 @@ pub trait CommitsBehind: Send + Sync {
 /// and the MCP `index_status_meta` call this; presentation lives at the call
 /// sites.
 pub async fn compute_index_status(
-    storage: &dyn Storage,
+    storage: &dyn crate::storage::StorageStatus,
     repo_id: &RepoId,
     behind: &dyn CommitsBehind,
 ) -> Result<IndexStatus> {
@@ -169,8 +169,7 @@ mod tests {
         assert_eq!(back.index_status.commits_behind_head, 7);
     }
 
-    use crate::storage::{CommitRecord, HunkHit, HunkRecord, Storage};
-    use crate::types::{RepoId, Symbol};
+    use crate::types::RepoId;
     use async_trait::async_trait;
 
     struct FakeStorage {
