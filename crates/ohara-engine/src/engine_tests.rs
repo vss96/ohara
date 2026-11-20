@@ -1356,3 +1356,46 @@ async fn repeated_incremental_runs_replace_head_symbols_without_duplicates() {
     assert_eq!(unique.len(), names.len(), "duplicates: {names:?}");
     assert!(names.contains(&"four".to_string()), "got {names:?}");
 }
+
+// ---- plan-33 follow-up F4: retired tips are cleaned up automatically ----
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn daemon_index_after_an_amend_prunes_the_retired_tip_and_restores_the_fast_path() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let main = tempfile::tempdir().unwrap();
+    build_test_repo(main.path());
+    let repo = git2::Repository::open(main.path()).unwrap();
+    let old = commit_file(&repo, "b.rs", "fn two() {}\n", "second");
+    index_checkout(main.path()).await;
+
+    // Amend HEAD: the indexed tip is no longer an ancestor of HEAD.
+    let amended = repo
+        .find_commit(old)
+        .unwrap()
+        .amend(
+            Some("HEAD"),
+            None,
+            None,
+            None,
+            Some("second, amended"),
+            None,
+        )
+        .unwrap();
+    let (_rec, engine) = recording_engine();
+    engine
+        .index_worktree(main.path())
+        .await
+        .expect("index_worktree");
+
+    let tips = all_tips(main.path()).await;
+    assert_eq!(tips, vec![(String::new(), amended.to_string())]);
+    assert!(!stored_commits(main.path()).await.contains(&old.to_string()));
+    engine
+        .find_pattern(main.path(), frobnicate_query())
+        .await
+        .expect("find_pattern");
+    assert_eq!(engine.ancestry_filtered_queries(), 0, "fast path is back");
+}
