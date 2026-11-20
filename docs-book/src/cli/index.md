@@ -137,7 +137,7 @@ each worktree only see commits its own `HEAD` reaches.
 - Commits that no branch, tag or worktree reaches any more (deleted
   branches, removed worktrees, rewritten history) stay indexed until
   [`ohara prune`](./prune.md) runs; a running daemon prunes on its own
-  after an index job when the repo has a retired tip.
+  after an index pass once some retired tip has become unreachable.
 
 See [Worktrees and the daemon writer](../architecture/indexing.md#worktrees-and-the-daemon-writer)
 for the details and known limits.

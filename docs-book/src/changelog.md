@@ -30,7 +30,7 @@ A git clone and all of its linked worktrees now share one index.
   (branch switch, reset, a reused slot), its old tip is kept as a
   retired tip so those commits stay behind the visibility filter;
   prune drops it once its branch is gone. The daemon prunes after an
-  index job whenever a retired tip exists.
+  index pass once some retired tip has become unreachable.
 - **`ohara prune [PATH]`** removes index rows for commits no branch,
   tag or worktree reaches any more. It runs on a same-version daemon
   when one is running, else in-process without loading any model.

@@ -198,9 +198,11 @@ and the old run's unmerged commits would leak into main's results.
 They are not worktrees: `status`, a worktree's own-tip lookup and
 `_meta.index_status` ignore them. Prune drops a retired tip once no
 ref reaches it (its commits are pruned in the same pass). After each
-successful index job the daemon prunes, under the same per-repo job
-lock, whenever the repo has a retired tip; a failed auto-prune is
-logged and does not fail the index job. Without a daemon, run
+successful index pass the daemon checks, under the same per-repo job
+lock, whether some retired tip has become unreachable, and prunes only
+then; a no-op request (the commit was already covered) runs no pass
+and so does not prune, and a failed auto-prune is logged and does not
+fail the index job. Without a daemon, run
 [`ohara prune`](../cli/prune.md).
 
 Jobs are serialised per repository. The daemon never builds an index
@@ -213,9 +215,10 @@ mismatched vectors.
 
 Re-extracts HEAD symbols even when `HEAD` is already indexed; like
 every pass, the new snapshot replaces the old one in one transaction
-after extraction, so nothing is cleared up front. Used after upgrading to a new ohara that changed the AST
-chunker (e.g. the v0.3 sibling-merge chunker would otherwise produce
-duplicate symbols when run over a v0.2-era index).
+after extraction, so nothing is cleared up front. Used after
+upgrading to a new ohara that changed the AST chunker (e.g. the v0.3
+sibling-merge chunker would otherwise produce duplicate symbols when
+run over a v0.2-era index).
 
 `--force` only touches HEAD symbols. Commit and hunk history are
 untouched — they're append-only and embed-stable. `--force` wins over
@@ -349,16 +352,22 @@ becomes the dominant per-commit cost, fanning out across workers.
   kept as a [retired tip](#retired-tips). Commits that never got a tip
   at all are not.)
 - **Retired tips keep the filter on until a prune runs.** Every
-  reset, amend or rebase of an indexed worktree leaves a retired tip.
-  One that the querying `HEAD` can't reach keeps retrieval on the
-  (slower) visibility-filtered path until a prune removes it. The
-  daemon prunes after each index job when a retired tip exists; an
-  index run only by the CLI (no daemon) needs an explicit
-  [`ohara prune`](../cli/prune.md).
+  reset, amend, rebase or branch switch of an indexed worktree leaves
+  a retired tip. One that the querying `HEAD` can't reach keeps
+  retrieval on the (slower) visibility-filtered path until a prune
+  removes it. The daemon auto-prunes after a successful index pass,
+  but only when some retired tip has become unreachable; no-op
+  "already covered" requests don't prune. An index run only by the CLI
+  (no daemon) needs an explicit [`ohara prune`](../cli/prune.md).
+- **A reachable retired tip is never pruned.** A retired tip that a
+  branch still reaches (say, after switching a worktree to a new
+  branch while the old branch survives) keeps the filter on for every
+  `HEAD` that can't reach it, until that branch is deleted; the next
+  index pass or `ohara prune` after the deletion drops it.
 - **No cross-process writer lock.** The daemon serialises its own
   jobs, but a CLI `--force` or `--rebuild`, an in-process
-  `ohara prune`, or a second daemon
-  briefly overlapping the first during shutdown or a version upgrade,
+  `ohara prune`, or a second daemon briefly overlapping the first
+  during shutdown or a version upgrade,
   can write while the daemon does. SQLite keeps the data consistent;
   expect `SQLITE_BUSY` errors or duplicated work.
 - **Unopenable worktrees are skipped when pruning.** A worktree whose

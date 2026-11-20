@@ -44,8 +44,14 @@ only the index and git, so it never loads the embedding or rerank
 model. `prune` never starts a daemon.
 
 You rarely need to run it by hand when a daemon is running: after each
-index job, the daemon prunes on its own whenever the repo has a retired
-tip.
+successful index pass, the daemon prunes on its own, but only when some
+retired tip has become unreachable. A no-op request (the commit was
+already covered) runs no pass and does not prune.
+
+A retired tip that a branch still reaches is never pruned: it keeps the
+visibility filter on for every `HEAD` that can't reach it until that
+branch is deleted. Delete the branch, then run `ohara prune` (or let
+the daemon's next index pass notice).
 
 ## Example
 
