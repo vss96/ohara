@@ -203,11 +203,19 @@ async fn visibility_filter_adds_under_5ms_p95() -> Result<()> {
 
     let mut on = Vec::with_capacity(CALLS_PER_ARM);
     let mut off = Vec::with_capacity(CALLS_PER_ARM);
-    for _ in 0..CALLS_PER_ARM {
-        engine.set_visibility_bypass(false);
-        on.push(timed_call(&engine, &main, &q).await?);
-        engine.set_visibility_bypass(true);
-        off.push(timed_call(&engine, &main, &q).await?);
+    // Alternate which arm runs first so neither always gets the warmer cache.
+    for i in 0..CALLS_PER_ARM {
+        for bypass in match i % 2 {
+            0 => [false, true],
+            _ => [true, false],
+        } {
+            engine.set_visibility_bypass(bypass);
+            let ms = timed_call(&engine, &main, &q).await?;
+            match bypass {
+                false => on.push(ms),
+                true => off.push(ms),
+            }
+        }
     }
     engine.set_visibility_bypass(false);
     on.sort_by(f64::total_cmp);

@@ -1007,16 +1007,13 @@ async fn index_tip_returns_before_indexing_and_the_queue_catches_up() {
     ));
     let engine = Arc::new(RetrievalEngine::new(emb.clone(), Arc::new(DummyReranker)));
 
-    let t0 = std::time::Instant::now();
+    // No worker runs yet, so zero embed batches proves enqueue did not
+    // index inline (no wall-clock bound: it flakes under load).
     assert!(engine.enqueue_index_tip(slot1.clone()));
-    assert!(
-        t0.elapsed() < std::time::Duration::from_millis(20),
-        "enqueue must not block on indexing: {:?}",
-        t0.elapsed()
-    );
     assert_eq!(
         emb.index_batches.load(std::sync::atomic::Ordering::SeqCst),
-        0
+        0,
+        "enqueue must not block on indexing"
     );
 
     let stop = tokio_util::sync::CancellationToken::new();

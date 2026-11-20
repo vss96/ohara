@@ -338,6 +338,36 @@ mod tests {
     }
 
     #[test]
+    fn each_of_two_divergent_hide_tips_excludes_its_own_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_c1, _c2, c3, f1) = branched_fixture(dir.path());
+        // Merge c3 into feat: HEAD = m with parents f1 and c3, which
+        // diverge after c2.
+        let repo = git2::Repository::open(dir.path()).unwrap();
+        let sig = git2::Signature::now("a", "a@a").unwrap();
+        let f1_commit = repo.find_commit(git2::Oid::from_str(&f1).unwrap()).unwrap();
+        let c3_commit = repo.find_commit(git2::Oid::from_str(&c3).unwrap()).unwrap();
+        let tree = f1_commit.tree().unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &sig,
+            &sig,
+            "m",
+            &tree,
+            &[&f1_commit, &c3_commit],
+        )
+        .unwrap();
+        let w = GitWalker::open(dir.path()).unwrap();
+        assert_eq!(msgs(&w.list_commits_hiding(&[&f1]).unwrap()), ["c3", "m"]);
+        assert_eq!(msgs(&w.list_commits_hiding(&[&c3]).unwrap()), ["f1", "m"]);
+        assert_eq!(
+            msgs(&w.list_commits_hiding(&[&f1, &c3]).unwrap()),
+            ["m"],
+            "the second tip must hide its own branch too"
+        );
+    }
+
+    #[test]
     fn walk_from_a_given_commit_ignores_where_head_has_moved() {
         let dir = tempfile::tempdir().unwrap();
         let (c1, _c2, c3, _f1) = branched_fixture(dir.path());

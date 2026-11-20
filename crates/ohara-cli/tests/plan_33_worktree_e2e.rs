@@ -148,9 +148,13 @@ fn worktree_shares_the_main_index_end_to_end() {
     assert!(stdout(&o).contains(&wt_sha), "explain:\n{}", stdout(&o));
 }
 
+/// Both runs use the current binary, so this checks that an incremental
+/// run reuses an existing index without re-embedding. The pre-V7 upgrade
+/// itself (legacy watermark -> main tip) is covered by the storage unit
+/// test `v7_backfills_indexed_tip_from_legacy_watermark`.
 #[test]
 #[ignore = "downloads the embedding model on first run; opt in with --include-ignored"]
-fn existing_index_survives_the_upgrade_without_reembedding() {
+fn reindexing_an_existing_index_reuses_it_without_reembedding() {
     let root = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let main = root.path().join("main");

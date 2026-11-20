@@ -148,13 +148,25 @@ mod try_call_tests {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("drop.sock");
         let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let (got_request, request_seen) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            // Accept the probe, then the request, and drop both unanswered.
-            while let Ok((conn, _)) = listener.accept().await {
+            // The probe closes before sending a frame; the request
+            // connection is read in full, then dropped unanswered.
+            let mut got_request = Some(got_request);
+            while let Ok((mut conn, _)) = listener.accept().await {
+                if let Ok(Some(_)) = crate::ipc::read_frame_or_eof(&mut conn).await {
+                    if let Some(tx) = got_request.take() {
+                        let _ = tx.send(());
+                    }
+                }
                 drop(conn);
             }
         });
         let resp = try_daemon_write(&sock, ping(), std::time::Duration::from_secs(5)).await;
+        assert!(
+            request_seen.await.is_ok(),
+            "the daemon side must have received the whole request"
+        );
         assert!(
             matches!(resp, DaemonCallResult::Interrupted(_)),
             "got {resp:?}"
