@@ -43,13 +43,21 @@ pub struct AttributionInputs<'a> {
 /// inside this crate (rather than calling `ohara-parse`) because
 /// `ohara-core` is the dependency root — leaf crates implement its
 /// traits, never the other way round.
+///
+/// Line numbers are clamped to the file's last line (as counted by
+/// [`crate::diff_text::count_lines`], minimum 1): the EOF offset of a
+/// newline-terminated file sits *after* the final `\n` but still
+/// belongs to the last line, not a phantom line past it.
 fn byte_span_to_line_span(span_start: u32, span_end: u32, source: &str) -> (u32, u32) {
     let bytes = source.as_bytes();
     let start = (span_start as usize).min(bytes.len());
     let end = (span_end as usize).min(bytes.len());
+    let last_line = crate::diff_text::count_lines(source).max(1);
     let line_at = |pos: usize| -> u32 {
         let counted = bytes[..pos].iter().filter(|&&b| b == b'\n').count();
-        u32::try_from(counted + 1).unwrap_or(u32::MAX)
+        u32::try_from(counted + 1)
+            .unwrap_or(u32::MAX)
+            .min(last_line)
     };
     let line_start = line_at(start);
     let line_end = if end == 0 {
