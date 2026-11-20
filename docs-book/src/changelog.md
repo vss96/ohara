@@ -25,7 +25,10 @@ A git clone and all of its linked worktrees now share one index.
   is indexed, indexing from a linked worktree never replaces the
   head-snapshot symbols; `--force` there says so and leaves them
   alone. Until then linked worktrees write them, and main's first
-  incremental pass always runs and takes them over.
+  incremental pass always runs and takes them over. The snapshot
+  records which worktree and commit it was taken at (migration V8), so
+  a worktree whose snapshot another worktree replaced re-runs instead of
+  skipping.
 - **Retired tips.** When a worktree moves off its indexed commits
   (branch switch, reset, a reused slot), its old tip is kept as a
   retired tip so those commits stay behind the visibility filter;

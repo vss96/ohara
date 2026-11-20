@@ -16,8 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are now written in one transaction, and the legacy watermark (like the
   per-worktree tips) only moves after a clean run. Earlier releases could
   advance the watermark past failed commits; such a gap cannot be
-  detected from the index, so if an old index misses history, run
-  `ohara index --rebuild --yes`.
+  detected from the index, so if an old index misses history, stop
+  `ohara serve` and any other `ohara` process using the index, then run
+  `ohara index --rebuild --yes`. The rebuild indexes only the current
+  worktree's HEAD; then run `ohara index` in each other linked worktree
+  to restore its commits.
 
 ## [0.14.3] - 2026-06-22
 

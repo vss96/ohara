@@ -68,6 +68,13 @@ Full rebuild after an embedder/dimension change (`status` says
 ohara index --rebuild --yes
 ```
 
+Before rebuilding, stop `ohara serve` and any other `ohara` process
+using the index: the rebuild deletes the database files before writing
+the new index, and a process that still has them open keeps working
+against the deleted files. The rebuild indexes only the current
+worktree's HEAD; afterwards run `ohara index` in each other linked
+worktree of the clone to restore its commits.
+
 Cap embedder threads on a shared box, larger batches for speed:
 
 ```sh
@@ -122,7 +129,8 @@ each worktree only see commits its own `HEAD` reaches.
 - `--rebuild` inside a linked worktree deletes the index shared by the
   main clone and every linked worktree. It prints
   `warning: --rebuild from linked worktree '<name>' drops the index shared by all worktrees of this clone`
-  on stderr before deleting.
+  on stderr before deleting. Only that worktree's HEAD is re-indexed;
+  run `ohara index` in every other worktree afterwards.
 - `--incremental` runs in a running same-version `ohara serve` daemon
   when there is one, so the daemon stays the single writer and its
   warm embedder is reused. `ohara index` never starts a daemon for
