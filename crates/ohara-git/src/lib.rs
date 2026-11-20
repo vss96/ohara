@@ -15,6 +15,7 @@ pub mod identity;
 pub mod walker;
 
 pub use blame::Blamer;
+pub use identity::RepoIdentity;
 pub use walker::GitWalker;
 
 use anyhow::Result;

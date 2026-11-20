@@ -1,13 +1,112 @@
-//! Commondir-aware repository identity (red stage).
+//! Commondir-aware repository identity.
+//!
+//! A git clone and all of its linked worktrees must resolve to the same
+//! [`RepoId`] so they share one index. Plain clones keep the legacy
+//! formula (hash of the canonicalized argument path) byte-for-byte.
+
+use crate::walker::GitWalker;
+use anyhow::{Context, Result};
+use git2::Repository;
+use ohara_core::types::RepoId;
+use ohara_core::WorktreeKey;
+use std::path::{Path, PathBuf};
+
+/// Resolved identity of the repository (and worktree) at a path.
+#[derive(Debug, Clone)]
+pub struct RepoIdentity {
+    /// Id shared by a clone and all of its linked worktrees.
+    pub repo_id: RepoId,
+    /// Canonical path of the worktree the caller is in (what git2 should open).
+    pub worktree_path: PathBuf,
+    /// The string that was hashed into `repo_id`.
+    pub id_path: String,
+    /// First-parent root commit of the (main) repository's HEAD.
+    pub first_commit_sha: String,
+    /// Which worktree of the clone this is.
+    pub worktree: WorktreeKey,
+}
+
+impl RepoIdentity {
+    /// Resolve the identity of the repository containing `path`.
+    ///
+    /// Non-worktree paths hash the canonicalized argument exactly as the
+    /// legacy code did. Linked worktrees hash the main repository's
+    /// workdir (or the bare repo path) so they share the main clone's id.
+    pub fn resolve(path: &Path) -> Result<Self> {
+        let canonical = std::fs::canonicalize(path)
+            .with_context(|| format!("canonicalize {}", path.display()))?;
+        let repo = Repository::discover(&canonical).context("discover git repo")?;
+        if !repo.is_worktree() {
+            let first = GitWalker::open(&canonical)?.first_commit_sha()?;
+            return Ok(Self::build(
+                first,
+                canonical.to_string_lossy().into_owned(),
+                canonical,
+                WorktreeKey::main(),
+            ));
+        }
+        Self::resolve_linked(&repo)
+    }
+
+    fn resolve_linked(repo: &Repository) -> Result<Self> {
+        let commondir = commondir_of(repo)?;
+        let main = Repository::open(&commondir).context("open main repository")?;
+        let id_base = match main.workdir() {
+            Some(dir) => dir.to_path_buf(),
+            None => commondir.clone(),
+        };
+        let id_path = std::fs::canonicalize(&id_base)
+            .with_context(|| format!("canonicalize {}", id_base.display()))?
+            .to_string_lossy()
+            .into_owned();
+        let first = match GitWalker::from_repository(main).first_commit_sha() {
+            Ok(sha) => sha,
+            Err(_) => {
+                GitWalker::from_repository(Repository::open(repo.path())?).first_commit_sha()?
+            }
+        };
+        let name = repo
+            .path()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .context("worktree admin dir has no name")?;
+        let worktree = WorktreeKey::linked(name).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let workdir = repo.workdir().context("linked worktree has no workdir")?;
+        let worktree_path = std::fs::canonicalize(workdir)
+            .with_context(|| format!("canonicalize {}", workdir.display()))?;
+        Ok(Self::build(first, id_path, worktree_path, worktree))
+    }
+
+    fn build(
+        first_commit_sha: String,
+        id_path: String,
+        worktree_path: PathBuf,
+        worktree: WorktreeKey,
+    ) -> Self {
+        Self {
+            repo_id: RepoId::from_parts(&first_commit_sha, &id_path),
+            worktree_path,
+            id_path,
+            first_commit_sha,
+            worktree,
+        }
+    }
+}
+
+/// Common git dir of a linked worktree. git2 0.18 has no `commondir()`,
+/// so read the `commondir` file in the worktree's admin dir (a path,
+/// usually relative, to the main `.git`).
+fn commondir_of(repo: &Repository) -> Result<PathBuf> {
+    let admin = repo.path();
+    let raw = std::fs::read_to_string(admin.join("commondir"))
+        .with_context(|| format!("read commondir in {}", admin.display()))?;
+    std::fs::canonicalize(admin.join(raw.trim())).context("canonicalize commondir")
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::walker::GitWalker;
-    use git2::Repository;
     use git2::Signature;
-    use ohara_core::types::RepoId;
-    use std::path::Path;
 
     fn commit_empty(repo: &Repository, update_ref: Option<&str>, msg: &str) -> git2::Oid {
         let sig = Signature::now("a", "a@a").unwrap();

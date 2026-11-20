@@ -13,6 +13,11 @@ impl GitWalker {
         Ok(Self { repo })
     }
 
+    /// Wrap an already-opened repository (e.g. a linked worktree's main repo).
+    pub fn from_repository(repo: Repository) -> Self {
+        Self { repo }
+    }
+
     /// Walk first-parent chain from HEAD to the topological root commit.
     ///
     /// Used for `RepoId::from_parts` — chosen over author-time-oldest because
