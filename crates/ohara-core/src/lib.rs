@@ -19,6 +19,7 @@ pub mod query;
 pub mod query_understanding;
 pub mod retriever;
 pub mod storage;
+pub mod task;
 pub mod types;
 pub mod visibility;
 pub mod worktree;
