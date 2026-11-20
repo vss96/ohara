@@ -1704,3 +1704,77 @@ async fn index_tip_for_a_worktree_subdirectory_coalesces_with_its_root() {
         "a subdirectory names the same worktree"
     );
 }
+
+// ---- PR #138 review: handle and cache scoping ----
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn a_path_reused_by_another_clone_gets_a_fresh_handle() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("checkout");
+    std::fs::create_dir(&path).unwrap();
+    build_test_repo(&path);
+    let engine = make_test_engine();
+    let old = engine.open_repo(&path).await.expect("first open");
+
+    // Replace the checkout with an unrelated clone at the same path.
+    std::fs::remove_dir_all(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let repo = git2::Repository::init(&path).unwrap();
+    std::fs::write(path.join("z.rs"), "fn other() {}\n").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("z.rs")).unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("b", "b@b").unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, "other root", &tree, &[])
+        .unwrap();
+
+    let new = engine.open_repo(&path).await.expect("second open");
+    let expected = ohara_git::RepoIdentity::resolve(&path).unwrap().repo_id;
+    assert_ne!(old.repo_id, expected, "the clones must differ");
+    assert_eq!(new.repo_id, expected, "a stale handle was reused");
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn blame_cache_is_not_reused_after_head_moves_to_the_same_blob() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let main = tempfile::tempdir().unwrap();
+    build_test_repo(main.path());
+    let repo = git2::Repository::open(main.path()).unwrap();
+    let first = repo.head().unwrap().peel_to_commit().unwrap().id();
+    commit_file(&repo, "a.rs", "fn changed() {}\n", "rewrite");
+    let restore = commit_file(&repo, "a.rs", "fn one() {}\n", "restore");
+    index_checkout(main.path()).await;
+    let engine = make_test_engine();
+    let q = ohara_core::explain::ExplainQuery {
+        file: "a.rs".into(),
+        line_start: 1,
+        line_end: 1,
+        k: 5,
+        include_diff: false,
+        include_related: false,
+    };
+    let at_restore = engine
+        .explain_change(main.path(), q.clone())
+        .await
+        .expect("explain at restore");
+    assert_eq!(at_restore.hits[0].commit_sha, restore.to_string());
+
+    // Same blob for a.rs, different history.
+    hard_reset(&repo, first);
+    let at_first = engine
+        .explain_change(main.path(), q)
+        .await
+        .expect("explain at first");
+    assert_eq!(
+        at_first.hits[0].commit_sha,
+        first.to_string(),
+        "blame for the old HEAD must not be served from the cache"
+    );
+}
