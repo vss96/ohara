@@ -73,6 +73,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connect_and_close_without_a_frame_is_not_an_error() {
+        let (writer, mut reader) = tokio::io::duplex(64);
+        drop(writer);
+        assert!(read_frame_or_eof(&mut reader).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn read_frame_or_eof_reads_a_frame_and_rejects_a_truncated_header() {
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        write_frame(&mut writer, b"ping").await.unwrap();
+        let got = read_frame_or_eof(&mut reader).await.unwrap();
+        assert_eq!(got.as_deref(), Some(&b"ping"[..]));
+
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        writer.write_all(&[0, 0]).await.unwrap();
+        drop(writer);
+        assert!(read_frame_or_eof(&mut reader).await.is_err());
+    }
+
+    #[tokio::test]
     async fn read_rejects_oversized_frame() {
         let (mut writer, mut reader) = tokio::io::duplex(8);
         // Write a u32::MAX length header (way over 16 MiB limit)
