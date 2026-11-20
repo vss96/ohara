@@ -9,6 +9,8 @@ use crate::error::Result;
 
 /// Claude Code (`claude -p`) runtime adapter.
 pub mod claude;
+/// Codex (`codex exec --json`) runtime adapter.
+pub mod codex;
 /// Scripted runtime for tests.
 #[cfg(any(test, feature = "test-util"))]
 pub mod fake;
