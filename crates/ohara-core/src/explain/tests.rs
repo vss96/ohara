@@ -172,12 +172,6 @@ impl Storage for FakeStorageOrch {
     {
         Ok(std::collections::HashMap::new())
     }
-    async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> {
-        Ok(false)
-    }
-    async fn record_blob_seen(&self, _: &str, _: &str) -> Result<()> {
-        Ok(())
-    }
     async fn get_commit(&self, _: &RepoId, sha: &str) -> Result<Option<CommitMeta>> {
         self.get_commit_calls.lock().unwrap().push(sha.to_string());
         Ok(self.commits.get(sha).cloned())
@@ -215,6 +209,17 @@ impl Storage for FakeStorageOrch {
         Ok(crate::index_metadata::StoredIndexMetadata::default())
     }
     async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl crate::storage::StorageCache for FakeStorageOrch {
+    async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn record_blob_seen(&self, _: &str, _: &str) -> Result<()> {
         Ok(())
     }
 }

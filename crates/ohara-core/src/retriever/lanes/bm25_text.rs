@@ -182,12 +182,6 @@ mod tests {
         {
             Ok(std::collections::HashMap::new())
         }
-        async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
-            Ok(false)
-        }
-        async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
-            Ok(())
-        }
         async fn get_commit(
             &self,
             _: &RepoId,
@@ -224,6 +218,17 @@ mod tests {
             _: &RepoId,
             _: &[(String, String)],
         ) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl crate::storage::StorageCache for Bm25TextStorage {
+        async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
+            Ok(false)
+        }
+
+        async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
             Ok(())
         }
     }

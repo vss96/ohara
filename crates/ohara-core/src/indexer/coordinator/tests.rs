@@ -173,12 +173,6 @@ impl Storage for SpyStorage {
     ) -> Result<std::collections::HashMap<HunkId, Vec<HunkSymbol>>> {
         Ok(std::collections::HashMap::new())
     }
-    async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> {
-        Ok(false)
-    }
-    async fn record_blob_seen(&self, _: &str, _: &str) -> Result<()> {
-        Ok(())
-    }
     async fn get_commit(&self, _: &RepoId, _: &str) -> Result<Option<CommitMeta>> {
         Ok(None)
     }
@@ -204,6 +198,17 @@ impl Storage for SpyStorage {
         Ok(StoredIndexMetadata::default())
     }
     async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl crate::storage::StorageCache for SpyStorage {
+    async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn record_blob_seen(&self, _: &str, _: &str) -> Result<()> {
         Ok(())
     }
 }
