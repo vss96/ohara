@@ -1,5 +1,8 @@
 pub mod coordinator;
 pub mod stages;
+mod tip_context;
+
+pub use tip_context::TipContext;
 
 use crate::index_metadata::RuntimeIndexMetadata;
 use crate::types::{CommitMeta, Hunk, RepoId, Symbol};
@@ -150,6 +153,9 @@ pub struct Indexer {
     /// Plan 28: number of worker tasks for the actor-style commit
     /// pipeline. Defaults to num_cpus::get() at builder time.
     workers: usize,
+    /// Plan 33: per-worktree tip bookkeeping. `None` keeps the legacy
+    /// single-watermark behaviour.
+    tip_context: Option<TipContext>,
 }
 
 impl Indexer {
@@ -165,6 +171,7 @@ impl Indexer {
             repo_root: None,
             embed_mode: crate::EmbedMode::default(),
             workers: num_cpus::get().max(1),
+            tip_context: None,
         }
     }
 
@@ -236,6 +243,14 @@ impl Indexer {
         self
     }
 
+    /// Plan 33: index this run as one worktree of a shared store. The walk
+    /// hides every recorded tip and the worktree's HEAD is recorded as its
+    /// tip afterwards (instead of the legacy watermark).
+    pub fn with_tip_context(mut self, context: TipContext) -> Self {
+        self.tip_context = Some(context);
+        self
+    }
+
     /// Run a (full or incremental) indexing pass for `repo_id`.
     /// `commit_source` and `symbol_source` are wired by the caller.
     ///
@@ -261,6 +276,9 @@ impl Indexer {
             .with_progress(self.progress.clone())
             .with_embed_mode(self.embed_mode)
             .with_workers(self.workers);
+        if let Some(ctx) = self.tip_context.as_ref() {
+            coordinator = coordinator.with_hidden_tips(ctx.hidden(repo_id).await?);
+        }
         // Plan 26: when repo_root is set, build a LayeredIgnore filter
         // and thread it to the Coordinator. Best-effort load — a missing
         // `.oharaignore` is fine (LayeredIgnore::load treats ENOENT as
@@ -293,17 +311,30 @@ impl Indexer {
         );
         self.progress.phase_symbols();
 
-        // HEAD symbol extraction (outside coordinator scope — remains
-        // in Indexer so the ProgressSink and runtime-metadata paths
-        // keep a single responsibility boundary).
+        // HEAD symbol extraction (outside coordinator scope). A linked
+        // worktree never owns the shared HEAD-symbol snapshot.
         let symbols_start = Instant::now();
-        let symbols = symbol_source.extract_head_symbols().await?;
-        self.storage.put_head_symbols(repo_id, &symbols).await?;
+        let owns_symbols = self
+            .tip_context
+            .as_ref()
+            .is_none_or(TipContext::owns_head_symbols);
+        let symbols = match owns_symbols {
+            true => symbol_source.extract_head_symbols().await?,
+            false => Vec::new(),
+        };
+        if owns_symbols {
+            self.storage.put_head_symbols(repo_id, &symbols).await?;
+        }
         timings.head_symbols_ms = symbols_start.elapsed().as_millis() as u64;
 
-        // Advance the watermark to the last processed commit.
-        if let Some(sha) = result.latest_sha.as_deref() {
-            self.storage.set_last_indexed_commit(repo_id, sha).await?;
+        // Advance the watermark (legacy) or record this worktree's tip.
+        match self.tip_context.as_ref() {
+            Some(ctx) => ctx.record(repo_id, result.commits_failed).await?,
+            None => {
+                if let Some(sha) = result.latest_sha.as_deref() {
+                    self.storage.set_last_indexed_commit(repo_id, sha).await?;
+                }
+            }
         }
 
         // Plan 13: write runtime metadata only on full success.

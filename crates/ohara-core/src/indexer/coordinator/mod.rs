@@ -71,6 +71,9 @@ pub struct Coordinator {
     /// chunk-embed cache. Set when embed_mode != Off.
     cache_storage: Option<Arc<dyn crate::Storage>>,
     workers: usize,
+    /// Plan 33: when set, the walk hides these tips instead of reading
+    /// the legacy watermark from `get_index_status`.
+    hidden_tips: Option<Vec<crate::worktree::CommitSha>>,
 }
 
 impl Coordinator {
@@ -89,6 +92,7 @@ impl Coordinator {
             embed_mode: crate::EmbedMode::default(),
             cache_storage: None,
             workers: num_cpus::get().max(1),
+            hidden_tips: None,
         }
     }
 
@@ -113,6 +117,13 @@ impl Coordinator {
     /// either case). Plumbing-only in C.1; behaviour added in C.2.
     pub fn with_ignore_filter(mut self, f: Arc<dyn crate::IgnoreFilter>) -> Self {
         self.ignore_filter = Some(f);
+        self
+    }
+
+    /// Plan 33: walk from HEAD hiding every commit in `hide` (all indexed
+    /// worktree tips) rather than resuming from the stored watermark.
+    pub fn with_hidden_tips(mut self, hide: Vec<crate::worktree::CommitSha>) -> Self {
+        self.hidden_tips = Some(hide);
         self
     }
 
@@ -189,12 +200,18 @@ impl Coordinator {
     ) -> Result<CoordinatorResult> {
         let mut result = CoordinatorResult::default();
 
-        // Stage 0: determine resume watermark from index status.
-        let status = self.storage.get_index_status(repo).await?;
-        let watermark = status
-            .last_indexed_commit
-            .as_deref()
-            .map(CommitWatermark::new);
+        // Stage 0: determine resume watermark from index status (legacy
+        // path); with hidden tips the walk itself hides indexed history.
+        let watermark = match self.hidden_tips.as_ref() {
+            Some(_) => None,
+            None => self
+                .storage
+                .get_index_status(repo)
+                .await?
+                .last_indexed_commit
+                .as_deref()
+                .map(CommitWatermark::new),
+        };
 
         // Stage 1: commit walk (timed). The walk is silent and can take
         // seconds on multi-thousand-commit repos, so spin a pre-walk
@@ -203,7 +220,10 @@ impl Coordinator {
         self.progress.pre_walk("walking commit history");
         tracing::info!("walking commit history");
         let walk_start = Instant::now();
-        let commits = CommitWalkStage::run(commit_source.as_ref(), watermark.as_ref()).await?;
+        let commits = match self.hidden_tips.as_ref() {
+            Some(hide) => CommitWalkStage::run_hiding(commit_source.as_ref(), hide).await?,
+            None => CommitWalkStage::run(commit_source.as_ref(), watermark.as_ref()).await?,
+        };
         result.timings.commit_walk_ms = walk_start.elapsed().as_millis() as u64;
         tracing::info!(
             new_commits = commits.len(),

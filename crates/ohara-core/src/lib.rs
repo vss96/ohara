@@ -37,7 +37,7 @@ pub use indexer::stages::{
 };
 pub use indexer::{
     CommitSource, Indexer, IndexerReport, NullProgress, PhaseTimings, ProgressSink, SymbolSource,
-    MAX_ATTRIBUTABLE_SOURCE_BYTES,
+    TipContext, MAX_ATTRIBUTABLE_SOURCE_BYTES,
 };
 pub use query::*;
 pub use retriever::{RankingWeights, Retriever};
