@@ -158,6 +158,20 @@ fn parse_final(tail: &str) -> Option<(AgentStatus, String)> {
     last_json_line(tail, pick_final).map(to_status)
 }
 
+/// Combine the parsed final event with the exit code. A message alone is not
+/// success: codex must also have exited 0.
+fn decide(
+    found: Option<(AgentStatus, String)>,
+    code: Option<i32>,
+    tail: &str,
+) -> (AgentStatus, String) {
+    match found {
+        Some((AgentStatus::Completed, msg)) if code != Some(0) => (classify_failure(tail), msg),
+        Some(f) => f,
+        None => (classify_failure(tail), tail.to_string()),
+    }
+}
+
 #[async_trait]
 impl AgentRuntime for CodexRuntime {
     fn name(&self) -> &RuntimeName {
@@ -191,14 +205,7 @@ impl AgentRuntime for CodexRuntime {
                 exit_code: exit.code,
             });
         }
-        let Some((status, final_message)) = found else {
-            return Ok(AgentOutcome {
-                status: classify_failure(&exit.stdout_tail),
-                final_message: exit.stdout_tail,
-                cost: None,
-                exit_code: exit.code,
-            });
-        };
+        let (status, final_message) = decide(found, exit.code, &exit.stdout_tail);
         Ok(AgentOutcome {
             status,
             final_message,
@@ -325,5 +332,55 @@ mod tests {
         assert_eq!(o.status, AgentStatus::Completed, "{o:?}");
         assert!(o.final_message.to_lowercase().contains("ok"), "{o:?}");
         assert_eq!(o.cost, None);
+    }
+
+    #[test]
+    fn dotted_mcp_server_name_is_rejected() {
+        let j = r#"{"mcpServers":{"a.b":{"command":"x"}}}"#;
+        let e = mcp_overrides(j).unwrap_err().to_string();
+        assert!(e.contains("a.b"), "{e}");
+        let eq = r#"{"mcpServers":{"a=b":{"command":"x"}}}"#;
+        assert!(mcp_overrides(eq).is_err());
+    }
+
+    #[test]
+    fn spaced_mcp_server_name_is_quoted() {
+        let j = r#"{"mcpServers":{"my srv":{"command":"x"}}}"#;
+        assert_eq!(
+            mcp_overrides(j).unwrap(),
+            ["-c", r#"mcp_servers."my srv".command="x""#]
+        );
+    }
+
+    #[test]
+    fn non_string_env_value_is_rejected() {
+        let j = r#"{"mcpServers":{"a":{"command":"x","env":{"K":1}}}}"#;
+        assert!(mcp_overrides(j).is_err());
+    }
+
+    #[test]
+    fn del_char_is_escaped() {
+        assert_eq!(toml_str("a\u{7f}b"), "\"a\\u007fb\"");
+    }
+
+    #[test]
+    fn message_then_nonzero_exit_is_not_completed() {
+        let found = parse_final(FIXTURE);
+        let (st, msg) = decide(found.clone(), Some(1), "boom");
+        assert_eq!(st, AgentStatus::Crashed);
+        assert_eq!(msg, "ok");
+        assert_eq!(decide(found.clone(), None, "").0, AgentStatus::Crashed);
+        assert_eq!(decide(found, Some(0), "").0, AgentStatus::Completed);
+    }
+
+    #[test]
+    fn error_only_run_is_classified() {
+        let tail = r#"{"type":"error","message":"429 rate limit hit"}
+{"type":"item.completed","item":{"type":"error","message":"warn"}}"#;
+        assert_eq!(parse_final(tail), None);
+        assert_eq!(
+            decide(parse_final(tail), Some(1), tail).0,
+            AgentStatus::RateLimited
+        );
     }
 }
