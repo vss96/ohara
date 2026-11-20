@@ -18,6 +18,7 @@ pub mod generic;
 pub mod process;
 /// Role-level runtime selection and failover.
 pub mod roles;
+pub mod stream;
 
 /// One agent invocation.
 #[derive(Debug, Clone)]

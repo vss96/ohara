@@ -8,10 +8,13 @@
 //! are variadic, so the prompt is placed right after `-p` and each variadic
 //! flag is followed by another flag or ends the argv.
 
+use std::path::Path;
+
 use async_trait::async_trait;
 use ohara_core::task::{CostCents, RuntimeName};
 
 use super::process::run_streaming;
+use super::stream::{last_json_line, last_json_line_in_file};
 use super::{classify_failure, AgentOutcome, AgentRequest, AgentRuntime, AgentStatus};
 use crate::error::Result;
 
@@ -69,34 +72,40 @@ fn usd_to_cents(usd: f64) -> CostCents {
     if !usd.is_finite() || usd <= 0.0 {
         return CostCents(0);
     }
-    CostCents((usd * 100.0).ceil() as u64)
+    // Round to micro-dollars first so float noise (0.07 * 100 = 7.000000000000001) does not add a cent.
+    CostCents(((usd * 1_000_000.0).round() as u64).div_ceil(10_000))
+}
+
+fn pick_result(v: &serde_json::Value) -> Option<ResultEvent> {
+    if v.get("type")?.as_str()? != "result" {
+        return None;
+    }
+    Some(ResultEvent {
+        is_error: v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false),
+        result: v
+            .get("result")
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        cost: v
+            .get("total_cost_usd")
+            .and_then(|c| c.as_f64())
+            .map(usd_to_cents),
+    })
 }
 
 /// Scan `tail` from the last line backwards for the final result event.
 fn parse_result(tail: &str) -> Option<ResultEvent> {
-    tail.lines().rev().find_map(|line| {
-        let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-        if v.get("type")?.as_str()? != "result" {
-            return None;
-        }
-        Some(ResultEvent {
-            is_error: v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false),
-            result: v
-                .get("result")
-                .and_then(|s| s.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            cost: v
-                .get("total_cost_usd")
-                .and_then(|c| c.as_f64())
-                .map(usd_to_cents),
-        })
-    })
+    last_json_line(tail, pick_result)
 }
 
-/// Result event from the capped tail, else from the full transcript.
-async fn find_result(tail: &str, _transcript: &std::path::Path) -> Option<ResultEvent> {
-    parse_result(tail)
+/// Result event from the capped tail, else from the full transcript (the
+/// tail cuts a final line longer than the cap).
+async fn find_result(tail: &str, transcript: &Path) -> Option<ResultEvent> {
+    match parse_result(tail) {
+        Some(ev) => Some(ev),
+        None => last_json_line_in_file(transcript, pick_result).await,
+    }
 }
 
 #[async_trait]
@@ -239,7 +248,9 @@ mod tests {
         let ev = find_result(tail, &log).await.unwrap();
         assert_eq!(ev.result, big);
         assert_eq!(ev.cost, Some(CostCents(7)));
-        assert!(find_result(tail, &dir.path().join("missing.log")).await.is_none());
+        assert!(find_result(tail, &dir.path().join("missing.log"))
+            .await
+            .is_none());
     }
 
     #[test]
