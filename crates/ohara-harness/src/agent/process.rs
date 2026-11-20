@@ -188,6 +188,89 @@ mod tests {
         assert!(exit.stdout_tail.contains("out-line"));
     }
 
+    fn alive(pid: &str) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", pid])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn deadline_kills_grandchildren() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let script = format!("sleep 60 & echo $! > {}; wait", pidfile.display());
+        let soon = Deadline(Utc::now() + chrono::Duration::seconds(1));
+        let exit = run_streaming(
+            &sh(&script),
+            None,
+            dir.path(),
+            soon,
+            &dir.path().join("t.log"),
+        )
+        .await
+        .unwrap();
+        assert!(exit.killed_at_deadline);
+        let pid = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .to_string();
+        let mut gone = false;
+        for _ in 0..20 {
+            gone = !alive(&pid);
+            if gone {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(gone, "grandchild {pid} survived the deadline kill");
+    }
+
+    #[tokio::test]
+    async fn output_just_before_deadline_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("t.log");
+        let soon = Deadline(Utc::now() + chrono::Duration::seconds(1));
+        let exit = run_streaming(
+            &sh("echo last-words; exec sleep 60"),
+            None,
+            dir.path(),
+            soon,
+            &log,
+        )
+        .await
+        .unwrap();
+        assert!(exit.killed_at_deadline);
+        assert!(exit.stdout_tail.contains("last-words"));
+        assert!(std::fs::read_to_string(&log)
+            .unwrap()
+            .contains("last-words"));
+    }
+
+    #[tokio::test]
+    async fn normal_exit_with_background_grandchild_is_not_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let start = std::time::Instant::now();
+        let exit = run_streaming(
+            &sh("sleep 5 & echo finished"),
+            None,
+            dir.path(),
+            far(),
+            &dir.path().join("t.log"),
+        )
+        .await
+        .unwrap();
+        assert!(!exit.killed_at_deadline);
+        assert_eq!(exit.code, Some(0));
+        assert!(exit.stdout_tail.contains("finished"));
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
     #[test]
     fn tail_is_bounded() {
         let mut tail = Vec::new();
