@@ -1,6 +1,7 @@
 //! `RoleRunner`: run a role's configured runtimes in order with failover.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -26,6 +27,15 @@ fn step_state(status: AgentStatus) -> StepState {
     }
 }
 
+/// `<dir>/<stem>.<attempt>.<runtime>.log`, so attempts never share a file.
+fn attempt_transcript(base: &Path, attempt: u32, runtime: &RuntimeName) -> PathBuf {
+    let stem = base
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    base.with_file_name(format!("{stem}.{attempt}.{}.log", runtime.0))
+}
+
 /// A timeout means the clock ran out; a completion needs no retry.
 fn should_fail_over(status: AgentStatus) -> bool {
     !matches!(status, AgentStatus::Completed | AgentStatus::TimedOut)
@@ -38,10 +48,13 @@ impl RoleRunner {
     ) -> Result<Self> {
         let mut runtimes = BTreeMap::new();
         for (role, names) in &config.roles.0 {
-            let built = names
-                .iter()
-                .filter_map(|n| config.runtimes.get(n).map(|spec| factory(n, spec)))
-                .collect();
+            let mut built = Vec::with_capacity(names.len());
+            for n in names {
+                let spec = config.runtimes.get(n).ok_or_else(|| {
+                    Error::Config(format!("role {role:?} names unknown runtime {}", n.0))
+                })?;
+                built.push(factory(n, spec));
+            }
             runtimes.insert(*role, built);
         }
         Ok(Self { runtimes })
@@ -50,8 +63,10 @@ impl RoleRunner {
     /// Try each runtime for `role` in order. Each attempt is recorded as its
     /// own step with `seq = step.seq + attempt_index`; retries carry
     /// `failover_from` and are preceded by `reset`. An `Err` from a runtime
-    /// is recorded and treated as `Crashed`. Returns the final attempt's
-    /// outcome and step record.
+    /// is recorded and treated as `Crashed`. Each attempt gets its own transcript
+    /// path (`<stem>.<attempt>.<runtime>.log`) in both the request and the
+    /// step row. Returns the final attempt's outcome and step record; the next
+    /// free seq for a following run is `returned_step.seq + 1`.
     pub async fn run(
         &self,
         role: Role,
@@ -71,8 +86,13 @@ impl RoleRunner {
             if previous.is_some() {
                 reset()?;
             }
+            let transcript = attempt_transcript(&req.transcript, attempt, rt.name());
+            let attempt_req = AgentRequest {
+                transcript: transcript.clone(),
+                ..req.clone()
+            };
             let started_at = Utc::now();
-            let outcome = match rt.run(req.clone()).await {
+            let outcome = match rt.run(attempt_req).await {
                 Ok(o) => o,
                 Err(e) => {
                     tracing::warn!(runtime = %rt.name().0, error = %e, "runtime errored; treating as crashed");
@@ -92,6 +112,7 @@ impl RoleRunner {
                 finished_at: Some(Utc::now()),
                 cost: outcome.cost,
                 failover_from: previous.take(),
+                transcript,
                 ..step.clone()
             };
             store.record_step(&record).await?;
