@@ -44,7 +44,7 @@ mod try_call_tests {
     use crate::ipc::{Request, RequestMethod};
 
     #[tokio::test]
-    async fn discover_error_returns_none() {
+    async fn discover_error_is_connect_failed() {
         let resp = try_daemon_call(
             || Err(crate::error::EngineError::Internal("nope".into())),
             Request {
@@ -54,11 +54,14 @@ mod try_call_tests {
             },
         )
         .await;
-        assert!(resp.is_none(), "discover error must propagate as None");
+        assert!(
+            matches!(resp, DaemonCallResult::ConnectFailed(_)),
+            "discover error must be ConnectFailed"
+        );
     }
 
     #[tokio::test]
-    async fn dead_socket_returns_none() {
+    async fn dead_socket_is_connect_failed() {
         let dead = std::path::PathBuf::from("/tmp/ohara-dead-socket-from-test.sock");
         let _ = std::fs::remove_file(&dead); // belt-and-suspenders
         let h = DaemonHandle {
@@ -75,6 +78,9 @@ mod try_call_tests {
             },
         )
         .await;
-        assert!(resp.is_none(), "connect to dead socket must yield None");
+        assert!(
+            matches!(resp, DaemonCallResult::ConnectFailed(_)),
+            "connect to dead socket must be ConnectFailed"
+        );
     }
 }

@@ -1,4 +1,5 @@
 pub mod discover;
+pub mod outcome;
 pub mod spawn;
 pub mod transport;
 pub mod try_call;
