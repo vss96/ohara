@@ -52,5 +52,6 @@ pub use types::{
 };
 pub use visibility::{CommitVisibility, VisibilityScope};
 pub use worktree::{
-    main_needs_first_run, owns_head_symbols, CommitSha, IndexedTip, TipStore, WorktreeKey,
+    head_symbols_stale, main_needs_first_run, owns_head_symbols, CommitSha, IndexedTip, TipStore,
+    WorktreeKey,
 };

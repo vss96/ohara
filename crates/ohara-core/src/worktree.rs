@@ -122,6 +122,18 @@ pub fn owns_head_symbols(worktree: &WorktreeKey, tips: &[IndexedTip]) -> bool {
     worktree.is_main() || !tips.iter().any(|t| t.worktree.is_main())
 }
 
+/// True when an index run of `worktree` at `head` must not be skipped even
+/// if every commit is already covered: the worktree owns the HEAD-symbol
+/// snapshot ([`owns_head_symbols`]) and its own tip is not `head`, so the
+/// snapshot describes another commit (e.g. after a reset to an ancestor).
+pub fn head_symbols_stale(worktree: &WorktreeKey, tips: &[IndexedTip], head: &CommitSha) -> bool {
+    if !owns_head_symbols(worktree, tips) {
+        return false;
+    }
+    let own = tips.iter().find(|t| &t.worktree == worktree);
+    own.map(|t| &t.sha) != Some(head)
+}
+
 /// Persistence of per-worktree indexed tips and commit pruning.
 #[async_trait]
 pub trait TipStore: Send + Sync {
@@ -210,6 +222,24 @@ mod tests {
             WorktreeKey::linked("slot-1").unwrap()
         );
         assert!(WorktreeKey::from_stored("slot-1/not-a-sha").is_err());
+    }
+
+    #[test]
+    fn the_snapshot_owner_is_stale_until_its_own_tip_is_head() {
+        let a = CommitSha::parse(P).unwrap();
+        let b = CommitSha::parse("1123456789abcdef0123456789abcdef01234567").unwrap();
+        let slot = WorktreeKey::linked("slot-1").unwrap();
+        let tip = |w: &WorktreeKey, s: &CommitSha| IndexedTip {
+            worktree: w.clone(),
+            sha: s.clone(),
+        };
+        let main = WorktreeKey::main();
+        assert!(!head_symbols_stale(&main, &[tip(&main, &a)], &a));
+        assert!(head_symbols_stale(&main, &[tip(&main, &b)], &a));
+        // A linked worktree owns the snapshot only while main has no tip.
+        assert!(!head_symbols_stale(&slot, &[tip(&main, &b)], &a));
+        assert!(head_symbols_stale(&slot, &[tip(&slot, &b)], &a));
+        assert!(!head_symbols_stale(&slot, &[tip(&slot, &a)], &a));
     }
 
     #[test]

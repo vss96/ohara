@@ -12,7 +12,8 @@ use ohara_core::index_metadata::{
 };
 use ohara_core::types::RepoId;
 use ohara_core::{
-    main_needs_first_run, CommitSha, CommitVisibility, EmbedMode, Indexer, TipContext,
+    head_symbols_stale, main_needs_first_run, CommitSha, CommitVisibility, EmbedMode, Indexer,
+    TipContext,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -325,7 +326,8 @@ fn outcome(indexed: bool, new_commits: u64, start: Instant) -> EnsureIndexedOutc
 /// that was never indexed is [`EngineError::NoIndex`]: the daemon never
 /// indexes from scratch. The
 /// main checkout is never covered before it has its own tip, so its first
-/// pass runs and takes over the HEAD-symbol snapshot.
+/// pass runs and takes over the HEAD-symbol snapshot; nor is the snapshot's
+/// owner while its own tip is not its HEAD, so the snapshot follows HEAD.
 async fn covered(
     engine: &RetrievalEngine,
     handle: &RepoHandle,
@@ -345,6 +347,11 @@ async fn covered(
     }
     if main_needs_first_run(&handle.worktree, &tips) {
         return Ok(false);
+    }
+    if let Some(head) = read_head(&handle.repo_path).await? {
+        if head_symbols_stale(&handle.worktree, &tips, &head) {
+            return Ok(false);
+        }
     }
     let git = ohara_git::GitVisibility::open(&handle.repo_path)
         .map_err(|e| EngineError::Git(format!("open visibility oracle: {e:#}")))?;
@@ -437,7 +444,7 @@ async fn index_locked(engine: &RetrievalEngine, handle: &RepoHandle) -> crate::R
             .map_err(|e| EngineError::Git(format!("open commit source: {e:#}")))?,
     );
     let symbol_source = Arc::new(
-        ohara_parse::GitSymbolSource::open(&handle.repo_path)
+        ohara_parse::GitSymbolSource::open_at(&handle.repo_path, &head)
             .map_err(|e| EngineError::Git(format!("open symbol source: {e:#}")))?,
     );
     let indexer = Indexer::new(store.storage.clone(), engine.embedder())

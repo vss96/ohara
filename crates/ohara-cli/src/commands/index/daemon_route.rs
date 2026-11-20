@@ -47,8 +47,8 @@ pub(super) fn choose_route(
     }
 }
 
-/// True when the caller tuned the in-process indexer, which the daemon
-/// cannot honour. `--embed-provider cpu` does not count: the post-commit
+/// True when the caller tuned the in-process indexer (including a
+/// `--resources` plan other than `auto`), which the daemon cannot honour. `--embed-provider cpu` does not count: the post-commit
 /// hook passes it and the daemon embedder is CPU anyway.
 fn explicit_tuning(args: &Args) -> bool {
     let provider_tuned = matches!(args.embed_provider, Some(p) if p != ProviderArg::Cpu);
@@ -58,6 +58,7 @@ fn explicit_tuning(args: &Args) -> bool {
         || args.commit_batch.is_some()
         || args.embed_batch.is_some()
         || args.embed_cache != super::EmbedCacheArg::Off
+        || args.resources != crate::resources::ResourcesArg::Auto
 }
 
 /// Socket of a live daemon built from this binary's version, if any.

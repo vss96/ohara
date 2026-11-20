@@ -168,18 +168,27 @@ pub fn symbol_line_span(symbol: &Symbol, source: &str) -> (u32, u32) {
 /// from files in supported languages.
 pub struct GitSymbolSource {
     repo_path: PathBuf,
+    /// Commit to extract; `None` reads the live HEAD.
+    at: Option<String>,
 }
 
 impl GitSymbolSource {
+    /// Extract from whatever HEAD points at when extraction runs.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         Ok(Self {
             repo_path: path.as_ref().to_path_buf(),
+            at: None,
         })
     }
 
-    /// Extract the snapshot of commit `sha` rather than the live HEAD.
-    pub fn open_at<P: AsRef<Path>>(path: P, _sha: &ohara_core::CommitSha) -> Result<Self> {
-        Self::open(path)
+    /// Extract the snapshot of commit `sha` rather than the live HEAD, so
+    /// an index pass's snapshot matches the commit it walked from and
+    /// records as its tip even when HEAD moves mid-pass.
+    pub fn open_at<P: AsRef<Path>>(path: P, sha: &ohara_core::CommitSha) -> Result<Self> {
+        Ok(Self {
+            repo_path: path.as_ref().to_path_buf(),
+            at: Some(sha.as_str().to_string()),
+        })
     }
 }
 
@@ -188,11 +197,17 @@ impl SymbolSource for GitSymbolSource {
     #[tracing::instrument(skip(self), fields(repo = %self.repo_path.display()))]
     async fn extract_head_symbols(&self) -> ohara_core::Result<Vec<Symbol>> {
         let path = self.repo_path.clone();
+        let at = self.at.clone();
         tokio::task::spawn_blocking(move || -> ohara_core::Result<Vec<Symbol>> {
-            let repo = git2::Repository::discover(&path)
-                .map_err(|e| ohara_core::OhraError::Git(e.to_string()))?;
-            let head = repo.head().map_err(|e| ohara_core::OhraError::Git(e.to_string()))?;
-            let tree = head.peel_to_tree().map_err(|e| ohara_core::OhraError::Git(e.to_string()))?;
+            let git = |e: git2::Error| ohara_core::OhraError::Git(e.to_string());
+            let repo = git2::Repository::discover(&path).map_err(git)?;
+            let tree = match at {
+                Some(sha) => {
+                    let oid = git2::Oid::from_str(&sha).map_err(git)?;
+                    repo.find_commit(oid).and_then(|c| c.tree()).map_err(git)?
+                }
+                None => repo.head().and_then(|h| h.peel_to_tree()).map_err(git)?,
+            };
             let mut out = Vec::new();
             tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
                 if entry.kind() == Some(git2::ObjectType::Blob) {

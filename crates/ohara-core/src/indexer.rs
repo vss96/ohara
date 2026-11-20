@@ -31,19 +31,30 @@ pub trait CommitSource: Send + Sync {
     /// Yield commits in parents-first order, optionally starting after `since`.
     async fn list_commits(&self, since: Option<&str>) -> Result<Vec<CommitMeta>>;
     /// Commits reachable from HEAD but from none of the `hide` tips, oldest
-    /// first. Default falls back to the first hide entry as a watermark so
-    /// single-tip fakes keep working.
+    /// first. The default can honour at most one hide tip (it uses it as a
+    /// [`Self::list_commits`] watermark) and refuses more rather than
+    /// silently dropping them; real sources override it.
     async fn list_commits_hiding(&self, hide: &[String]) -> Result<Vec<CommitMeta>> {
+        if hide.len() > 1 {
+            return Err(crate::OhraError::InvalidArgument(format!(
+                "this commit source cannot hide {} tips; it supports at most one",
+                hide.len()
+            )));
+        }
         self.list_commits(hide.first().map(String::as_str)).await
     }
     /// Like [`Self::list_commits_hiding`] but walks from commit `from`
-    /// instead of the live HEAD. Default ignores `from` so fakes keep working.
+    /// instead of the live HEAD. The default cannot honour `from` and
+    /// refuses; sources used with a tip context must override it.
     async fn list_commits_from_hiding(
         &self,
-        _from: &str,
+        from: &str,
         hide: &[String],
     ) -> Result<Vec<CommitMeta>> {
-        self.list_commits_hiding(hide).await
+        let _ = hide;
+        Err(crate::OhraError::InvalidArgument(format!(
+            "this commit source cannot walk from an explicit commit ({from})"
+        )))
     }
     /// Yield the per-file hunks of a single commit.
     async fn hunks_for_commit(&self, sha: &str) -> Result<Vec<Hunk>>;
@@ -344,6 +355,8 @@ impl Indexer {
         // Advance the watermark (legacy) or record this worktree's tip.
         match self.tip_context.as_ref() {
             Some(ctx) => ctx.record(repo_id, result.commits_failed).await?,
+            // Like a tip, the legacy watermark only moves after a clean run.
+            None if result.commits_failed > 0 => {}
             None => {
                 if let Some(sha) = result.latest_sha.as_deref() {
                     self.storage.set_last_indexed_commit(repo_id, sha).await?;

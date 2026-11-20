@@ -363,7 +363,11 @@ pub async fn run(args: Args, no_daemon: bool) -> Result<IndexerReport> {
     );
 
     let commit_source = std::sync::Arc::new(ohara_git::GitCommitSource::open(&canonical)?);
-    let symbol_source = std::sync::Arc::new(ohara_parse::GitSymbolSource::open(&canonical)?);
+    // Pin the walk start, the HEAD-symbol snapshot and the recorded tip to
+    // one commit, so a HEAD that moves mid-pass cannot split them.
+    let head = up_to_date::head_sha(&id)?;
+    let symbol_source =
+        std::sync::Arc::new(ohara_parse::GitSymbolSource::open_at(&canonical, &head)?);
 
     // Plan 13: build the runtime metadata snapshot up front so a
     // successful pass records "this index was built with X embedder /
@@ -398,7 +402,7 @@ pub async fn run(args: Args, no_daemon: bool) -> Result<IndexerReport> {
             tips: storage.clone(),
             visibility: Arc::new(ohara_git::GitVisibility::open(&canonical)?),
             worktree: id.worktree.clone(),
-            head: up_to_date::head_sha(&id)?,
+            head,
         })
         // Plan 27: wire the chosen embed-cache mode into the indexer so
         // the coordinator picks the right cache key strategy.
