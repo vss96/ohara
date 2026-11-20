@@ -66,6 +66,16 @@ pub fn delete_index_files(db_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod rebuild_safety_tests {
     use super::*;
+    use ohara_core::WorktreeKey;
+
+    #[test]
+    fn rebuild_from_a_linked_worktree_warns_about_the_shared_index() {
+        assert!(shared_rebuild_warning(&WorktreeKey::main()).is_none());
+        let w = shared_rebuild_warning(&WorktreeKey::linked("slot-1").unwrap())
+            .expect("linked worktree must warn");
+        assert!(w.contains("slot-1") && w.contains("all worktrees"), "{w}");
+        assert!(!w.contains('\n'), "one line: {w}");
+    }
 
     #[test]
     fn assert_rebuild_safe_passes_for_path_under_ohara_home() {
