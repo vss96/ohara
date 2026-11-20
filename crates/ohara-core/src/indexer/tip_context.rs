@@ -2,7 +2,7 @@
 
 use crate::types::RepoId;
 use crate::visibility::CommitVisibility;
-use crate::worktree::{owns_head_symbols, CommitSha, TipStore, WorktreeKey};
+use crate::worktree::{owns_head_symbols, CommitSha, HeadSymbolSnapshot, TipStore, WorktreeKey};
 use crate::Result;
 use std::sync::Arc;
 
@@ -79,6 +79,14 @@ impl TipContext {
         let tips = self.tips.indexed_tips(repo_id).await?;
         Ok(owns_head_symbols(&self.worktree, &tips))
     }
+
+    /// Provenance this run records with the HEAD-symbol snapshot it writes.
+    pub(crate) fn snapshot_provenance(&self) -> HeadSymbolSnapshot {
+        HeadSymbolSnapshot {
+            worktree: self.worktree.clone(),
+            sha: self.head.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -146,6 +154,12 @@ mod tests {
         }
         async fn delete_commits(&self, _: &RepoId, _: &[CommitSha]) -> Result<u64> {
             Ok(0)
+        }
+        async fn head_symbol_snapshot(
+            &self,
+            _: &RepoId,
+        ) -> Result<Option<crate::worktree::HeadSymbolSnapshot>> {
+            Ok(None)
         }
     }
 

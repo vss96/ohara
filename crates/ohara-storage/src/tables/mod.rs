@@ -4,6 +4,7 @@ pub mod blob_cache;
 pub mod commit;
 pub mod embed_cache;
 pub mod explain;
+pub mod head_symbol_snapshot;
 pub mod hunk;
 pub mod hunk_symbol;
 pub mod index_metadata;

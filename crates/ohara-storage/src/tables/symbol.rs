@@ -71,6 +71,14 @@ fn put_one(tx: &rusqlite::Transaction<'_>, fp_id: i64, s: &Symbol) -> Result<()>
 /// runs.
 pub fn replace_all(c: &mut Connection, symbols: &[Symbol]) -> Result<()> {
     let tx = c.transaction()?;
+    replace_all_tx(&tx, symbols)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// [`replace_all`] inside the caller's transaction, so the caller can
+/// write the snapshot's provenance atomically with it.
+pub fn replace_all_tx(tx: &rusqlite::Transaction<'_>, symbols: &[Symbol]) -> Result<()> {
     // Clear stale HEAD symbols + their mirrors first. Order matters:
     // FTS5 + vec virtual tables hold rowid references into `symbol`,
     // so they're cleared before the parent rows.
@@ -79,10 +87,9 @@ pub fn replace_all(c: &mut Connection, symbols: &[Symbol]) -> Result<()> {
     tx.execute("DELETE FROM vec_symbol", [])?;
     tx.execute("DELETE FROM symbol", [])?;
     for s in symbols {
-        let fp_id = upsert_file_path(&tx, &s.file_path, Some(&s.language))?;
-        put_one(&tx, fp_id, s)?;
+        let fp_id = upsert_file_path(tx, &s.file_path, Some(&s.language))?;
+        put_one(tx, fp_id, s)?;
     }
-    tx.commit()?;
     Ok(())
 }
 

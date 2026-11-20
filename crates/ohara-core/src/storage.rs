@@ -415,8 +415,26 @@ pub trait StorageWrite: Send + Sync {
     /// by the AST chunker). Deleting the previous snapshot (and its FTS
     /// mirrors) and inserting the new set happen in one transaction, so
     /// repeated calls never accumulate duplicates and readers never see
-    /// an empty snapshot in between.
+    /// an empty snapshot in between. Any recorded provenance is cleared
+    /// with it (see [`Self::put_head_symbols_at`]).
     async fn put_head_symbols(&self, repo_id: &RepoId, symbols: &[Symbol]) -> Result<()>;
+
+    /// [`Self::put_head_symbols`] that also records `provenance` (which
+    /// worktree's run wrote the snapshot, at which commit) so a later run
+    /// can tell whether the snapshot describes its HEAD
+    /// ([`crate::worktree::head_symbols_stale`]).
+    ///
+    /// The default drops the provenance and exists for in-memory test
+    /// fakes. Durable backends MUST override it and write the snapshot and
+    /// its provenance in one transaction.
+    async fn put_head_symbols_at(
+        &self,
+        repo_id: &RepoId,
+        symbols: &[Symbol],
+        _provenance: &crate::worktree::HeadSymbolSnapshot,
+    ) -> Result<()> {
+        self.put_head_symbols(repo_id, symbols).await
+    }
 }
 
 /// Facts about the index itself: freshness watermark, stamped component

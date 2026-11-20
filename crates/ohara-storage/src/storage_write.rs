@@ -2,12 +2,12 @@
 //! the main tip, and the per-commit commit + hunk writes.
 
 use crate::storage_impl::with_conn;
-use crate::tables::repo;
+use crate::tables::{head_symbol_snapshot, repo};
 use crate::SqliteStorage;
 use ohara_core::{
     storage::{CommitRecord, HunkRecord, StorageWrite},
     types::{RepoId, Symbol},
-    Result as CoreResult,
+    HeadSymbolSnapshot, Result as CoreResult,
 };
 
 #[async_trait::async_trait]
@@ -81,12 +81,39 @@ impl StorageWrite for SqliteStorage {
         .await
     }
 
-    async fn put_head_symbols(&self, _repo_id: &RepoId, symbols: &[Symbol]) -> CoreResult<()> {
+    async fn put_head_symbols(&self, repo_id: &RepoId, symbols: &[Symbol]) -> CoreResult<()> {
         // Replace the whole snapshot (symbols + FTS/vec mirrors) in one
-        // transaction; see `tables::symbol::replace_all`.
+        // transaction; see `tables::symbol::replace_all`. The snapshot no
+        // longer matches any recorded provenance, so that goes with it.
+        let id = repo_id.as_str().to_string();
         let syms = symbols.to_vec();
         with_conn(self.write_pool(), move |c| {
-            crate::tables::symbol::replace_all(c, &syms)
+            let tx = c.transaction()?;
+            crate::tables::symbol::replace_all_tx(&tx, &syms)?;
+            head_symbol_snapshot::clear(&tx, &id)?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// The snapshot and its provenance land in one transaction.
+    async fn put_head_symbols_at(
+        &self,
+        repo_id: &RepoId,
+        symbols: &[Symbol],
+        provenance: &HeadSymbolSnapshot,
+    ) -> CoreResult<()> {
+        let id = repo_id.as_str().to_string();
+        let key = provenance.worktree.as_str().to_string();
+        let sha = provenance.sha.as_str().to_string();
+        let syms = symbols.to_vec();
+        with_conn(self.write_pool(), move |c| {
+            let tx = c.transaction()?;
+            crate::tables::symbol::replace_all_tx(&tx, &syms)?;
+            head_symbol_snapshot::set(&tx, &id, &key, &sha)?;
+            tx.commit()?;
+            Ok(())
         })
         .await
     }

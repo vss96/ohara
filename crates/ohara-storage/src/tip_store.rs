@@ -1,10 +1,12 @@
 //! `TipStore` implementation for [`SqliteStorage`].
 
 use crate::storage_impl::with_conn;
-use crate::tables::{indexed_tip, prune, repo};
+use crate::tables::{head_symbol_snapshot, indexed_tip, prune, repo};
 use crate::SqliteStorage;
 use async_trait::async_trait;
-use ohara_core::{CommitSha, IndexedTip, RepoId, Result, TipStore, WorktreeKey};
+use ohara_core::{
+    CommitSha, HeadSymbolSnapshot, IndexedTip, RepoId, Result, TipStore, WorktreeKey,
+};
 
 #[async_trait]
 impl TipStore for SqliteStorage {
@@ -95,6 +97,22 @@ impl TipStore for SqliteStorage {
         }
         let shas: Vec<String> = shas.iter().map(|s| s.as_str().to_string()).collect();
         with_conn(self.write_pool(), move |c| prune::delete_commits(c, &shas)).await
+    }
+
+    /// A row that no longer parses counts as unrecorded: the next owner
+    /// run rewrites it.
+    async fn head_symbol_snapshot(&self, repo_id: &RepoId) -> Result<Option<HeadSymbolSnapshot>> {
+        let id = repo_id.as_str().to_string();
+        let row = with_conn(self.pool(), move |c| head_symbol_snapshot::get(c, &id)).await?;
+        let Some((key, sha)) = row else {
+            return Ok(None);
+        };
+        let (Ok(worktree), Ok(sha)) = (WorktreeKey::from_stored(&key), CommitSha::parse(&sha))
+        else {
+            tracing::warn!(worktree_key = %key, "ignoring unparsable head-symbol provenance");
+            return Ok(None);
+        };
+        Ok(Some(HeadSymbolSnapshot { worktree, sha }))
     }
 }
 
@@ -364,5 +382,20 @@ mod tests {
         assert_eq!(s.delete_commits(&id, &[sha(C)]).await.unwrap(), 0);
         assert_eq!(s.delete_commits(&id, &[]).await.unwrap(), 0);
         assert!(s.commit_exists(A).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn head_symbol_provenance_moves_with_the_snapshot() {
+        let (_d, s, id) = setup().await;
+        assert_eq!(s.head_symbol_snapshot(&id).await.unwrap(), None);
+        let at = ohara_core::HeadSymbolSnapshot {
+            worktree: slot1(),
+            sha: sha(B),
+        };
+        s.put_head_symbols_at(&id, &[], &at).await.unwrap();
+        assert_eq!(s.head_symbol_snapshot(&id).await.unwrap(), Some(at));
+        // A snapshot written without provenance must not keep the old one.
+        s.put_head_symbols(&id, &[]).await.unwrap();
+        assert_eq!(s.head_symbol_snapshot(&id).await.unwrap(), None);
     }
 }

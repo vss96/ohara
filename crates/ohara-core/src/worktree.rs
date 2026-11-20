@@ -122,16 +122,42 @@ pub fn owns_head_symbols(worktree: &WorktreeKey, tips: &[IndexedTip]) -> bool {
     worktree.is_main() || !tips.iter().any(|t| t.worktree.is_main())
 }
 
+/// Provenance of the shared HEAD-symbol snapshot: the worktree whose run
+/// last replaced it, and the commit it was extracted at. Recorded in the
+/// same transaction as the snapshot itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadSymbolSnapshot {
+    /// The worktree whose run wrote the snapshot.
+    pub worktree: WorktreeKey,
+    /// The HEAD commit the snapshot describes.
+    pub sha: CommitSha,
+}
+
 /// True when an index run of `worktree` at `head` must not be skipped even
 /// if every commit is already covered: the worktree owns the HEAD-symbol
-/// snapshot ([`owns_head_symbols`]) and its own tip is not `head`, so the
-/// snapshot describes another commit (e.g. after a reset to an ancestor).
-pub fn head_symbols_stale(worktree: &WorktreeKey, tips: &[IndexedTip], head: &CommitSha) -> bool {
+/// snapshot ([`owns_head_symbols`]) and `snapshot` (its recorded
+/// provenance) does not describe `head`.
+///
+/// The worktree's own tip is no proxy for the snapshot: until main has a
+/// tip, every linked worktree that indexes replaces it, so the snapshot
+/// may describe another worktree's commit. A matching sha from another
+/// linked worktree is accepted (same commit, same symbols); main also
+/// requires the snapshot to be its own, so it takes the snapshot over
+/// from a linked worktree. A missing provenance is stale.
+pub fn head_symbols_stale(
+    worktree: &WorktreeKey,
+    tips: &[IndexedTip],
+    snapshot: Option<&HeadSymbolSnapshot>,
+    head: &CommitSha,
+) -> bool {
     if !owns_head_symbols(worktree, tips) {
         return false;
     }
-    let own = tips.iter().find(|t| &t.worktree == worktree);
-    own.map(|t| &t.sha) != Some(head)
+    match snapshot {
+        None => true,
+        Some(s) if &s.sha != head => true,
+        Some(s) => worktree.is_main() && !s.worktree.is_main(),
+    }
 }
 
 /// Persistence of per-worktree indexed tips and commit pruning.
@@ -173,6 +199,11 @@ pub trait TipStore: Send + Sync {
 
     /// Deletes each commit with its hunks, vectors and FTS rows. Returns commits deleted.
     async fn delete_commits(&self, repo_id: &RepoId, shas: &[CommitSha]) -> Result<u64>;
+
+    /// Provenance of the shared HEAD-symbol snapshot, or `None` when it
+    /// was never recorded (an index from before provenance existed, or a
+    /// snapshot written without it).
+    async fn head_symbol_snapshot(&self, repo_id: &RepoId) -> Result<Option<HeadSymbolSnapshot>>;
 }
 
 #[cfg(test)]
@@ -225,21 +256,64 @@ mod tests {
     }
 
     #[test]
-    fn the_snapshot_owner_is_stale_until_its_own_tip_is_head() {
+    fn the_snapshot_owner_is_stale_until_the_snapshot_describes_head() {
         let a = CommitSha::parse(P).unwrap();
         let b = CommitSha::parse("1123456789abcdef0123456789abcdef01234567").unwrap();
+        let main = WorktreeKey::main();
         let slot = WorktreeKey::linked("slot-1").unwrap();
+        let other = WorktreeKey::linked("slot-2").unwrap();
         let tip = |w: &WorktreeKey, s: &CommitSha| IndexedTip {
             worktree: w.clone(),
             sha: s.clone(),
         };
-        let main = WorktreeKey::main();
-        assert!(!head_symbols_stale(&main, &[tip(&main, &a)], &a));
-        assert!(head_symbols_stale(&main, &[tip(&main, &b)], &a));
+        let snap = |w: &WorktreeKey, s: &CommitSha| HeadSymbolSnapshot {
+            worktree: w.clone(),
+            sha: s.clone(),
+        };
+        let main_tip = [tip(&main, &a)];
+        assert!(!head_symbols_stale(
+            &main,
+            &main_tip,
+            Some(&snap(&main, &a)),
+            &a
+        ));
+        assert!(head_symbols_stale(
+            &main,
+            &main_tip,
+            Some(&snap(&main, &b)),
+            &a
+        ));
+        assert!(head_symbols_stale(&main, &main_tip, None, &a));
+        // Main takes over a snapshot a linked worktree wrote, even at HEAD.
+        assert!(head_symbols_stale(
+            &main,
+            &main_tip,
+            Some(&snap(&slot, &a)),
+            &a
+        ));
         // A linked worktree owns the snapshot only while main has no tip.
-        assert!(!head_symbols_stale(&slot, &[tip(&main, &b)], &a));
-        assert!(head_symbols_stale(&slot, &[tip(&slot, &b)], &a));
-        assert!(!head_symbols_stale(&slot, &[tip(&slot, &a)], &a));
+        assert!(!head_symbols_stale(&slot, &main_tip, None, &a));
+        // slot-1's own tip is A, but slot-2 replaced the snapshot at B.
+        let linked = [tip(&slot, &a), tip(&other, &b)];
+        assert!(head_symbols_stale(
+            &slot,
+            &linked,
+            Some(&snap(&other, &b)),
+            &a
+        ));
+        assert!(!head_symbols_stale(
+            &slot,
+            &linked,
+            Some(&snap(&slot, &a)),
+            &a
+        ));
+        // Same commit from another linked worktree: same symbols, not stale.
+        assert!(!head_symbols_stale(
+            &slot,
+            &linked,
+            Some(&snap(&other, &a)),
+            &a
+        ));
     }
 
     #[test]

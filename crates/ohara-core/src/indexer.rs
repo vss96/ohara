@@ -347,8 +347,15 @@ impl Indexer {
             true => symbol_source.extract_head_symbols().await?,
             false => Vec::new(),
         };
-        if owns_head_symbols {
-            self.storage.put_head_symbols(repo_id, &symbols).await?;
+        match (owns_head_symbols, self.tip_context.as_ref()) {
+            (false, _) => {}
+            (true, Some(ctx)) => {
+                let provenance = ctx.snapshot_provenance();
+                self.storage
+                    .put_head_symbols_at(repo_id, &symbols, &provenance)
+                    .await?;
+            }
+            (true, None) => self.storage.put_head_symbols(repo_id, &symbols).await?,
         }
         timings.head_symbols_ms = symbols_start.elapsed().as_millis() as u64;
 
@@ -605,6 +612,8 @@ mod phase_timing_tests {
         head_puts: Mutex<usize>,
         /// The stored HEAD-symbol snapshot.
         head_snapshot: Mutex<Vec<Symbol>>,
+        /// Provenance passed with the last `put_head_symbols_at`.
+        head_provenance: Mutex<Option<crate::worktree::HeadSymbolSnapshot>>,
     }
 
     impl FakeStorage {
@@ -616,6 +625,7 @@ mod phase_timing_tests {
                 last_metadata: Mutex::new(None),
                 head_puts: Mutex::new(0),
                 head_snapshot: Mutex::new(Vec::new()),
+                head_provenance: Mutex::new(None),
             }
         }
 
@@ -684,7 +694,19 @@ mod phase_timing_tests {
         async fn put_head_symbols(&self, _: &RepoId, symbols: &[Symbol]) -> Result<()> {
             *self.head_puts.lock().unwrap() += 1;
             *self.head_snapshot.lock().unwrap() = symbols.to_vec();
+            *self.head_provenance.lock().unwrap() = None;
             std::thread::sleep(self.write_sleep);
+            Ok(())
+        }
+
+        async fn put_head_symbols_at(
+            &self,
+            repo_id: &RepoId,
+            symbols: &[Symbol],
+            provenance: &crate::worktree::HeadSymbolSnapshot,
+        ) -> Result<()> {
+            self.put_head_symbols(repo_id, symbols).await?;
+            *self.head_provenance.lock().unwrap() = Some(provenance.clone());
             Ok(())
         }
     }
@@ -1548,6 +1570,12 @@ mod phase_timing_tests {
         async fn delete_commits(&self, _: &RepoId, _: &[CommitSha]) -> Result<u64> {
             Ok(0)
         }
+        async fn head_symbol_snapshot(
+            &self,
+            _: &RepoId,
+        ) -> Result<Option<crate::worktree::HeadSymbolSnapshot>> {
+            Ok(None)
+        }
     }
 
     /// Records the `from` / `hide` arguments of the hiding walk; can poison one sha.
@@ -1782,6 +1810,14 @@ mod phase_timing_tests {
             .await
             .expect("run");
         assert_eq!(*storage.head_puts.lock().unwrap(), 1);
+        assert_eq!(
+            storage.head_provenance.lock().unwrap().clone(),
+            Some(crate::worktree::HeadSymbolSnapshot {
+                worktree: WorktreeKey::linked("slot-1").unwrap(),
+                sha: sha40('f'),
+            }),
+            "the snapshot must record which worktree and HEAD it describes"
+        );
     }
 
     /// Fails HEAD-symbol extraction.

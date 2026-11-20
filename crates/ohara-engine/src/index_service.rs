@@ -327,7 +327,8 @@ fn outcome(indexed: bool, new_commits: u64, start: Instant) -> EnsureIndexedOutc
 /// indexes from scratch. The
 /// main checkout is never covered before it has its own tip, so its first
 /// pass runs and takes over the HEAD-symbol snapshot; nor is the snapshot's
-/// owner while its own tip is not its HEAD, so the snapshot follows HEAD.
+/// owner while the snapshot's recorded provenance is not its HEAD, so the
+/// snapshot follows HEAD.
 async fn covered(
     engine: &RetrievalEngine,
     handle: &RepoHandle,
@@ -349,7 +350,13 @@ async fn covered(
         return Ok(false);
     }
     if let Some(head) = read_head(&handle.repo_path).await? {
-        if head_symbols_stale(&handle.worktree, &tips, &head) {
+        let snapshot = handle
+            .store
+            .tips
+            .head_symbol_snapshot(&handle.repo_id)
+            .await
+            .map_err(EngineError::from)?;
+        if head_symbols_stale(&handle.worktree, &tips, snapshot.as_ref(), &head) {
             return Ok(false);
         }
     }
