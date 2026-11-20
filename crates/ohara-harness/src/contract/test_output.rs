@@ -99,4 +99,12 @@ mod tests {
 
         assert_eq!(parse("hello world\n").ran, None);
     }
+
+    #[test]
+    fn multiple_pytest_summaries_are_summed() {
+        let first_empty = "===== no tests ran, 0 passed in 0.01s =====\n===== 3 passed in 0.1s =====\n";
+        assert_eq!(parse(first_empty).ran, Some(3));
+        let two = "===== 2 passed in 0.1s =====\n===== 3 passed in 0.2s =====\n";
+        assert_eq!(parse(two).ran, Some(5));
+    }
 }
