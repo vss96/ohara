@@ -1,9 +1,8 @@
 //! `RetrievalEngine` — long-lived holder of the embedder, reranker,
 //! and per-repo handles.
 
-use crate::cache::BlameCache;
 use crate::cache::EmbeddingCache;
-use crate::cache::MetaCache;
+use crate::cache::RepoCaches;
 use crate::error::EngineError;
 use crate::handle::RepoHandle;
 use ohara_core::embed::RerankProvider;
@@ -47,12 +46,10 @@ pub struct RetrievalEngine {
     embedder: Arc<dyn EmbeddingProvider>,
     reranker: Arc<dyn RerankProvider>,
     repos: RwLock<HashMap<RepoId, Arc<RepoHandle>>>,
+    /// Repo-independent: keyed by `(model_id, query text)`.
     embed_cache: EmbeddingCache,
-    meta_cache: MetaCache,
-    blame_cache: BlameCache,
-    meta_hit_count: AtomicU64,
-    /// Plan 21 E.1: counts BlameCache hits in `explain_change`.
-    blame_cache_hit_count: AtomicU64,
+    /// Per-repo caches (meta + blame), invalidated as one group.
+    repo_caches: RepoCaches,
     /// Unix-second timestamp of the last dispatched request.
     /// Written by [`Self::touch`]; read by [`Self::idle_for`].
     last_request_at: AtomicU64,
@@ -70,10 +67,7 @@ impl RetrievalEngine {
             reranker,
             repos: RwLock::new(HashMap::new()),
             embed_cache: EmbeddingCache::new(model_id, 256),
-            meta_cache: MetaCache::new(Duration::from_secs(5)),
-            blame_cache: BlameCache::new(64),
-            meta_hit_count: AtomicU64::new(0),
-            blame_cache_hit_count: AtomicU64::new(0),
+            repo_caches: RepoCaches::new(),
             last_request_at: AtomicU64::new(now_unix),
         }
     }
@@ -109,7 +103,7 @@ impl RetrievalEngine {
     /// behaviour without touching internal fields.
     #[cfg(test)]
     pub fn meta_hits(&self) -> u64 {
-        self.meta_hit_count.load(Ordering::Relaxed)
+        self.repo_caches.meta.hits()
     }
 
     /// Returns the number of times `explain_change` served blame ranges
@@ -119,7 +113,7 @@ impl RetrievalEngine {
     /// behaviour without touching internal fields.
     #[cfg(test)]
     pub fn blame_cache_hits(&self) -> u64 {
-        self.blame_cache_hit_count.load(Ordering::Relaxed)
+        self.repo_caches.blame.hits()
     }
 
     /// Embed `text`, returning a cached `Arc<Vec<f32>>` on repeat calls.
@@ -211,12 +205,13 @@ impl RetrievalEngine {
     /// (TTL = 5 s). On a miss the meta is computed via `compose_response_meta`
     /// and stored before returning.
     async fn cached_meta(&self, handle: &RepoHandle) -> crate::Result<ResponseMeta> {
-        if let Some(cached) = self.meta_cache.get(&handle.repo_id) {
-            self.meta_hit_count.fetch_add(1, Ordering::Relaxed);
+        if let Some(cached) = self.repo_caches.meta.get(&handle.repo_id) {
             return Ok(cached);
         }
         let fresh = compose_response_meta(handle).await?;
-        self.meta_cache.put(handle.repo_id.clone(), fresh.clone());
+        self.repo_caches
+            .meta
+            .put(handle.repo_id.clone(), fresh.clone());
         Ok(fresh)
     }
 
@@ -270,11 +265,11 @@ impl RetrievalEngine {
         self.reranker.unload_if_idle(idle).await
     }
 
-    /// Evict the cached [`RepoHandle`] and [`MetaCache`] entry for `repo_path`.
+    /// Evict the cached [`RepoHandle`] and every per-repo cache entry
+    /// ([`RepoCaches`]: meta + blame) for `repo_path`.
     ///
     /// After this call, the next [`open_repo`][Self::open_repo] for the same
-    /// path will re-open storage and rebuild the handle from scratch.  The
-    /// BlameCache invalidation hook lives in Phase E (Task E.1).
+    /// path will re-open storage and rebuild the handle from scratch.
     pub async fn invalidate_repo(&self, repo_path: impl AsRef<Path>) -> crate::Result<()> {
         let canonical = std::fs::canonicalize(repo_path.as_ref())
             .map_err(|e| EngineError::Internal(format!("canonicalize: {e}")))?;
@@ -285,8 +280,7 @@ impl RetrievalEngine {
             .map_err(|e| EngineError::Git(format!("first_commit_sha: {e}")))?;
         let repo_id = RepoId::from_parts(&first, &canonical.to_string_lossy());
         self.repos.write().await.remove(&repo_id);
-        self.meta_cache.invalidate(&repo_id);
-        self.blame_cache.invalidate_repo(&repo_id);
+        self.repo_caches.invalidate_repo(&repo_id);
         Ok(())
     }
 
@@ -309,11 +303,11 @@ impl RetrievalEngine {
 
         // Cache hit path — skip Blamer entirely.
         if let Some(ref hash) = content_hash_opt {
-            if let Some(cached) = self
-                .blame_cache
-                .get(&handle.repo_id, &query.file, hash.as_str())
+            if let Some(cached) =
+                self.repo_caches
+                    .blame
+                    .get(&handle.repo_id, &query.file, hash.as_str())
             {
-                self.blame_cache_hit_count.fetch_add(1, Ordering::Relaxed);
                 tracing::debug!(file = %query.file, "explain_change: BlameCache hit");
                 let hydrated = ohara_core::explain::hydrator::hydrate_blame_results(
                     ohara_core::explain::hydrator::HydrateInputs {
@@ -338,7 +332,7 @@ impl RetrievalEngine {
             .map_err(EngineError::from)?;
 
         if let Some(hash) = content_hash_opt {
-            self.blame_cache.put(
+            self.repo_caches.blame.put(
                 handle.repo_id.clone(),
                 query.file.clone(),
                 hash.as_str().to_string(),

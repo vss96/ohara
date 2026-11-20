@@ -1,5 +1,6 @@
 use lru::LruCache;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ohara_core::explain::BlameRange;
@@ -22,6 +23,8 @@ struct Key {
 /// `invalidate_repo` drops every entry whose `RepoId` matches the argument.
 pub struct BlameCache {
     inner: Mutex<LruCache<Key, Arc<Vec<BlameRange>>>>,
+    /// Number of `get` calls that found an entry.
+    hits: AtomicU64,
 }
 
 impl BlameCache {
@@ -37,6 +40,7 @@ impl BlameCache {
             inner: Mutex::new(LruCache::new(
                 NonZeroUsize::new(capacity.max(1)).expect("capacity is non-zero"),
             )),
+            hits: AtomicU64::new(0),
         }
     }
 
@@ -55,6 +59,14 @@ impl BlameCache {
             content_hash: content_hash.into(),
         })
         .cloned()
+        .inspect(|_| {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+        })
+    }
+
+    /// Number of `get` calls that found an entry.
+    pub fn hits(&self) -> u64 {
+        self.hits.load(Ordering::Relaxed)
     }
 
     /// Insert `value` for the given key, evicting the LRU entry if at capacity.
@@ -172,5 +184,20 @@ mod tests {
         c.invalidate_repo(&rid("a"));
         assert!(c.get(&rid("a"), "f.rs", "h").is_none());
         assert!(c.get(&rid("b"), "f.rs", "h").is_some());
+    }
+
+    #[test]
+    fn hits_count_only_cache_hits() {
+        let c = BlameCache::new(8);
+        assert!(c.get(&rid("a"), "f.rs", "h").is_none());
+        assert_eq!(c.hits(), 0);
+        c.put(
+            rid("a"),
+            "f.rs".into(),
+            "h".into(),
+            std::sync::Arc::new(vec![]),
+        );
+        c.get(&rid("a"), "f.rs", "h").expect("hit");
+        assert_eq!(c.hits(), 1);
     }
 }

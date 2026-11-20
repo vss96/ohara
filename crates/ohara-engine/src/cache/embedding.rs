@@ -1,5 +1,6 @@
 use lru::LruCache;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// LRU cache keyed by `blake3(model_id ":" text)` → shared embedding vector.
@@ -11,6 +12,8 @@ use std::sync::{Arc, Mutex};
 pub struct EmbeddingCache {
     model_id: String,
     inner: Mutex<LruCache<[u8; 32], Arc<Vec<f32>>>>,
+    /// Number of `get` calls that found an entry.
+    hits: AtomicU64,
 }
 
 impl EmbeddingCache {
@@ -26,6 +29,7 @@ impl EmbeddingCache {
         Self {
             model_id: model_id.into(),
             inner: Mutex::new(LruCache::new(cap)),
+            hits: AtomicU64::new(0),
         }
     }
 
@@ -38,7 +42,14 @@ impl EmbeddingCache {
     pub fn get(&self, text: &str) -> Option<Arc<Vec<f32>>> {
         let key = self.cache_key(text);
         let mut g = self.inner.lock().ok()?;
-        g.get(&key).cloned()
+        g.get(&key).cloned().inspect(|_| {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+        })
+    }
+
+    /// Number of `get` calls that found an entry.
+    pub fn hits(&self) -> u64 {
+        self.hits.load(Ordering::Relaxed)
     }
 
     /// Insert `value` for `text`, evicting the LRU entry if at capacity.
@@ -101,5 +112,15 @@ mod tests {
             !Arc::ptr_eq(&ra, &rb),
             "different models must not share arcs"
         );
+    }
+
+    #[test]
+    fn hits_count_only_cache_hits() {
+        let c = EmbeddingCache::new("m", 4);
+        assert!(c.get("q").is_none());
+        assert_eq!(c.hits(), 0);
+        c.put("q", Arc::new(vec![1.0]));
+        assert!(c.get("q").is_some());
+        assert_eq!(c.hits(), 1);
     }
 }
