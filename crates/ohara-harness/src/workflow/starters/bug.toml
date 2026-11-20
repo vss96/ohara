@@ -1,0 +1,17 @@
+description = "Fix a bug: a failing reproduction test must exist from the first increment."
+default_budget_minutes = 60
+diff_budget_lines = 200
+
+[contract]
+protected_paths = []
+
+[[contract.script]]
+name = "tests"
+run = ["cargo", "test", "--workspace"]
+kind = "test"
+
+[[contract.rubric]]
+id = "repro-test"
+criterion = "a failing reproduction test exists in the first increment"
+pass_mark = 7
+scale_max = 10
