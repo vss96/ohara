@@ -216,6 +216,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn chunker_counts_inter_atom_gap_against_budget() {
+        // Regression for #121: atoms of 10 + 49 tokens fit a 59-token
+        // budget on their own, but a 121-token comment sits between
+        // them. The merged slice would be 180 tokens, so they must
+        // not merge.
+        let (mut atoms, _) = make_atoms(&[10, 49]);
+        let gap = "/".repeat(121 * CHARS_PER_TOKEN);
+        let first = atoms[0].source_text.clone();
+        let second = atoms[1].source_text.clone();
+        let source = format!("{first}{gap}{second}");
+        atoms[1].span_start = (first.len() + gap.len()) as u32;
+        atoms[1].span_end = source.len() as u32;
+        let chunks = chunk_symbols(atoms, 59, &source);
+        assert_eq!(chunks.len(), 2, "gap must push the merge over budget");
+        assert_eq!(chunks[0].source_text, first);
+        assert_eq!(chunks[1].source_text, second);
+    }
+
     mod proptests {
         use super::*;
         use proptest::prelude::*;
@@ -248,7 +267,6 @@ mod tests {
             }
 
             #[test]
-            #[ignore = "tracked in #121: chunk_symbols does not count inter-atom gap bytes in source against max_tokens when slicing span_start..span_end"]
             fn chunk_symbols_respects_max_tokens_with_inter_atom_comments(
                 sizes in proptest::collection::vec(10usize..=100, 2..=8),
                 gap_tokens in 20usize..=150,
