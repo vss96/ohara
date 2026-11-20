@@ -813,16 +813,7 @@ mod phase_timing_tests {
         }
     }
 
-    #[async_trait]
-    impl crate::storage::StorageCache for FakeStorage {
-        async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> {
-            Ok(false)
-        }
-
-        async fn record_blob_seen(&self, _: &str, _: &str) -> Result<()> {
-            Ok(())
-        }
-    }
+    impl crate::storage::StorageCache for FakeStorage {}
 
     fn fake_commit(sha: &str) -> CommitMeta {
         CommitMeta {
@@ -2110,16 +2101,7 @@ mod plan_26_repo_root_tests {
             }
         }
 
-        #[async_trait]
-        impl crate::storage::StorageCache for MinStorage {
-            async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
-                Ok(false)
-            }
-
-            async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
-                Ok(())
-            }
-        }
+        impl crate::storage::StorageCache for MinStorage {}
 
         struct MinEmbedder;
 
@@ -2343,16 +2325,7 @@ mod plan_28_workers_tests {
             }
         }
 
-        #[async_trait::async_trait]
-        impl crate::storage::StorageCache for MinStorage {
-            async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
-                Ok(false)
-            }
-
-            async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
-                Ok(())
-            }
-        }
+        impl crate::storage::StorageCache for MinStorage {}
 
         struct MinEmbedder;
 

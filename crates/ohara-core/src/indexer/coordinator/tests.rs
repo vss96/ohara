@@ -226,16 +226,7 @@ impl crate::storage::StorageExplain for SpyStorage {
     }
 }
 
-#[async_trait]
-impl crate::storage::StorageCache for SpyStorage {
-    async fn blob_was_seen(&self, _: &str, _: &str) -> Result<bool> {
-        Ok(false)
-    }
-
-    async fn record_blob_seen(&self, _: &str, _: &str) -> Result<()> {
-        Ok(())
-    }
-}
+impl crate::storage::StorageCache for SpyStorage {}
 
 /// A CommitSource that returns an error from `hunks_for_commit` for a
 /// specific SHA ("poison"). All other SHAs return one trivial hunk.

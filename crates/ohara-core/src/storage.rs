@@ -125,26 +125,14 @@ pub struct EmbedCacheStats {
     pub total_bytes: u64,
 }
 
-/// Content-addressed caches the indexer consults to skip redundant
-/// embedding work: the per-blob "seen" set and the plan-27 chunk-level
-/// embed cache.
+/// Content-addressed cache the indexer consults to skip redundant
+/// embedding work: the plan-27 chunk-level embed cache.
 ///
 /// Split out of [`Storage`] (issue #98) so the embed stage, and its test
 /// fakes, depend only on this seam. [`Storage`] has it as a supertrait,
 /// so an `Arc<dyn Storage>` upcasts to `Arc<dyn StorageCache>`.
 #[async_trait]
 pub trait StorageCache: Send + Sync {
-    // --- Blob cache ---
-
-    /// Has a blob with this `(blob_sha, embedding_model)` been embedded
-    /// before? Used to skip re-embedding identical content across
-    /// commits.
-    async fn blob_was_seen(&self, blob_sha: &str, embedding_model: &str) -> Result<bool>;
-
-    /// Record that `(blob_sha, embedding_model)` has been embedded.
-    /// Idempotent on the pair.
-    async fn record_blob_seen(&self, blob_sha: &str, embedding_model: &str) -> Result<()>;
-
     // --- Chunk-level embed cache (plan 27) ---
 
     /// Plan 27: chunk-level embed cache. Look up cached vectors for

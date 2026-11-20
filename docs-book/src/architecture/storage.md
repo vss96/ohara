@@ -23,7 +23,6 @@ loads three SQLite extensions:
 | `file_path` | normal | Interned file path strings + detected language + active flag. |
 | `symbol` | normal | HEAD-snapshot symbols: file, kind, name, qualified_name, line span, blob SHA, `source_text`. |
 | `hunk` | normal | One row per (commit, file, hunk): commit SHA, file path id, change kind, raw `diff_text`. Indexed on `(file_path_id, commit_sha)` and `commit_sha`. |
-| `blob_cache` | normal | Tracks which blob SHAs have been embedded by which model — keeps re-indexes idempotent. |
 | `vec_hunk` | `vec0` | sqlite-vec table: `hunk_id → diff_emb FLOAT[384]` (BGE-small). |
 | `vec_commit` | `vec0` | `commit_sha → message_emb FLOAT[384]`. |
 | `vec_symbol` | `vec0` | `symbol_id → source_emb FLOAT[384]`. |
@@ -130,7 +129,7 @@ v0.3 index aborts with a clean error rather than risking a downgrade.
 
 Storage code lives under `crates/ohara-storage/src/`. As of v0.6 the
 crate is split into two submodules: `tables/` (one file per table —
-`commit`, `hunk`, `symbol`, `repo`, `blob_cache`, plus the FTS / vec
+`commit`, `hunk`, `symbol`, `repo`, `embed_cache`, plus the FTS / vec
 mirror tables) and `codec/` (row codecs like `change_kind` and
 `file_path` interning, factored out of the table modules so the
 mapping is shared and unit-tested in one place). Internal-only — no
