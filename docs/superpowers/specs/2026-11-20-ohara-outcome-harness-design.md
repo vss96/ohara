@@ -60,7 +60,9 @@ explicit record of what was decided without them.
 
 **Non-goals (for now)**
 - Multi-user or hosted service, web UI, chat triggers.
-- Our own LLM client or agent loop. Headless CLIs stay behind the trait.
+- Our own LLM client or agent loop. Headless CLIs (`claude`, `codex`,
+  `agy`, or any CLI through the generic adapter) stay behind the trait
+  (§8a).
 - Auto-merge or auto-publish. Delivery is always a draft for a human.
 - Tasks spanning several unrelated repos.
 
@@ -246,6 +248,68 @@ is no fixed round count.
   session. If it fails again, the supervisor takes the option with the best
   script results and records "judge unavailable".
 
+### 8a. Agent runtimes: any CLI, alone or mixed (decided by the user: set in config)
+
+Every agent role runs on a headless CLI behind the `AgentRuntime` trait
+from the earlier spec §4. The roles are planner, rubric author, builder,
+judge, reviewer and contract drafter.
+
+- **First-class adapters: `claude`, `codex` and `agy`.**
+  - Each adapter maps a step onto the CLI's flags: prompt, tool policy,
+    turn and time limits, working directory.
+  - Each one parses the CLI's event stream for completion and for cost,
+    where the CLI reports it.
+  - Known quirks belong inside the adapter. Two for `agy`: the prompt must
+    be passed as `-p="<text>"` or it swallows the following flag, and
+    headless mode auto-denies shell permissions, so the adapter must grant
+    them explicitly.
+- **A generic adapter, defined in config, for any other CLI.** The config
+  gives:
+  - a command template
+  - how the prompt is passed (`arg` or `stdin`)
+  - how "done" is detected (exit code, optionally plus an output pattern)
+
+  Its guarantees are weaker, and the hand-back states that it was used:
+  - no tool subsetting (protected-path and test-weakening checks still run
+    in `guard`, outside the agent)
+  - no cost reporting (cost is then unknown, and the cost ceiling only
+    counts runtimes that report cost)
+- **Mixing is set in config.** The harness does not choose runtimes on its
+  own.
+
+```toml
+[runtimes.claude]  kind = "claude-code"
+[runtimes.codex]   kind = "codex"
+[runtimes.agy]     kind = "agy"        # model = "..." optional
+[runtimes.local]   kind = "generic"
+  command = ["my-agent", "--yes", "{prompt}"]
+  prompt = "arg"
+  done = { exit_code = 0 }
+
+[roles]
+planner  = ["claude", "codex"]     # first is primary; the rest are the failover order
+builder  = ["codex", "claude"]
+judge    = ["agy", "claude"]       # prefer a different model family from the builder
+reviewer = ["claude"]
+contract = ["claude"]
+
+[poc]
+builders = ["codex", "claude"]     # optional: POCs of one decision rotate across these
+```
+
+- **Single runtime.** Every role lists the same runtime, so one CLI runs
+  the task end to end.
+- **Failover.** A quota, rate-limit, auth or crash failure moves the step
+  to the next runtime in the role's list. The step restarts from its
+  checkpoint. All run state lives in `harness.sqlite` and git, never in a
+  CLI session, so a switch loses only that step's turn in progress.
+  Failovers are recorded.
+- **Recorded.** Every decision record names the runtime and model that
+  built each POC, and the one that judged it. Over time, memory can show
+  which runtime does better on which kind of work. Letting the harness
+  pick runtimes from that evidence is a possible later addition. It is not
+  in this design.
+
 ## 9. Decision records, checkpoints, assumptions
 
 Records are stored in `harness.sqlite` (earlier spec's run log), one row
@@ -413,8 +477,10 @@ shared index store is built. Decided by the user:
 
 1. **Contract and clock.**
    - Builds the minimal `ohara-harness` crate: supervisor state machine,
-     agent runtime trait plus a Claude Code adapter, and `harness.sqlite`
-     with the run log, decision records and crash resume.
+     the agent runtime trait with `claude`, `codex`, `agy` and generic
+     adapters, the `[roles]` config with failover (§8a), and
+     `harness.sqlite` with the run log, decision records and crash resume.
+     Each adapter is its own small PR in the stack.
    - Covers the task model, contract draft, approve and freeze (with the
      test-weakening guard), one linear builder pass per round, a contract
      check loop until the deadline, the agent-proposed and
