@@ -51,7 +51,10 @@ fn mixed_commit_with_vendor_ignored_indexes_only_real_path() {
     // --no-rerank avoids loading the reranker model (speeds up the test).
     let q = Command::new(ohara_bin())
         .env("OHARA_HOME", home.path())
+        // --no-daemon: a spawned daemon keeps the OHARA_HOME it started
+        // with and would serve the other tests' queries from the wrong home.
         .args([
+            "--no-daemon",
             "query",
             "--query",
             "return 0",
@@ -202,7 +205,7 @@ fn no_oharaignore_indexes_all_paths_unchanged() {
     // query for it (no .oharaignore = no extra filtering).
     let q = Command::new(ohara_bin())
         .env("OHARA_HOME", ohara_home.path())
-        .args(["query", "--query", "keep me", "--no-rerank"])
+        .args(["--no-daemon", "query", "--query", "keep me", "--no-rerank"])
         .arg(repo)
         .output()
         .unwrap();
