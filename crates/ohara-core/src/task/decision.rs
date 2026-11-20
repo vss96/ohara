@@ -22,6 +22,7 @@ impl Default for DecisionId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DecisionState {
     Proposed,
     Settled,
@@ -38,6 +39,7 @@ pub struct Assumption {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CostIfWrong {
     Low,
     Medium,
@@ -46,6 +48,7 @@ pub enum CostIfWrong {
 
 /// A human's ruling on a settled decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Verdict {
     Upheld,
     Overturned,

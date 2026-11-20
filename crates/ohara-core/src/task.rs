@@ -49,6 +49,7 @@ impl FromStr for TaskId {
 
 /// Lifecycle state of a task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TaskState {
     Drafting,
     AwaitingApproval,
@@ -165,6 +166,7 @@ pub struct TaskRecord {
 
 /// Which part an agent plays in a step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Role {
     Contract,
     Planner,
@@ -175,6 +177,7 @@ pub enum Role {
 
 /// Outcome of a single step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StepState {
     Running,
     Passed,
@@ -253,5 +256,33 @@ mod tests {
         assert_eq!(s.len(), 64);
         assert!(s.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(s.starts_with("abab"));
+    }
+
+    #[test]
+    fn contract_hash_json_round_trips_and_rejects_bad_strings() {
+        let h = ContractHash([0x1f; 32]);
+        let json = serde_json::to_string(&h).unwrap();
+        assert_eq!(json, format!("\"{}\"", "1f".repeat(32)));
+        assert_eq!(serde_json::from_str::<ContractHash>(&json).unwrap(), h);
+        assert!(serde_json::from_str::<ContractHash>("\"zz\"").is_err());
+        assert!(serde_json::from_str::<ContractHash>("\"abcd\"").is_err());
+    }
+
+    #[test]
+    fn enums_serialize_snake_case_matching_as_str() {
+        let json = serde_json::to_string(&TaskState::AwaitingApproval).unwrap();
+        assert_eq!(json, "\"awaiting_approval\"");
+        assert_eq!(
+            serde_json::to_string(&TaskState::TimedOut).unwrap(),
+            "\"timed_out\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Role::Builder).unwrap(),
+            "\"builder\""
+        );
+        assert_eq!(
+            serde_json::to_string(&StepState::Passed).unwrap(),
+            "\"passed\""
+        );
     }
 }
