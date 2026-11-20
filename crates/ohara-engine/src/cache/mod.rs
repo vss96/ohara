@@ -6,6 +6,48 @@ pub use blame::BlameCache;
 pub use embedding::EmbeddingCache;
 pub use meta::MetaCache;
 
+use ohara_core::types::RepoId;
+use std::time::Duration;
+
+/// TTL for cached [`ohara_core::query::ResponseMeta`] entries.
+const META_TTL: Duration = Duration::from_secs(5);
+/// LRU capacity of the blame cache.
+const BLAME_CAPACITY: usize = 64;
+
+/// Every cache whose entries are scoped to a single repo.
+///
+/// [`Self::invalidate_repo`] destructures `Self` exhaustively, so adding
+/// a per-repo cache field without invalidating it is a compile error.
+/// [`EmbeddingCache`] deliberately lives outside this group: it is keyed
+/// by `(model_id, query text)`, not by repo, so re-indexing a repo
+/// cannot make its entries stale.
+pub struct RepoCaches {
+    pub meta: MetaCache,
+    pub blame: BlameCache,
+}
+
+impl RepoCaches {
+    pub fn new() -> Self {
+        Self {
+            meta: MetaCache::new(META_TTL),
+            blame: BlameCache::new(BLAME_CAPACITY),
+        }
+    }
+
+    /// Drop every cached entry belonging to `repo_id`.
+    pub fn invalidate_repo(&self, repo_id: &RepoId) {
+        let Self { meta, blame } = self;
+        meta.invalidate(repo_id);
+        blame.invalidate_repo(repo_id);
+    }
+}
+
+impl Default for RepoCaches {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

@@ -1,6 +1,7 @@
 use ohara_core::query::ResponseMeta;
 use ohara_core::types::RepoId;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,8 @@ use std::time::{Duration, Instant};
 pub struct MetaCache {
     ttl: Duration,
     inner: Mutex<HashMap<RepoId, (Instant, ResponseMeta)>>,
+    /// Number of `get` calls served from a fresh (non-expired) entry.
+    hits: AtomicU64,
 }
 
 impl MetaCache {
@@ -21,6 +24,7 @@ impl MetaCache {
         Self {
             ttl,
             inner: Mutex::new(HashMap::new()),
+            hits: AtomicU64::new(0),
         }
     }
 
@@ -33,7 +37,14 @@ impl MetaCache {
         if t.elapsed() > self.ttl {
             return None;
         }
+        self.hits.fetch_add(1, Ordering::Relaxed);
         Some(v.clone())
+    }
+
+    /// Number of `get` calls served from a fresh entry. Misses and
+    /// TTL-expired entries are not counted.
+    pub fn hits(&self) -> u64 {
+        self.hits.load(Ordering::Relaxed)
     }
 
     /// Insert or overwrite the cached value for `k`, stamping it with the
