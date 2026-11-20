@@ -37,7 +37,8 @@ fn write(dir: &tempfile::TempDir, rel: &str, body: &str) {
     std::fs::write(p, body).unwrap();
 }
 
-const TESTS_FILE: &str = "#[test]\nfn a() { assert_eq!(1, 1); assert!(true); }\n#[test]\nfn b() { assert!(true); }\n";
+const TESTS_FILE: &str =
+    "#[test]\nfn a() { assert_eq!(1, 1); assert!(true); }\n#[test]\nfn b() { assert!(true); }\n";
 
 /// Commit `before`, then `edit`, and return the guard violations.
 fn run(c: &Contract, setup: &[(&str, &str)], edit: impl Fn(&tempfile::TempDir)) -> Vec<Violation> {
@@ -56,7 +57,10 @@ fn edit_to_protected_path_is_violation() {
     let v = run(&contract(false), &[("Cargo.lock", "1")], |d| {
         write(d, "Cargo.lock", "2")
     });
-    assert_eq!(v, vec![Violation::ProtectedPathChanged("Cargo.lock".into())]);
+    assert_eq!(
+        v,
+        vec![Violation::ProtectedPathChanged("Cargo.lock".into())]
+    );
 }
 
 #[test]
@@ -148,7 +152,10 @@ fn allow_test_removal_suppresses_deletion_only() {
         std::fs::remove_file(d.path().join("tests/a.rs")).unwrap();
         write(d, "Cargo.lock", "2");
     });
-    assert_eq!(v, vec![Violation::ProtectedPathChanged("Cargo.lock".into())]);
+    assert_eq!(
+        v,
+        vec![Violation::ProtectedPathChanged("Cargo.lock".into())]
+    );
 }
 
 #[test]
