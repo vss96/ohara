@@ -21,11 +21,19 @@ pub(super) async fn nothing_to_walk(tips: &dyn TipStore, id: &RepoIdentity) -> R
     if main_needs_first_run(&id.worktree, &all) {
         return Ok(false);
     }
+    // One HEAD observation backs the whole decision: `count_hiding` walks
+    // whatever HEAD is when it runs, so a HEAD that moved since the
+    // snapshot check (e.g. reset to an ancestor the tips hide) must not be
+    // reported as up to date. Index instead.
+    let head = head_sha(id)?;
     let snapshot = tips.head_symbol_snapshot(&id.repo_id).await?;
-    if head_symbols_stale(&id.worktree, &all, snapshot.as_ref(), &head_sha(id)?) {
+    if head_symbols_stale(&id.worktree, &all, snapshot.as_ref(), &head) {
         return Ok(false);
     }
     let hide: Vec<String> = all.iter().map(|t| t.sha.as_str().to_string()).collect();
     let behind = ohara_git::GitCommitsBehind::open(&id.worktree_path)?;
-    Ok(behind.count_hiding(&hide).await? == 0)
+    if behind.count_hiding(&hide).await? != 0 {
+        return Ok(false);
+    }
+    Ok(head_sha(id)? == head)
 }
