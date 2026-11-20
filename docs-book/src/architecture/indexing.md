@@ -354,14 +354,19 @@ becomes the dominant per-commit cost, fanning out across workers.
 
 ## Known limits
 
-- **Failed passes leave untipped commits.** A pass with failed
-  commits stores the rest but doesn't record a tip. When every tip is
-  visible from a querying worktree's `HEAD`, retrieval skips the
-  visibility filter, so those stored commits can show up in results
-  from other worktrees until the next clean pass or a prune. (A
-  worktree that *moves* off indexed commits is covered: its old tip is
-  kept as a [retired tip](#retired-tips). Commits that never got a tip
-  at all are not.)
+- **Running and failed passes leave untipped commits.** A worktree's
+  tip is recorded only when its pass ends cleanly, but the pass stores
+  each commit as soon as it is embedded. When every tip is visible from
+  a querying worktree's `HEAD`, retrieval skips the visibility filter,
+  so commits stored by another worktree's pass can show up in results:
+  for the whole of a pass that is still running (not just a short race
+  with the tip read), and after a pass with failed commits until that
+  worktree's next clean pass. A prune removes such commits only once no
+  ref or worktree `HEAD` reaches them; while the worktree's `HEAD` still
+  reaches them, only a clean pass there records the tip that hides
+  them. (A worktree that *moves* off indexed commits is covered: its
+  old tip is kept as a [retired tip](#retired-tips). Commits that never
+  got a tip at all are not.)
 - **Retired tips keep the filter on until a prune runs.** Every
   reset, amend, rebase or branch switch of an indexed worktree leaves
   a retired tip. One that the querying `HEAD` can't reach keeps
@@ -379,11 +384,28 @@ becomes the dominant per-commit cost, fanning out across workers.
   jobs, but a CLI `--force` or `--rebuild`, an in-process
   `ohara prune`, or a second daemon briefly overlapping the first
   during shutdown or a version upgrade,
-  can write while the daemon does. SQLite keeps the data consistent;
-  expect `SQLITE_BUSY` errors or duplicated work.
+  can write while the daemon does. So can a CLI `--incremental` run
+  while a daemon is stopping: the daemon removes its socket before its
+  queued background job finishes, so the CLI finds no daemon and
+  indexes in-process next to that job. SQLite keeps the data
+  consistent (a commit and its hunks are one transaction, and prune
+  edits tips with compare-and-swap); expect `SQLITE_BUSY` errors or
+  duplicated work.
 - **Unopenable worktrees are skipped when pruning.** A worktree whose
   directory git can't open is skipped with a warning when computing
   reachability, so commits only that worktree reaches can be pruned.
+- **Index the main checkout from its root.** The index id is derived
+  from the history's root commit and the main checkout's path. Indexing the main checkout from a subdirectory
+  (`ohara index src/`) keys it by that subdirectory, so it does not
+  share the index its linked worktrees use (they always resolve to the
+  main checkout's root). This predates shared worktree indexes and is
+  kept so existing subdirectory indexes stay valid.
+- **An unborn main `HEAD` splits the index.** The index id is derived
+  from the main checkout's history. While the main checkout's branch
+  has no commits yet, each linked worktree derives the id from its own
+  history, so worktrees on unrelated histories get separate indexes.
+  Likewise, moving the main checkout to an unrelated (orphan) history
+  changes the id.
 
 `ohara index` is currently single-process. On large polyglot
 codebases the embed phase saturates a few cores for a burst, then

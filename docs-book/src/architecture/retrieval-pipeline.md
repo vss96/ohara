@@ -70,7 +70,9 @@ in another worktree matching the query best) can still lose recall.
 
 Visibility is keyed on the `HEAD` commit, never on a branch name, so
 detached-`HEAD` worktrees work the same way. The filter adds well under
-5 ms at p95 (`tests/perf/visibility_filter_bench.rs` guards this).
+5 ms at p95 in `tests/perf/visibility_filter_bench.rs`, which measures
+one warmed query repeatedly with the cross-encoder rerank off
+(`no_rerank: true`); with rerank on, the rerank dominates query time.
 
 ## Stage 2: Reciprocal Rank Fusion
 

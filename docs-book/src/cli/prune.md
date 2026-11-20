@@ -56,10 +56,19 @@ successful index pass, the daemon prunes on its own, but only when some
 retired tip has become unreachable. A no-op request (the commit was
 already covered) runs no pass and does not prune.
 
-A retired tip that a branch still reaches is never pruned: it keeps the
-visibility filter on for every `HEAD` that can't reach it until that
-branch is deleted. Delete the branch, then run `ohara prune` (or let
-the daemon's next index pass notice).
+A retired tip that any ref still reaches is never pruned: it keeps the
+visibility filter on for every `HEAD` that can't reach it. Local
+branches are not the only refs that count: remote-tracking branches
+(`refs/remotes/...`), tags, and other worktrees' `HEAD`s keep it alive
+too. Remove whatever still reaches it (`git for-each-ref --contains
+<sha>` lists the refs), then run `ohara prune` (or let the daemon's
+next index pass notice).
+
+A worktree whose directory git can't open (deleted or moved without
+`git worktree remove`/`move`, or on an unmounted disk) is skipped with
+a warning when computing reachability, so commits only its `HEAD`
+reaches are pruned. Run `git worktree prune` or restore the directory
+first if you want to keep them.
 
 ## Example
 
