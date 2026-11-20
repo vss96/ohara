@@ -14,7 +14,7 @@ pub mod hydrator;
 
 use crate::perf_trace::timed_phase;
 use crate::storage::Storage;
-use crate::types::{Provenance, RepoId};
+use crate::types::{CommitMeta, Provenance, RepoId};
 use crate::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -43,6 +43,15 @@ pub trait BlameSource: Send + Sync {
         line_start: u32,
         line_end: u32,
     ) -> Result<Vec<BlameRange>>;
+}
+
+/// Direct git metadata lookup for commits that blame resolves but the
+/// index does not hold yet (e.g. just committed in a linked worktree and
+/// still being indexed). Implemented by `ohara-git::Blamer`.
+#[async_trait]
+pub trait CommitLookup: Send + Sync {
+    /// Metadata straight from git. `Ok(None)` when the object does not exist.
+    async fn commit_meta(&self, sha: &str) -> Result<Option<CommitMeta>>;
 }
 
 /// Caller's request to `explain_change`. `line_start` / `line_end` are
@@ -174,6 +183,7 @@ pub async fn explain_change(
             blame_ranges: raw_blame,
             query,
             repo_id,
+            git_fallback: None,
         }),
     )
     .await?;

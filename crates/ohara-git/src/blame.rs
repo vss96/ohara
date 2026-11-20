@@ -9,7 +9,8 @@
 use anyhow::{Context, Result};
 use git2::Repository;
 use ohara_core::count_lines;
-use ohara_core::explain::{BlameRange, BlameSource};
+use ohara_core::explain::{BlameRange, BlameSource, CommitLookup};
+use ohara_core::types::CommitMeta;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -60,6 +61,28 @@ impl BlameSource for Blamer {
                 .map_err(|e| ohara_core::OhraError::Git(format!("repo lock poisoned: {e}")))?;
             blame_range_sync(&guard, &file, line_start, line_end)
                 .map_err(|e| ohara_core::OhraError::Git(e.to_string()))
+        })
+        .await
+        .map_err(|e| ohara_core::OhraError::Git(e.to_string()))?
+    }
+}
+
+#[async_trait::async_trait]
+impl CommitLookup for Blamer {
+    async fn commit_meta(&self, sha: &str) -> ohara_core::Result<Option<CommitMeta>> {
+        let repo = self.repo.clone();
+        let sha = sha.to_string();
+        tokio::task::spawn_blocking(move || -> ohara_core::Result<Option<CommitMeta>> {
+            let guard = repo
+                .lock()
+                .map_err(|e| ohara_core::OhraError::Git(format!("repo lock poisoned: {e}")))?;
+            let Ok(oid) = git2::Oid::from_str(&sha) else {
+                return Ok(None);
+            };
+            let Ok(commit) = guard.find_commit(oid) else {
+                return Ok(None);
+            };
+            Ok(Some(crate::walker::commit_meta(&commit)))
         })
         .await
         .map_err(|e| ohara_core::OhraError::Git(e.to_string()))?

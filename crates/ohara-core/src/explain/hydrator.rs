@@ -46,6 +46,9 @@ pub struct HydrateInputs<'a> {
     pub blame_ranges: Vec<super::BlameRange>,
     pub query: &'a super::ExplainQuery,
     pub repo_id: &'a RepoId,
+    /// Resolves blame SHAs that storage does not hold. `None` keeps the
+    /// skip-and-report behaviour for every unindexed SHA.
+    pub git_fallback: Option<&'a dyn super::CommitLookup>,
 }
 
 /// Hydrate a pre-computed `Vec<BlameRange>` into `HydratedBlame`.
@@ -82,6 +85,7 @@ pub async fn hydrate_blame_results(input: HydrateInputs<'_>) -> Result<HydratedB
         blame_ranges,
         query,
         repo_id,
+        git_fallback,
     } = input;
     // Derive the clamped range and line attribution totals from the blame
     // output — mirrors the existing logic in `explain_change`.
@@ -115,6 +119,7 @@ pub async fn hydrate_blame_results(input: HydrateInputs<'_>) -> Result<HydratedB
 
     let mut hits: Vec<ExplainHit> = Vec::with_capacity(blame_ranges.len());
     let mut skipped_shas: Vec<String> = Vec::new();
+    let mut fallback_shas: Vec<String> = Vec::new();
     let mut lines_attributed_indexed: u32 = 0;
 
     for r in blame_ranges {
@@ -150,11 +155,33 @@ pub async fn hydrate_blame_results(input: HydrateInputs<'_>) -> Result<HydratedB
                 });
             }
             None => {
-                tracing::debug!(
-                    sha = %r.commit_sha,
-                    "hydrate_blame_results: skipping unindexed commit"
-                );
-                skipped_shas.push(r.commit_sha);
+                let meta = match git_fallback {
+                    Some(lookup) => lookup_or_none(lookup, &r.commit_sha).await,
+                    None => None,
+                };
+                let Some(cm) = meta else {
+                    tracing::debug!(
+                        sha = %r.commit_sha,
+                        "hydrate_blame_results: skipping unindexed commit"
+                    );
+                    skipped_shas.push(r.commit_sha);
+                    continue;
+                };
+                lines_attributed_indexed += r.lines.len() as u32;
+                fallback_shas.push(r.commit_sha.clone());
+                hits.push(ExplainHit {
+                    commit_sha: r.commit_sha,
+                    commit_message: cm.message,
+                    commit_author: cm.author,
+                    commit_date: DateTime::<Utc>::from_timestamp(cm.ts, 0)
+                        .map(|d| d.to_rfc3339())
+                        .unwrap_or_default(),
+                    blame_lines: r.lines,
+                    file_path: query.file.clone(),
+                    diff_excerpt: String::new(),
+                    diff_truncated: false,
+                    provenance: Provenance::Exact,
+                });
             }
         }
     }
@@ -167,6 +194,7 @@ pub async fn hydrate_blame_results(input: HydrateInputs<'_>) -> Result<HydratedB
     let limitation = build_limitation(
         lines_attributed_total,
         &skipped_shas,
+        &fallback_shas,
         clamped_start,
         clamped_end,
     );
@@ -192,10 +220,28 @@ pub async fn hydrate_blame_results(input: HydrateInputs<'_>) -> Result<HydratedB
     })
 }
 
-/// Build the `_meta.limitation` string from blame statistics.
+/// Ask the git fallback for one SHA; lookup errors are logged and treated
+/// as "not found" so one bad object cannot fail the whole query.
+async fn lookup_or_none(
+    lookup: &dyn super::CommitLookup,
+    sha: &str,
+) -> Option<crate::types::CommitMeta> {
+    match lookup.commit_meta(sha).await {
+        Ok(meta) => meta,
+        Err(e) => {
+            tracing::warn!(sha = %sha, error = %e, "git fallback lookup failed");
+            None
+        }
+    }
+}
+
+/// Build the `_meta.limitation` string from blame statistics. When both
+/// skipped (unresolvable) and git-fallback SHAs occur, the two messages
+/// are joined with `"; "`, skipped message first.
 pub(crate) fn build_limitation(
     total: u32,
     skipped: &[String],
+    fallback: &[String],
     clamped_start: u32,
     clamped_end: u32,
 ) -> Option<String> {
@@ -206,6 +252,7 @@ pub(crate) fn build_limitation(
                 .into(),
         );
     }
+    let mut parts: Vec<String> = Vec::new();
     if !skipped.is_empty() {
         let n = skipped.len();
         let preview: Vec<&str> = skipped.iter().take(3).map(String::as_str).collect();
@@ -214,14 +261,25 @@ pub(crate) fn build_limitation(
         } else {
             String::new()
         };
-        return Some(format!(
+        parts.push(format!(
             "{n} commit(s) older than the local index watermark were skipped: \
              [{}]{}; range covered: {clamped_start}..={clamped_end}",
             preview.join(", "),
             suffix,
         ));
     }
-    None
+    if !fallback.is_empty() {
+        let short: Vec<&str> = fallback.iter().map(|s| &s[..s.len().min(7)]).collect();
+        parts.push(format!(
+            "{} commit(s) not yet indexed: metadata from git, no diff excerpt ({})",
+            fallback.len(),
+            short.join(", "),
+        ));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join("; "))
 }
 
 /// Plan 12 Task 3.2 logic, now living in `hydrator.rs`.

@@ -101,7 +101,7 @@ impl GitWalker {
     }
 }
 
-fn commit_meta(c: &git2::Commit<'_>) -> CommitMeta {
+pub(crate) fn commit_meta(c: &git2::Commit<'_>) -> CommitMeta {
     let parent_sha = if c.parent_count() > 0 {
         c.parent(0).ok().map(|p| p.id().to_string())
     } else {

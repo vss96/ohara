@@ -262,6 +262,7 @@ impl RetrievalEngine {
                         blame_ranges: (*cached).clone(),
                         query: &query,
                         repo_id: &handle.repo_id,
+                        git_fallback: Some(handle.blamer.as_ref()),
                     },
                 )
                 .await
@@ -294,6 +295,7 @@ impl RetrievalEngine {
                 blame_ranges: raw_ranges,
                 query: &query,
                 repo_id: &handle.repo_id,
+                git_fallback: Some(handle.blamer.as_ref()),
             },
         )
         .await
