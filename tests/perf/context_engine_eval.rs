@@ -327,7 +327,7 @@ async fn context_engine_eval_passes_thresholds() -> Result<()> {
         embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
         workers: None,
     };
-    ohara_cli::commands::index::run(index_args)
+    ohara_cli::commands::index::run(index_args, true)
         .await
         .context("index eval fixture")?;
 

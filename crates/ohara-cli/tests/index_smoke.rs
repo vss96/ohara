@@ -45,7 +45,7 @@ async fn smoke_index_then_status() {
         workers: None,
         interactive: false,
     };
-    ohara_cli::commands::index::run(args).await.unwrap();
+    ohara_cli::commands::index::run(args, true).await.unwrap();
 
     // Note: Task 15 stubs status.rs; status::run currently returns an error.
     // Task 16 will implement it for real. For now, just verify the index call succeeded.

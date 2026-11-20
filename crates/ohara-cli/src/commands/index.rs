@@ -8,9 +8,9 @@ use std::sync::Arc;
 use super::provider::{resolve_provider, ProviderArg};
 use crate::resources::{apply_intensity, detect_host, pick_resources, ResourcePlan, ResourcesArg};
 
+mod daemon_route;
 mod rebuild;
 mod summary;
-mod daemon_route;
 mod up_to_date;
 use rebuild::{assert_rebuild_safe, delete_index_files};
 use summary::{failed_commits_notice, index_summary_human, phase_timings_json};
@@ -177,7 +177,7 @@ fn noop_report() -> IndexerReport {
     }
 }
 
-pub async fn run(args: Args) -> Result<IndexerReport> {
+pub async fn run(args: Args, no_daemon: bool) -> Result<IndexerReport> {
     // Interactive front-end: when `-i` is set, the wizard owns the
     // tuning surface. It returns a fully-assembled `Args` to run, an
     // equivalent command to print (user declined to run), or a cancel.
@@ -303,6 +303,10 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         tracing::info!(sha = %head.as_str(), "incremental: index up-to-date, skipping embedder init");
         println!("index up-to-date at {}", head.as_str());
         return Ok(noop_report());
+    }
+
+    if let Some(report) = daemon_route::try_route(&args, no_daemon, &id).await? {
+        return Ok(report);
     }
 
     // Apply --threads before the embedder loads so the ort runtime

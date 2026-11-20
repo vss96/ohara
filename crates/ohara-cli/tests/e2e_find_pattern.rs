@@ -48,7 +48,7 @@ async fn find_pattern_returns_retry_commit_first() {
         workers: None,
         interactive: false,
     };
-    ohara_cli::commands::index::run(args).await.unwrap();
+    ohara_cli::commands::index::run(args, true).await.unwrap();
 
     // build a Retriever directly to avoid parsing CLI stdout
     let repo_id = ohara_cli::commands::resolve_repo_id(&repo).unwrap().repo_id;

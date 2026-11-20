@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
         // Plan 31: a run that dropped commits is a hard failure — exit
         // non-zero so scripts and the post-commit hook notice the index
         // is incomplete rather than trusting a silent partial pass.
-        Cmd::Index(a) => match commands::index::run(a).await {
+        Cmd::Index(a) => match commands::index::run(a, no_daemon).await {
             Ok(report) if report.commits_failed > 0 => Err(anyhow::anyhow!(
                 "{} commit(s) failed to index; the index is incomplete",
                 report.commits_failed

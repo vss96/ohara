@@ -69,23 +69,26 @@ async fn cross_encoder_picks_better_message_among_near_duplicates() {
     );
 
     // Index the repo via the public CLI command path.
-    let report = ohara_cli::commands::index::run(ohara_cli::commands::index::Args {
-        path: repo_dir.path().to_path_buf(),
-        incremental: false,
-        force: false,
-        rebuild: false,
-        yes: false,
-        commit_batch: Some(512),
-        threads: Some(0),
-        no_progress: true,
-        profile: false,
-        embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
-        resources: ohara_cli::resources::ResourcesArg::Auto,
-        embed_batch: None,
-        embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
-        workers: None,
-        interactive: false,
-    })
+    let report = ohara_cli::commands::index::run(
+        ohara_cli::commands::index::Args {
+            path: repo_dir.path().to_path_buf(),
+            incremental: false,
+            force: false,
+            rebuild: false,
+            yes: false,
+            commit_batch: Some(512),
+            threads: Some(0),
+            no_progress: true,
+            profile: false,
+            embed_provider: Some(ohara_cli::commands::provider::ProviderArg::Auto),
+            resources: ohara_cli::resources::ResourcesArg::Auto,
+            embed_batch: None,
+            embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
+            workers: None,
+            interactive: false,
+        },
+        true,
+    )
     .await
     .unwrap();
     assert_eq!(report.new_commits, 2, "fixture should have 2 commits");

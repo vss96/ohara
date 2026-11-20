@@ -86,7 +86,7 @@ async fn run_retry_pattern(arg: ProviderArg) -> RetryResult {
         embed_cache: ohara_cli::commands::index::EmbedCacheArg::Off,
         workers: None,
     };
-    ohara_cli::commands::index::run(args)
+    ohara_cli::commands::index::run(args, true)
         .await
         .expect("index run");
 

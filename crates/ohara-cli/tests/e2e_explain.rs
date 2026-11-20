@@ -55,7 +55,9 @@ async fn explain_e2e_returns_retry_commit_for_retry_lines() {
         workers: None,
         interactive: false,
     };
-    ohara_cli::commands::index::run(index_args).await.unwrap();
+    ohara_cli::commands::index::run(index_args, true)
+        .await
+        .unwrap();
 
     // Build storage + blamer directly to avoid parsing CLI stdout.
     let id = ohara_cli::commands::resolve_repo_id(&repo).unwrap();
