@@ -187,3 +187,51 @@ fn commit_rows(db: &Path) -> i64 {
         .unwrap();
     String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
 }
+
+/// Reset, prune, then restore the commit from the reflog: the next
+/// incremental index must re-embed it rather than trust a tip that still
+/// names the pruned commit.
+#[test]
+#[ignore = "downloads the embedding model on first run; opt in with --include-ignored"]
+fn a_commit_restored_after_reset_and_prune_is_reindexed() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let main = root.path().join("main");
+    std::fs::create_dir(&main).unwrap();
+    init_main(&main);
+    let restored = git(&main, &["rev-parse", "HEAD"]);
+
+    let o = ohara(
+        home.path(),
+        &["index", "--embed-provider", "cpu", "--no-progress"],
+        &main,
+    );
+    assert!(o.status.success(), "index: {}", stderr(&o));
+    let db = repo_dirs(home.path())[0].join("index.sqlite");
+    let rows = commit_rows(&db);
+
+    git(&main, &["reset", "--hard", "HEAD~1"]);
+    let o = ohara(home.path(), &["prune"], &main);
+    assert!(o.status.success(), "prune: {}", stderr(&o));
+    assert_eq!(
+        commit_rows(&db),
+        rows - 1,
+        "the reset-away commit is pruned"
+    );
+
+    git(&main, &["reset", "--hard", &restored]);
+    let o = ohara(
+        home.path(),
+        &[
+            "index",
+            "--incremental",
+            "--embed-provider",
+            "cpu",
+            "--no-progress",
+        ],
+        &main,
+    );
+    assert!(o.status.success(), "reindex: {}", stderr(&o));
+    assert!(stdout(&o).contains("1 commit,"), "{}", stdout(&o));
+    assert_eq!(commit_rows(&db), rows, "the restored commit is back");
+}

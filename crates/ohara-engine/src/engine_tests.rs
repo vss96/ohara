@@ -1447,3 +1447,165 @@ async fn auto_prune_skips_a_reachable_retired_tip_and_runs_once_its_branch_is_go
     assert!(tips.iter().all(|(k, _)| k != &retired), "got {tips:?}");
     assert!(!stored_commits(main.path()).await.contains(&a1));
 }
+
+// ---- PR #138 review: prune must not leave tips on deleted commits ----
+
+/// Hard-reset `repo`'s current branch (and worktree) to `to`.
+fn hard_reset(repo: &git2::Repository, to: git2::Oid) {
+    let obj = repo.find_object(to, None).unwrap();
+    repo.reset(&obj, git2::ResetType::Hard, None).unwrap();
+}
+
+/// Every tip of the store behind `path` names a commit the store still
+/// holds: a tip on a pruned commit would claim coverage it no longer has.
+async fn assert_no_tip_on_a_deleted_commit(path: &Path) {
+    let stored = stored_commits(path).await;
+    for (key, sha) in all_tips(path).await {
+        assert!(
+            stored.contains(&sha),
+            "tip {key:?} points at pruned commit {sha}"
+        );
+    }
+}
+
+/// Main indexed at B, reset to A, pruned, then B restored from the reflog.
+/// Returns `(main dir, a, b)` with HEAD back on B and B's rows pruned.
+async fn main_reset_pruned_then_restored() -> (tempfile::TempDir, git2::Oid, git2::Oid) {
+    let main = tempfile::tempdir().unwrap();
+    build_test_repo(main.path());
+    let repo = git2::Repository::open(main.path()).unwrap();
+    let a = repo.head().unwrap().peel_to_commit().unwrap().id();
+    let b = commit_file(&repo, "b.rs", "fn two() {}\n", "second");
+    index_checkout(main.path()).await;
+
+    hard_reset(&repo, a);
+    let out = make_test_engine()
+        .prune_unreachable(main.path())
+        .await
+        .expect("prune");
+    assert_eq!(out.commits_deleted, 1, "B is unreachable after the reset");
+    assert!(!stored_commits(main.path()).await.contains(&b.to_string()));
+    assert_no_tip_on_a_deleted_commit(main.path()).await;
+    assert_eq!(
+        all_tips(main.path()).await,
+        vec![(String::new(), a.to_string())]
+    );
+
+    hard_reset(&repo, b);
+    (main, a, b)
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn daemon_reindexes_a_commit_restored_after_reset_and_prune() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (main, _a, b) = main_reset_pruned_then_restored().await;
+
+    let (_rec, engine) = recording_engine();
+    let out = engine
+        .ensure_indexed(main.path(), &sha_of(b))
+        .await
+        .expect("ensure_indexed");
+    assert!(out.indexed, "the pruned tip must not count as coverage");
+    assert_eq!(out.new_commits, 1);
+    assert!(stored_commits(main.path()).await.contains(&b.to_string()));
+    assert_eq!(
+        all_tips(main.path()).await,
+        vec![(String::new(), b.to_string())]
+    );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn incremental_index_reindexes_a_commit_restored_after_reset_and_prune() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (main, _a, b) = main_reset_pruned_then_restored().await;
+
+    index_checkout(main.path()).await;
+    assert!(stored_commits(main.path()).await.contains(&b.to_string()));
+    assert_eq!(
+        all_tips(main.path()).await,
+        vec![(String::new(), b.to_string())]
+    );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn prune_rewinds_a_live_worktree_tip_to_its_merge_base_with_head() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (main, slot1) = repo_with_worktree().await;
+    let wt = git2::Repository::open(&slot1).unwrap();
+    let base = wt.head().unwrap().peel_to_commit().unwrap().id();
+    let gone = commit_file(&wt, "c.rs", "fn three() {}\n", "slot only");
+    index_checkout(&slot1).await;
+
+    hard_reset(&wt, base);
+    let out = make_test_engine()
+        .prune_unreachable(main.path())
+        .await
+        .expect("prune");
+    assert_eq!(out.commits_deleted, 1);
+    assert!(!stored_commits(main.path())
+        .await
+        .contains(&gone.to_string()));
+    assert_no_tip_on_a_deleted_commit(main.path()).await;
+    assert_eq!(tip_of(&slot1).await, Some(base.to_string()));
+
+    hard_reset(&wt, gone);
+    index_checkout(&slot1).await;
+    assert!(stored_commits(main.path())
+        .await
+        .contains(&gone.to_string()));
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn prune_drops_a_main_tip_with_no_merge_base_and_the_next_daemon_pass_restores_it() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let main = tempfile::tempdir().unwrap();
+    build_test_repo(main.path());
+    let repo = git2::Repository::open(main.path()).unwrap();
+    let head = commit_file(&repo, "b.rs", "fn two() {}\n", "second");
+    index_checkout(main.path()).await;
+
+    // The main tip's commit object is gone (as after a reset and `git gc`):
+    // there is no merge base to rewind to.
+    let id = ohara_git::RepoIdentity::resolve(main.path()).unwrap();
+    let db_path = ohara_core::paths::index_db_path(&id.repo_id).unwrap();
+    let sqlite = ohara_storage::SqliteStorage::open(&db_path).await.unwrap();
+    let collected =
+        ohara_core::CommitSha::parse("ffffffffffffffffffffffffffffffffffffffff").unwrap();
+    ohara_core::TipStore::set_indexed_tip(
+        &sqlite,
+        &id.repo_id,
+        &ohara_core::WorktreeKey::main(),
+        &collected,
+    )
+    .await
+    .unwrap();
+
+    make_test_engine()
+        .prune_unreachable(main.path())
+        .await
+        .expect("prune");
+    assert_no_tip_on_a_deleted_commit(main.path()).await;
+
+    let (_rec, engine) = recording_engine();
+    let out = engine
+        .ensure_indexed(main.path(), &sha_of(head))
+        .await
+        .expect("the next daemon pass re-establishes the main tip");
+    assert!(out.indexed);
+    assert_eq!(
+        all_tips(main.path()).await,
+        vec![(String::new(), head.to_string())]
+    );
+}
