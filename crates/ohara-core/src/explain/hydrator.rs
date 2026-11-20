@@ -315,99 +315,11 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::storage::Storage for TwoCommitStorage {
-        async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> crate::Result<()> {
-            Ok(())
-        }
-        async fn get_index_status(&self, _: &RepoId) -> crate::Result<IndexStatus> {
-            unreachable!()
-        }
-        async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> crate::Result<()> {
-            Ok(())
-        }
-        async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> crate::Result<()> {
-            Ok(())
-        }
-        async fn commit_exists(&self, _: &str) -> crate::Result<bool> {
-            unreachable!()
-        }
-        async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> crate::Result<()> {
-            Ok(())
-        }
-        async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> crate::Result<()> {
-            Ok(())
-        }
-        async fn clear_head_symbols(&self, _: &RepoId) -> crate::Result<()> {
-            unreachable!()
-        }
-        async fn knn_hunks(
-            &self,
-            _: &RepoId,
-            _: &[f32],
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> crate::Result<Vec<HunkHit>> {
-            unreachable!()
-        }
-        async fn bm25_hunks_by_text(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> crate::Result<Vec<HunkHit>> {
-            unreachable!()
-        }
-        async fn bm25_hunks_by_semantic_text(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> crate::Result<Vec<HunkHit>> {
-            unreachable!()
-        }
-        async fn bm25_hunks_by_symbol_name(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> crate::Result<Vec<HunkHit>> {
-            unreachable!()
-        }
-        async fn bm25_hunks_by_historical_symbol(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: u8,
-            _: Option<&str>,
-            _: Option<i64>,
-        ) -> crate::Result<Vec<HunkHit>> {
-            unreachable!()
-        }
-        async fn get_hunk_symbols(
-            &self,
-            _: &RepoId,
-            _: crate::storage::HunkId,
-        ) -> crate::Result<Vec<HunkSymbol>> {
-            unreachable!()
-        }
-        async fn get_hunk_symbols_batch(
-            &self,
-            _: &RepoId,
-            _: &[crate::storage::HunkId],
-        ) -> crate::Result<std::collections::HashMap<crate::storage::HunkId, Vec<HunkSymbol>>>
-        {
-            Ok(std::collections::HashMap::new())
-        }
+    impl crate::storage::StorageExplain for TwoCommitStorage {
         async fn get_commit(&self, _: &RepoId, sha: &str) -> crate::Result<Option<CommitMeta>> {
             Ok(self.commits.get(sha).cloned())
         }
+
         async fn get_hunks_for_file_in_commit(
             &self,
             _: &RepoId,
@@ -416,6 +328,7 @@ mod tests {
         ) -> crate::Result<Vec<Hunk>> {
             Ok(Vec::new()) // include_diff=false, so never called
         }
+
         async fn get_neighboring_file_commits(
             &self,
             _: &RepoId,
@@ -425,27 +338,6 @@ mod tests {
             _: u8,
         ) -> crate::Result<Vec<(u32, CommitMeta)>> {
             Ok(Vec::new())
-        }
-        async fn get_index_metadata(&self, _: &RepoId) -> crate::Result<StoredIndexMetadata> {
-            Ok(StoredIndexMetadata::default())
-        }
-        async fn put_index_metadata(
-            &self,
-            _: &RepoId,
-            _: &[(String, String)],
-        ) -> crate::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[async_trait]
-    impl crate::storage::StorageCache for TwoCommitStorage {
-        async fn blob_was_seen(&self, _: &str, _: &str) -> crate::Result<bool> {
-            Ok(false)
-        }
-
-        async fn record_blob_seen(&self, _: &str, _: &str) -> crate::Result<()> {
-            Ok(())
         }
     }
 
