@@ -344,6 +344,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_commits_removes_a_whole_batch_and_keeps_the_rest() {
+        let (_d, s, id) = setup().await;
+        for h in [A, B, C] {
+            put_commit_with_hunk(&s, &id, h).await;
+        }
+        let deleted = s.delete_commits(&id, &[sha(A), sha(C)]).await.unwrap();
+        assert_eq!(deleted, 2);
+        for t in PRUNED_TABLES {
+            assert_eq!(count(&s, t).await, 1, "{t} keeps only B's row");
+        }
+        assert!(s.commit_exists(B).await.unwrap());
+    }
+
+    #[tokio::test]
     async fn delete_commits_of_unknown_shas_deletes_nothing() {
         let (_d, s, id) = setup().await;
         put_commit_with_hunk(&s, &id, A).await;
