@@ -191,6 +191,24 @@ fn validate(input: &ProposeDecisionInput) -> Result<(), ProposeError> {
             "options: an option is longer than {MAX_OPTION_BYTES} bytes"
         )));
     }
+    if input
+        .runner_up
+        .as_ref()
+        .is_some_and(|r| r.len() > MAX_OPTION_BYTES)
+    {
+        return Err(ProposeError::Invalid(format!(
+            "runner_up: longer than {MAX_OPTION_BYTES} bytes"
+        )));
+    }
+    if input
+        .assumptions
+        .iter()
+        .any(|a| a.text.len() > MAX_QUESTION_BYTES)
+    {
+        return Err(ProposeError::Invalid(format!(
+            "assumptions: an assumption text is longer than {MAX_QUESTION_BYTES} bytes"
+        )));
+    }
     if input.assumptions.len() > MAX_ASSUMPTIONS {
         return Err(ProposeError::Invalid(format!(
             "assumptions: more than {MAX_ASSUMPTIONS} assumptions"
