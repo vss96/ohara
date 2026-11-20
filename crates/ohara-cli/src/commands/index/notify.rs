@@ -28,3 +28,22 @@ pub(super) async fn notify_daemons_of_invalidation(repo_path: &std::path::Path) 
         let _ = Client::connect(&d.socket_path).call(req).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn the_routing_daemon_is_not_notified_again() {
+        let a = PathBuf::from("/s/a.sock");
+        let b = PathBuf::from("/s/b.sock");
+        let all = vec![a.clone(), b.clone()];
+        assert_eq!(sockets_to_notify(all.clone(), None), all);
+        assert_eq!(
+            sockets_to_notify(all, Some(Path::new("/s/a.sock"))),
+            vec![b]
+        );
+        assert!(sockets_to_notify(vec![a], Some(Path::new("/s/a.sock"))).is_empty());
+    }
+}
