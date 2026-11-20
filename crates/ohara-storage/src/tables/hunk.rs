@@ -28,6 +28,29 @@ pub(crate) fn sanitize_fts5_query(query: &str) -> String {
     out.trim().to_string()
 }
 
+/// Build the FTS5 `MATCH` expression for a free-text user query, or
+/// `None` when nothing searchable remains (empty / punctuation-only
+/// input — an empty `MATCH` string is itself an FTS5 syntax error).
+///
+/// Each sanitized token is wrapped in double quotes so FTS5 parses it
+/// as a literal phrase rather than syntax: bare uppercase `AND`, `OR`,
+/// `NOT` and `NEAR` are operators, and `"NOT"` / `"why AND"` /
+/// `"foo AND OR bar"` would otherwise fail to parse. Tokens are still
+/// space-joined (FTS5 implicit AND), so the lanes keep their existing
+/// all-terms semantics. Sanitized tokens contain only word characters,
+/// so no `"` escaping is needed.
+pub(crate) fn fts5_match_query(query: &str) -> Option<String> {
+    let sanitized = sanitize_fts5_query(query);
+    if sanitized.is_empty() {
+        return None;
+    }
+    let quoted: Vec<String> = sanitized
+        .split(' ')
+        .map(|token| format!("\"{token}\""))
+        .collect();
+    Some(quoted.join(" "))
+}
+
 pub fn put_many(c: &mut Connection, records: &[HunkRecord]) -> Result<()> {
     if records.is_empty() {
         return Ok(());
@@ -219,6 +242,9 @@ pub fn bm25_by_semantic_text(
     language: Option<&str>,
     since_unix: Option<i64>,
 ) -> Result<Vec<HunkHit>> {
+    let Some(match_query) = fts5_match_query(query) else {
+        return Ok(Vec::new());
+    };
     let lang_filter = language.map(|_| "AND fp.language = :lang").unwrap_or("");
     let ts_filter = since_unix.map(|_| "AND cr.ts >= :ts").unwrap_or("");
 
@@ -237,7 +263,7 @@ pub fn bm25_by_semantic_text(
     );
 
     let mut binds: Vec<(&str, Box<dyn rusqlite::ToSql>)> = Vec::new();
-    binds.push((":query", Box::new(sanitize_fts5_query(query))));
+    binds.push((":query", Box::new(match_query)));
     binds.push((":k", Box::new(k as i64)));
     if let Some(lang) = language {
         binds.push((":lang", Box::new(lang.to_string())));
@@ -309,6 +335,9 @@ pub fn bm25_by_text(
     language: Option<&str>,
     since_unix: Option<i64>,
 ) -> Result<Vec<HunkHit>> {
+    let Some(match_query) = fts5_match_query(query) else {
+        return Ok(Vec::new());
+    };
     let lang_filter = language.map(|_| "AND fp.language = :lang").unwrap_or("");
     let ts_filter = since_unix.map(|_| "AND cr.ts >= :ts").unwrap_or("");
 
@@ -329,7 +358,7 @@ pub fn bm25_by_text(
     );
 
     let mut binds: Vec<(&str, Box<dyn rusqlite::ToSql>)> = Vec::new();
-    binds.push((":query", Box::new(sanitize_fts5_query(query))));
+    binds.push((":query", Box::new(match_query)));
     binds.push((":k", Box::new(k as i64)));
     if let Some(lang) = language {
         binds.push((":lang", Box::new(lang.to_string())));
@@ -574,6 +603,75 @@ mod proptests {
         matches!(token, "AND" | "OR" | "NOT" | "NEAR")
     }
 
+    #[test]
+    fn bm25_lanes_handle_empty_punctuation_and_operator_queries() {
+        // Regression for #118: these queries raised "fts5: syntax error".
+        let mut c = open_migrated_in_memory();
+        let sha = "b".repeat(40);
+        commit::put(
+            &mut c,
+            &CommitRecord {
+                ulid: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+                meta: CommitMeta {
+                    commit_sha: sha.clone(),
+                    parent_sha: None,
+                    is_merge: false,
+                    author: None,
+                    ts: 1_700_000_000,
+                    message: "m".into(),
+                },
+                message_emb: vec![0.1_f32; 384],
+            },
+        )
+        .unwrap();
+        put_many(
+            &mut c,
+            &[HunkRecord {
+                hunk: Hunk {
+                    commit_sha: sha,
+                    file_path: "src/lib.rs".into(),
+                    language: Some("rust".into()),
+                    change_kind: ChangeKind::Modified,
+                    diff_text: "+retry if not ready and near limit or bail\n".into(),
+                },
+                diff_emb: vec![0.1_f32; 384],
+                semantic_text: "retry if not ready and near limit or bail".into(),
+                symbols: vec![],
+            }],
+        )
+        .unwrap();
+
+        for q in ["", "   ", "???", "`--`"] {
+            assert!(bm25_by_text(&c, q, 5, None, None).unwrap().is_empty());
+            assert!(bm25_by_semantic_text(&c, q, 5, None, None)
+                .unwrap()
+                .is_empty());
+            assert!(symbol::bm25_by_name(&c, q, 5, None, None)
+                .unwrap()
+                .is_empty());
+        }
+        // Uppercase operators are searched as plain (case-folded) terms.
+        for q in ["NOT", "why AND", "retry AND", "foo AND OR bar", "NEAR"] {
+            bm25_by_text(&c, q, 5, None, None).unwrap();
+            bm25_by_semantic_text(&c, q, 5, None, None).unwrap();
+            symbol::bm25_by_name(&c, q, 5, None, None).unwrap();
+        }
+        assert_eq!(
+            bm25_by_text(&c, "retry AND", 5, None, None).unwrap().len(),
+            1
+        );
+        assert_eq!(bm25_by_text(&c, "NOT", 5, None, None).unwrap().len(), 1);
+        assert_eq!(
+            bm25_by_semantic_text(&c, "NEAR limit", 5, None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(bm25_by_text(&c, "why AND", 5, None, None)
+            .unwrap()
+            .is_empty());
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
@@ -655,7 +753,6 @@ mod proptests {
         }
 
         #[test]
-        #[ignore = "tracked in #118: empty/punctuation queries and uppercase FTS5 operators AND/OR/NOT/NEAR cause fts5 syntax errors in bm25 lanes"]
         fn bm25_lanes_never_error_on_arbitrary_user_queries(
             q in prop_oneof![
                 Just(String::new()),

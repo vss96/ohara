@@ -121,6 +121,9 @@ pub fn bm25_by_name(
     language: Option<&str>,
     since_unix: Option<i64>,
 ) -> Result<Vec<HunkHit>> {
+    let Some(match_query) = crate::tables::hunk::fts5_match_query(query) else {
+        return Ok(Vec::new());
+    };
     let sql = build_bm25_sql(language, since_unix);
     // The SQL keeps row 1 per hunk (window function), so LIMIT now bounds
     // distinct hunks. We still oversample by `SYMBOL_LANE_OVERSAMPLE` as
@@ -129,10 +132,7 @@ pub fn bm25_by_name(
     let k_oversample: i64 = i64::from(k) * SYMBOL_LANE_OVERSAMPLE;
 
     let mut binds: Vec<(&str, Box<dyn rusqlite::ToSql>)> = Vec::new();
-    binds.push((
-        ":query",
-        Box::new(crate::tables::hunk::sanitize_fts5_query(query)),
-    ));
+    binds.push((":query", Box::new(match_query)));
     if let Some(lang) = language {
         binds.push((":lang", Box::new(lang.to_string())));
     }
