@@ -8,8 +8,11 @@ use std::sync::{Arc, Mutex};
 /// Default number of `(head, commit)` verdicts kept.
 const DEFAULT_CAPACITY: usize = 65_536;
 
-/// LRU of `(head, commit) -> visible`. Ancestry between two commits never
-/// changes, so entries are never invalidated.
+/// LRU of `(head, commit)` pairs known to be visible. Only `true` verdicts
+/// are kept: once `commit` is an ancestor of `head` it stays one. A `false`
+/// verdict can change (a commit object missing from a shallow or partial
+/// clone may be fetched later, and two clones sharing one engine-wide cache
+/// can hold different objects), so it is asked again every time.
 ///
 /// Thread-safe: the map sits behind a [`Mutex`] so one cache can be shared
 /// by every repo of an engine (keys hold full SHAs).
@@ -47,11 +50,13 @@ impl AncestryCache {
         found
     }
 
-    /// Record verdicts; silently no-ops on a poisoned lock.
+    /// Record the `true` verdicts; silently no-ops on a poisoned lock.
     fn store(&self, head: &CommitSha, commits: &[CommitSha], verdicts: &[bool]) {
         if let Ok(mut g) = self.inner.lock() {
             for (c, v) in commits.iter().zip(verdicts) {
-                g.put((head.clone(), c.clone()), *v);
+                if *v {
+                    g.put((head.clone(), c.clone()), true);
+                }
             }
         }
     }
@@ -149,16 +154,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn second_lookup_is_served_from_cache() {
+    async fn second_lookup_serves_visible_verdicts_from_cache() {
         let (inner, cache, cached) = setup();
         let head = sha('f');
         let q = [sha('a'), sha('b')];
         assert_eq!(cached.visible(&head, &q).await.unwrap(), vec![true, false]);
         assert_eq!(cached.visible(&head, &q).await.unwrap(), vec![true, false]);
         let calls = inner.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1, "inner must be asked once");
+        assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].len(), 2);
-        assert_eq!(cache.hits(), 2);
+        assert_eq!(
+            calls[1],
+            vec![sha('b')],
+            "only the false verdict is asked again"
+        );
+        assert_eq!(cache.hits(), 1);
     }
 
     #[tokio::test]
@@ -175,6 +185,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod false_verdict_tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
@@ -206,12 +217,18 @@ mod false_verdict_tests {
         });
         let cached = CachedVisibility::new(oracle.clone(), Arc::new(AncestryCache::new(16)));
         assert_eq!(
-            cached.visible(&head, &[c.clone()]).await.unwrap(),
+            cached
+                .visible(&head, std::slice::from_ref(&c))
+                .await
+                .unwrap(),
             vec![false]
         );
         oracle.fetched.store(true, Ordering::SeqCst);
         assert_eq!(
-            cached.visible(&head, &[c.clone()]).await.unwrap(),
+            cached
+                .visible(&head, std::slice::from_ref(&c))
+                .await
+                .unwrap(),
             vec![true],
             "a missing object fetched later must become visible"
         );

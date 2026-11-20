@@ -22,6 +22,10 @@ use futures::future::join_all;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+/// On the visibility-filtered path, each lane is asked for this many times
+/// `lane_top_k` candidates (storage caps a lane at 255).
+const VISIBILITY_OVERFETCH: usize = 3;
+
 /// Per-call inputs to [`run`].
 pub struct RunContext<'a> {
     /// The query being served.
@@ -64,8 +68,14 @@ pub async fn run(
     //    without touching storage. Lanes gather up to `lane_top_k`
     //    candidates each (the documented per-lane fan-in for RRF);
     //    the caller's `final_k` truncation is applied at step 6 only.
+    //    On the filtered path each lane over-fetches, because invisible
+    //    hits are dropped next and must not take a lane's top-k slots.
     let lane_k = weights.lane_top_k as usize;
-    let lane_futures = lanes.iter().map(|l| l.search(query, repo_id, lane_k));
+    let fetch_k = match visibility {
+        Some(_) => lane_k.saturating_mul(VISIBILITY_OVERFETCH),
+        None => lane_k,
+    };
+    let lane_futures = lanes.iter().map(|l| l.search(query, repo_id, fetch_k));
     let lane_results: Vec<crate::Result<Vec<HunkHit>>> = join_all(lane_futures).await;
 
     // 2. Build per-lane ranked id lists + a HunkId -> Arc<HunkHit> lookup.
@@ -90,9 +100,14 @@ pub async fn run(
     }
 
     // 2b. Drop candidates the querying worktree cannot see, before the
-    //     rerank pool is cut so invisible hits never crowd out visible ones.
+    //     rerank pool is cut, then cut each ranking back to `lane_k`. The
+    //     over-fetch bounds how many invisible hits a lane can absorb: a
+    //     lane whose top `fetch_k` are all invisible still loses recall.
     if let Some(scope) = visibility {
         retain_visible(&mut rankings, &mut by_id, scope).await?;
+        for ranking in &mut rankings {
+            ranking.truncate(lane_k);
+        }
     }
 
     // 3. RRF fuse + truncate to rerank pool. `fuse_to_pool` shares hits
