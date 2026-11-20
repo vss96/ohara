@@ -428,6 +428,7 @@ async fn index_checkout(path: &Path) {
         ))
         .with_tip_context(ohara_core::TipContext {
             tips: sqlite.clone(),
+            visibility: Arc::new(ohara_git::GitVisibility::open(&id.worktree_path).unwrap()),
             worktree: id.worktree.clone(),
             head: ohara_core::CommitSha::parse(&head).unwrap(),
         });
@@ -1140,4 +1141,69 @@ async fn find_pattern_from_a_linked_worktree_on_an_unborn_branch_is_not_an_error
         .await
         .expect("unborn worktree HEAD must not be an error");
     assert!(out.hits.is_empty(), "got {:?}", out.hits);
+}
+
+// ---- plan-33 final review I1: retired tips ----
+
+/// Point `repo`'s HEAD at a new branch `name` created at `at`, and check it out.
+fn switch_to_new_branch(repo: &git2::Repository, name: &str, at: git2::Oid) {
+    let commit = repo.find_commit(at).unwrap();
+    repo.branch(name, &commit, true).unwrap();
+    repo.set_head(&format!("refs/heads/{name}")).unwrap();
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .unwrap();
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn reused_slot_merged_into_main_does_not_leak_the_old_run() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (main, slot1) = repo_with_worktree().await;
+    let main_repo = git2::Repository::open(main.path()).unwrap();
+    let main_head = main_repo.head().unwrap().peel_to_commit().unwrap().id();
+
+    // Run A on slot-1: a1, a2, indexed.
+    let wt = git2::Repository::open(&slot1).unwrap();
+    let a1 = commit_file(
+        &wt,
+        "retry.rs",
+        "fn frobnicate_retry() { /* frobnicate retry with backoff */ }\n",
+        "run A: frobnicate retry",
+    );
+    let a2 = commit_file(
+        &wt,
+        "retry2.rs",
+        "fn frobnicate_retry_again() { /* frobnicate retry jitter */ }\n",
+        "run A: frobnicate retry jitter",
+    );
+    index_checkout(&slot1).await;
+
+    // Slot reused for run B (from main), c1 indexed, then merged into main.
+    switch_to_new_branch(&wt, "run-b", main_head);
+    let c1 = commit_file(&wt, "c.rs", "fn three() {}\n", "run B");
+    index_checkout(&slot1).await;
+    let branch = main_repo.head().unwrap().name().unwrap().to_string();
+    main_repo
+        .reference(&branch, c1, true, "merge run B")
+        .unwrap();
+    main_repo
+        .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .unwrap();
+    index_checkout(main.path()).await;
+
+    let engine = make_test_engine();
+    let out = engine
+        .find_pattern(main.path(), frobnicate_query())
+        .await
+        .expect("find_pattern");
+    let leaked: Vec<_> = out
+        .hits
+        .iter()
+        .filter(|h| h.commit_sha == a1.to_string() || h.commit_sha == a2.to_string())
+        .map(|h| h.commit_sha.clone())
+        .collect();
+    assert!(leaked.is_empty(), "run A leaked into main: {leaked:?}");
+    assert!(engine.ancestry_filtered_queries() >= 1);
 }

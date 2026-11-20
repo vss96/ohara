@@ -157,6 +157,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retired_tip_round_trips_and_does_not_touch_the_main_tip() {
+        let (_d, s, id) = setup().await;
+        s.set_indexed_tip(&id, &WorktreeKey::main(), &sha(A))
+            .await
+            .unwrap();
+        let retired = WorktreeKey::retired(&WorktreeKey::main(), &sha(B));
+        s.set_indexed_tip(&id, &retired, &sha(B)).await.unwrap();
+        let listed = s.indexed_tips(&id).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed
+            .iter()
+            .any(|t| t.worktree == retired && t.worktree.is_retired() && t.sha == sha(B)));
+        let st = s.get_index_status(&id).await.unwrap();
+        assert_eq!(st.last_indexed_commit.as_deref(), Some(A));
+        s.remove_indexed_tip(&id, &retired).await.unwrap();
+        assert_eq!(s.indexed_tips(&id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn tips_route_through_the_single_writer_pool() {
         let (_d, s, id) = setup().await;
         let s = Arc::new(s);
