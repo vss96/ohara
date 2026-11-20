@@ -60,7 +60,7 @@ explicit record of what was decided without them.
 
 **Non-goals (for now)**
 - Multi-user or hosted service, a remotely reachable UI, chat triggers.
-  The local UI in §12a is in scope.
+  The installable desktop app in §12a is in scope.
 - Our own LLM client or agent loop. Headless CLIs (`claude`, `codex`,
   `agy`, or any CLI through the generic adapter) stay behind the trait
   (§8a).
@@ -399,9 +399,11 @@ memory's effect is measured with `ohara eval` (earlier spec §10).
 
 **Workflows** are saved task shapes: a contract template, typical
 frontiers and default rubrics for a kind of task ("add a CLI subcommand",
-"literature review", "schema migration"). A workflow is saved from a
-successful run whose decisions were upheld. It is suggested when drafting
-the contract for a similar outcome. Workflows are data, not code.
+"literature review", "schema migration"). Workflows are personal
+config in `~/.ohara/workflows/`, authored in the app (§12a) and seeded
+with bug / feature / research starters. A successful run whose decisions
+were upheld can propose edits to its workflow. Workflows are data, not
+code.
 
 **The ohara index** is used at three points:
 - **Contract drafting.** It suggests scripts from how similar past changes
@@ -437,49 +439,88 @@ bundle in the task repo otherwise. It includes a summary:
 `ohara task review <id>` lets the person mark each decision upheld or
 overturned, with a note. Those verdicts feed memory (§11).
 
-### 12a. Local web UI (decided by the user: interacting with tasks and seeing what's going on)
+### 12a. The app: a desktop harness built on synapse (decided by the user)
 
-The UI makes it easier to work with tasks and to see what is happening.
-It is a window onto the supervisor, not a second brain. Every rule stays
-in the Rust supervisor. The UI reads `harness.sqlite` and git, and writes
-only the human inputs the CLI can also write.
+**Shape (decided by the user).**
+- ohara ships to people as an installable desktop app: a macOS `.dmg`
+  first. People install it and use it as their harness.
+- The UI piggybacks on **synapse** (the user's live mindmap tool, `~/Documents/synapse`):
+  one window, where long-running harness tasks show as mindmaps next to
+  ordinary agent sessions.
+- The UI is for **acting**, not only watching: start tasks, design
+  workflows per kind of task (bug, feature, research, ...), approve
+  contracts, give verdicts, stop runs.
 
-It is served by the existing `ohara serve` daemon on `127.0.0.1` only,
-with a per-session token printed by `ohara ui`. The page updates live
-through server-sent events from the run log.
+**Layers.**
+- **Synapse is the shell and the canvas.** It owns the window, the
+  sessions list (grouped by repo and worktree, as it already does), the
+  live mindmap rendering and the activity stream.
+- **ohara is the data and the actions.**
+  - *Data:* the supervisor writes a one-way projection of each task into a
+    synapse mindmap. `harness.sqlite` stays the single source of truth.
 
-Screens:
-- **Tasks.** All tasks, each with its state, a time bar and a cost bar.
-  Includes a "new task" form (outcome, deadline, roles preset), the same
-  as `ohara task`.
-- **Contract approval.** The drafted scripts, rubric criteria with pass
-  marks, budget and protected paths, all editable. One Approve button
-  freezes the contract and starts the clock. This is the same action as
-  `ohara task approve --edit`.
-- **Live run.**
-  - the current phase and round
-  - the decision frontier: settled, exploring, reopened or frozen
-  - running POCs, with their runtime and model
-  - the latest script results
-  - the tail of the active agent's output
-  - a stop button, which is the same action as `ohara task stop`
-- **Decision review.**
-  - The decision trail, most consequential first.
-  - Each decision opens to show its options, POC diffs side by side, and
-    the judge's rubric, scores and rationale.
-  - It also shows the assumptions and their check status, any reversal
-    chain (superseded → replacement), and which runtime did what.
-  - Per decision there are Upheld and Overturned buttons with a note.
-    These feed memory exactly as `ohara task review` does.
+    | harness | synapse |
+    |---|---|
+    | task | mindmap (session) |
+    | round / increment | plan task (with status) |
+    | decision | `decision` card; each POC a child with runtime and judge score |
+    | assumption | `hypothesis` card, marked passing or failing |
+    | reopened decision | "superseded by" link to its replacement |
+    | files changed | synapse file touches (agents also narrate via synapse MCP tools) |
+
+  - *Actions:* ohara contributes panels to the synapse viewer: **New
+    task**, **Workflows**, **Contract approval**, **Decision review**
+    (Upheld / Overturned with a note) and **Stop**. Each button calls the
+    ohara daemon's local API. Synapse decides nothing.
+- **Synapse stays standalone.** The ohara panels and the "ohara tasks"
+  session group appear only when the viewer detects an ohara daemon.
+  Without one, synapse behaves exactly as it does today, and stays
+  publishable on npm on its own.
+- **The extension point is the only synapse change ohara needs:** a way for
+  a detected tool to register panels and a session group, plus the
+  harness card fields (judge scores, contract state). That is specified in
+  synapse's own repo, as its own small PRs.
+
+**Packaging (builder's call, proposed).**
+- A **Tauri** app shell: native Rust, so it fits the workspace. Its
+  webview hosts the synapse viewer.
+- `ohara`, `ohara-mcp` and the daemon ship inside the bundle as sidecars.
+  The synapse viewer server ships as a single compiled binary (`bun build
+  --compile`), so the user needs no Node install.
+- The app starts the daemon at launch and stops it on quit. The CLI stays
+  installable separately (`brew`/cargo) and talks to the same daemon.
+- The agent CLIs (`claude`, `codex`, `agy`) are **not** bundled. The app
+  detects which are installed and signed in, and the Runtimes screen shows
+  what's missing.
+- Signing and notarization are required for a `.dmg` people download.
+  Updates via the Tauri updater.
+
+**Workflows are personal config (decided by the user).**
+- They live in the user's ohara config directory
+  (`~/.ohara/workflows/<name>.toml`), not in repos.
+- A workflow holds the defaults a new task of that kind starts from:
+  contract template (scripts, rubric), `[roles]` runtime mix (§8a),
+  whether POCs and the judge are used, time budget, diff budget, delivery
+  style, and how heavily to use the ohara index.
+- Built-in starters ship with the app: **bug** (a failing reproduction test
+  must exist before the fix; no POCs; small diff budget; heavy
+  `explain_change`), **feature** (tests plus design rubric; POCs on design
+  decisions; stacked PRs; `find_pattern` for prior art) and **research**
+  (rubric: claims sourced, question answered; breadth-first over sources;
+  report bundle).
+- The Workflows panel edits these files; hand-editing works too.
+  Workflows learned from runs (§11) arrive as suggested edits the user
+  accepts in the panel.
 
 Rules:
 - **CLI parity.** Every UI action has a CLI equivalent, and the CLI stays
   first-class for scripts, hooks and agents.
-- **Contract edits only before approval.** The UI cannot edit the
-  contract after it is frozen, and it cannot edit decision records.
+- **Contract edits only before approval.** The UI cannot edit the contract
+  after it is frozen, and it cannot edit decision records.
+- **Local only.** The daemon API listens on a Unix socket / `127.0.0.1`
+  with a per-launch token. No remote access.
 - **Static fallback.** At hand-back, a self-contained HTML copy of the
-  review screen is written to the run directory, so a finished task can
-  be reviewed with no daemon running.
+  review is written to the run directory.
 
 ## 13. Supervisor phases as data
 
@@ -536,12 +577,18 @@ shared index store is built. Decided by the user:
    - Needs the CONTRIBUTING §9 amendment for a second SQLite file
      (earlier spec open question 4).
    - Writes the static HTML review page at hand-back.
-1b. **Local UI.**
-   - Ships straight after phase 1, before POCs, because seeing what a
-     long run is doing matters from the first real task.
-   - Contains the Tasks, Contract approval, Live run and Decision review
-     screens (§12a).
+1b. **The app.**
+   - Synapse extension point (panels + session group + harness card
+     fields), in the synapse repo.
+   - The task → mindmap projection and the daemon's local action API.
+   - The ohara panels: New task, Workflows (with the three starters),
+     Contract approval, Decision review, Stop.
+   - Tauri shell, sidecars, signed and notarized `.dmg`.
    - The POC and reversal views fill in as phases 2 and 3 land.
+   - **Sandbox note:** phase 1 runs agents with the user's own permissions
+     (accepted for the user's own use). Before the `.dmg` goes to other
+     people, the phase-2 sandbox should land, or the app must say plainly
+     that agents run unsandboxed.
 2. **POCs, judge and isolation.**
    - Brings in the earlier spec's warm slot pool and srt sandbox, since
      parallel POCs need several slots anyway.
