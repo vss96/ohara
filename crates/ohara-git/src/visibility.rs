@@ -1,3 +1,105 @@
+//! Commit reachability over libgit2: the [`GitVisibility`] oracle used to
+//! scope retrieval to a worktree's HEAD, and [`reachable_commit_shas`] for pruning.
+
+use anyhow::{anyhow, Result};
+use ohara_core::{CommitSha, CommitVisibility, OhraError};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+/// [`CommitVisibility`] backed by libgit2 ancestry checks.
+pub struct GitVisibility {
+    repo_path: PathBuf,
+}
+
+impl GitVisibility {
+    /// Validate that a repository can be discovered at `path`.
+    pub fn open(path: &Path) -> Result<Self> {
+        git2::Repository::discover(path).map_err(|e| anyhow!("discover repo: {e}"))?;
+        Ok(Self {
+            repo_path: path.to_path_buf(),
+        })
+    }
+}
+
+fn visible_blocking(path: &Path, head: &str, commits: &[String]) -> Result<Vec<bool>> {
+    let repo = git2::Repository::discover(path)?;
+    let head_oid = git2::Oid::from_str(head)?;
+    repo.find_commit(head_oid)
+        .map_err(|e| anyhow!("head {head} not found: {e}"))?;
+    let mut out = Vec::with_capacity(commits.len());
+    for c in commits {
+        let Ok(oid) = git2::Oid::from_str(c) else {
+            out.push(false);
+            continue;
+        };
+        if repo.find_commit(oid).is_err() {
+            out.push(false);
+            continue;
+        }
+        out.push(oid == head_oid || repo.graph_descendant_of(head_oid, oid)?);
+    }
+    Ok(out)
+}
+
+#[async_trait::async_trait]
+impl CommitVisibility for GitVisibility {
+    async fn visible(
+        &self,
+        head: &CommitSha,
+        commits: &[CommitSha],
+    ) -> ohara_core::Result<Vec<bool>> {
+        let path = self.repo_path.clone();
+        let head = head.as_str().to_string();
+        let commits: Vec<String> = commits.iter().map(|c| c.as_str().to_string()).collect();
+        tokio::task::spawn_blocking(move || visible_blocking(&path, &head, &commits))
+            .await
+            .map_err(|e| OhraError::Git(format!("visible: join: {e}")))?
+            .map_err(|e| OhraError::Git(format!("visible: {e}")))
+    }
+}
+
+/// Every commit reachable from any ref (`refs/*`) or from any worktree's HEAD,
+/// including detached ones. Used by prune. Works from the main repo path or
+/// from a linked worktree path.
+pub fn reachable_commit_shas(path: &Path) -> Result<HashSet<String>> {
+    let repo = git2::Repository::discover(path)?;
+    // Linked worktree: enumerate from the main repository that owns it.
+    let main = match repo.is_worktree() {
+        true => {
+            // `.git/worktrees/<name>/` -> the shared `.git` dir two levels up.
+            let common = repo
+                .path()
+                .parent()
+                .and_then(Path::parent)
+                .ok_or_else(|| anyhow!("worktree gitdir has no common dir"))?;
+            git2::Repository::open(common)?
+        }
+        false => repo,
+    };
+    let mut walk = main.revwalk()?;
+    walk.push_glob("refs/*")?;
+    let _ = walk.push_head();
+    for name in main.worktrees()?.iter().flatten() {
+        let Ok(wt) = main.find_worktree(name) else {
+            continue;
+        };
+        let Ok(wt_repo) = git2::Repository::open_from_worktree(&wt) else {
+            continue;
+        };
+        let Ok(head) = wt_repo.head() else {
+            continue;
+        };
+        if let Some(oid) = head.target() {
+            let _ = walk.push(oid);
+        }
+    }
+    let mut out = HashSet::new();
+    for oid in walk {
+        out.insert(oid?.to_string());
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
