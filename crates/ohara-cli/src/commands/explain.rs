@@ -47,8 +47,15 @@ async fn run_standalone(canonical: &Path, q: ExplainQuery) -> Result<ExplainResu
     let storage =
         Arc::new(timed_phase("storage_open", ohara_storage::SqliteStorage::open(&db_path)).await?);
     let blamer = timed_phase("blamer_open", async { Blamer::open(canonical) }).await?;
-    let (hits, meta) =
-        ohara_core::explain::explain_change(storage.as_ref(), &blamer, &repo_id, &q).await?;
+    // Same git fallback as the daemon path, so `--no-daemon` answers alike.
+    let (hits, meta) = ohara_core::explain::explain_change_with_fallback(
+        storage.as_ref(),
+        &blamer,
+        Some(&blamer),
+        &repo_id,
+        &q,
+    )
+    .await?;
     Ok(ExplainResult { hits, meta })
 }
 

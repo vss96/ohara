@@ -170,6 +170,19 @@ pub async fn explain_change(
     repo_id: &RepoId,
     query: &ExplainQuery,
 ) -> Result<(Vec<ExplainHit>, ExplainMeta)> {
+    explain_change_with_fallback(storage, blamer, None, repo_id, query).await
+}
+
+/// [`explain_change`] with a git metadata fallback for blamed commits the
+/// index does not hold yet, matching what the engine (daemon) path does.
+/// Standalone callers pass their blamer (it implements [`CommitLookup`]).
+pub async fn explain_change_with_fallback(
+    storage: &dyn Storage,
+    blamer: &dyn BlameSource,
+    git_fallback: Option<&dyn CommitLookup>,
+    repo_id: &RepoId,
+    query: &ExplainQuery,
+) -> Result<(Vec<ExplainHit>, ExplainMeta)> {
     let raw_blame = timed_phase(
         "blame",
         blamer.blame_range(&query.file, query.line_start, query.line_end),
@@ -183,7 +196,7 @@ pub async fn explain_change(
             blame_ranges: raw_blame,
             query,
             repo_id,
-            git_fallback: None,
+            git_fallback,
         }),
     )
     .await?;
