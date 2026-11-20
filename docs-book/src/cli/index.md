@@ -134,6 +134,11 @@ each worktree only see commits its own `HEAD` reaches.
   `--embed-cache`, a non-CPU `--embed-provider`), `--force` and
   `--rebuild` always run in-process.
 
+- Commits that no branch, tag or worktree reaches any more (deleted
+  branches, removed worktrees, rewritten history) stay indexed until
+  [`ohara prune`](./prune.md) runs; a running daemon prunes on its own
+  after an index job when the repo has a retired tip.
+
 See [Worktrees and the daemon writer](../architecture/indexing.md#worktrees-and-the-daemon-writer)
 for the details and known limits.
 

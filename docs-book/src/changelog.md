@@ -29,7 +29,15 @@ A git clone and all of its linked worktrees now share one index.
 - **Retired tips.** When a worktree moves off its indexed commits
   (branch switch, reset, a reused slot), its old tip is kept as a
   retired tip so those commits stay behind the visibility filter;
-  prune drops it once its branch is gone.
+  prune drops it once its branch is gone. The daemon prunes after an
+  index job whenever a retired tip exists.
+- **`ohara prune [PATH]`** removes index rows for commits no branch,
+  tag or worktree reaches any more. It runs on a same-version daemon
+  when one is running, else in-process without loading any model.
+- **HEAD-symbol snapshot replaced atomically.** Every pass extracts
+  first and then swaps the snapshot in one transaction, so a failed
+  extraction keeps the previous snapshot and queries never see an
+  empty head-symbol lane. `--force` no longer clears symbols up front.
 - **`--rebuild` in a linked worktree** warns that it drops the index
   shared by every worktree of the clone.
 - **The daemon indexes incremental work.** When a same-version

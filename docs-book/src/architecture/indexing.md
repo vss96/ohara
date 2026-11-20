@@ -174,7 +174,9 @@ The daemon's index work:
   tidy the tips: a retired tip is dropped once nothing reaches it; a
   linked worktree that no longer exists has its tip retired while a
   ref still reaches it, and dropped otherwise. The main tip is never
-  dropped.
+  dropped. [`ohara prune`](../cli/prune.md) sends this to a running
+  same-version daemon, or runs the same step in-process (no models
+  loaded) when none is reachable.
 
 The main checkout is never treated as covered before it has its own
 tip: its first `EnsureIndexed` (or `ohara index --incremental`) runs a
@@ -195,7 +197,11 @@ would make every tip visible from main, the filter would be skipped,
 and the old run's unmerged commits would leak into main's results.
 They are not worktrees: `status`, a worktree's own-tip lookup and
 `_meta.index_status` ignore them. Prune drops a retired tip once no
-ref reaches it (its commits are pruned in the same pass).
+ref reaches it (its commits are pruned in the same pass). After each
+successful index job the daemon prunes, under the same per-repo job
+lock, whenever the repo has a retired tip; a failed auto-prune is
+logged and does not fail the index job. Without a daemon, run
+[`ohara prune`](../cli/prune.md).
 
 Jobs are serialised per repository. The daemon never builds an index
 from scratch (run `ohara index` once first), and it refuses to write
@@ -342,8 +348,16 @@ becomes the dominant per-commit cost, fanning out across workers.
   worktree that *moves* off indexed commits is covered: its old tip is
   kept as a [retired tip](#retired-tips). Commits that never got a tip
   at all are not.)
+- **Retired tips keep the filter on until a prune runs.** Every
+  reset, amend or rebase of an indexed worktree leaves a retired tip.
+  One that the querying `HEAD` can't reach keeps retrieval on the
+  (slower) visibility-filtered path until a prune removes it. The
+  daemon prunes after each index job when a retired tip exists; an
+  index run only by the CLI (no daemon) needs an explicit
+  [`ohara prune`](../cli/prune.md).
 - **No cross-process writer lock.** The daemon serialises its own
-  jobs, but a CLI `--force` or `--rebuild`, or a second daemon
+  jobs, but a CLI `--force` or `--rebuild`, an in-process
+  `ohara prune`, or a second daemon
   briefly overlapping the first during shutdown or a version upgrade,
   can write while the daemon does. SQLite keeps the data consistent;
   expect `SQLITE_BUSY` errors or duplicated work.
