@@ -1295,13 +1295,11 @@ async fn prune_retires_a_removed_worktrees_tip_while_its_branch_survives() {
 // ---- plan-33 final review I3: HEAD-symbol ownership ----
 
 /// Names in the shared HEAD-symbol snapshot of the repo at `path`.
-fn head_symbol_names(path: &Path) -> Vec<String> {
+async fn head_symbol_names(path: &Path) -> Vec<String> {
     let id = ohara_git::RepoIdentity::resolve(path).unwrap();
     let db_path = ohara_core::paths::index_db_path(&id.repo_id).unwrap();
-    let c = rusqlite::Connection::open(db_path).unwrap();
-    let mut stmt = c.prepare("SELECT name FROM symbol ORDER BY name").unwrap();
-    let rows = stmt.query_map([], |r| r.get(0)).unwrap();
-    rows.map(Result::unwrap).collect()
+    let sqlite = ohara_storage::SqliteStorage::open(&db_path).await.unwrap();
+    sqlite.head_symbol_names().await.unwrap()
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -1324,7 +1322,9 @@ async fn main_indexes_after_a_linked_first_index_and_takes_over_head_symbols() {
     // Linked worktree indexes first: with no main tip it owns HEAD symbols.
     index_checkout(&slot1).await;
     assert!(tip_of(main.path()).await.is_none());
-    assert!(head_symbol_names(main.path()).contains(&"slot_only".to_string()));
+    assert!(head_symbol_names(main.path())
+        .await
+        .contains(&"slot_only".to_string()));
 
     // Main's HEAD is covered by slot-1's tip, yet main must still run.
     let (_rec, engine) = recording_engine();
@@ -1334,7 +1334,7 @@ async fn main_indexes_after_a_linked_first_index_and_takes_over_head_symbols() {
         .expect("ensure_indexed");
     assert!(out.indexed, "main without a tip must index");
     assert_eq!(tip_of(main.path()).await, Some(main_head.to_string()));
-    let names = head_symbol_names(main.path());
+    let names = head_symbol_names(main.path()).await;
     assert!(names.contains(&"two".to_string()), "got {names:?}");
     assert!(!names.contains(&"slot_only".to_string()), "got {names:?}");
 }
@@ -1351,7 +1351,7 @@ async fn repeated_incremental_runs_replace_head_symbols_without_duplicates() {
     index_checkout(main.path()).await;
     commit_file(&repo, "d.rs", "fn four() {}\n", "fourth");
     index_checkout(main.path()).await;
-    let names = head_symbol_names(main.path());
+    let names = head_symbol_names(main.path()).await;
     let unique: std::collections::HashSet<&String> = names.iter().collect();
     assert_eq!(unique.len(), names.len(), "duplicates: {names:?}");
     assert!(names.contains(&"four".to_string()), "got {names:?}");

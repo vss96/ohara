@@ -2065,3 +2065,45 @@ mod metrics_tests {
         assert!(elapsed > 0, "elapsed_us should be non-zero after a call");
     }
 }
+
+#[cfg(test)]
+mod head_symbol_listing_tests {
+    use super::*;
+    use ohara_core::types::SymbolKind;
+
+    fn sym(name: &str) -> Symbol {
+        Symbol {
+            file_path: "src/a.rs".into(),
+            language: "rust".into(),
+            kind: SymbolKind::Function,
+            name: name.into(),
+            qualified_name: None,
+            sibling_names: Vec::new(),
+            span_start: 0,
+            span_end: 1,
+            blob_sha: "b".into(),
+            source_text: format!("fn {name}() {{}}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn head_symbol_names_lists_the_current_snapshot_sorted() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = SqliteStorage::open(dir.path().join("i.sqlite"))
+            .await
+            .unwrap();
+        let id = RepoId::from_parts("first", "/repo");
+        s.open_repo(&id, "/repo", "first").await.unwrap();
+        assert!(s.head_symbol_names().await.unwrap().is_empty());
+        s.put_head_symbols(&id, &[sym("zeta"), sym("alpha")])
+            .await
+            .unwrap();
+        s.put_head_symbols(&id, &[sym("beta"), sym("alpha")])
+            .await
+            .unwrap();
+        assert_eq!(
+            s.head_symbol_names().await.unwrap(),
+            vec!["alpha".to_string(), "beta".to_string()]
+        );
+    }
+}
