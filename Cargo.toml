@@ -81,3 +81,16 @@ codegen-units = 1
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# Dev-profile debug info, sized for disk (issue #139). A clean
+# `cargo build --workspace --all-targets` + `cargo test --no-run` went from
+# 5.4 GiB / 62 s to 3.8 GiB / 43 s. Backtraces keep file:line; debugger
+# variable inspection needs `CARGO_PROFILE_DEV_DEBUG=true` for that build.
+[profile.dev]
+debug = "line-tables-only"
+
+# Third-party crates: no debug info at all. Stepping into fastembed / ort /
+# tree-sitter internals is rare, and on macOS their unpacked debuginfo
+# objects were the largest single chunk of `target/`.
+[profile.dev.package."*"]
+debug = false
