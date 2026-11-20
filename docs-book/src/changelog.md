@@ -4,6 +4,45 @@ User-facing release notes. The full commit log lives on
 [GitHub](https://github.com/vss96/ohara/commits/main); this page is
 the highlights.
 
+## Unreleased — Shared worktree store
+
+A git clone and all of its linked worktrees now share one index.
+
+- **One index per clone.** `ohara index`, `status`, `explain` and the
+  MCP tools resolve a linked worktree (`git worktree add`) to its main
+  clone's index. Plain clones keep their existing index id, so nothing
+  needs re-indexing.
+- **Per-worktree tips.** A new `indexed_tip` table (migration V7)
+  records how far each worktree has been indexed, replacing the single
+  `repo.last_indexed_commit` watermark (backfilled automatically).
+  Indexing a worktree embeds only the commits no other worktree has
+  indexed yet.
+- **Worktree-scoped results.** `find_pattern` only returns commits the
+  querying worktree's `HEAD` can reach. When every indexed tip is
+  reachable — always the case with one checkout — the filter is
+  skipped, so single-checkout results are unchanged.
+- **HEAD symbols follow the main checkout.** Indexing from a linked
+  worktree never replaces the head-snapshot symbols; `--force` there
+  says so and leaves them alone.
+- **The daemon indexes incremental work.** When a same-version
+  `ohara serve` daemon is running, `ohara index --incremental` hands
+  the pass to it. The daemon also serves `EnsureIndexed`, `IndexTip`
+  and `PruneUnreachable` over its socket, and refuses to write unless
+  the index and its loaded embedder are fully compatible.
+- **`ohara status`** prints `worktree: <name> (shared index)` inside a
+  linked worktree, and `commits_behind_head` is computed per worktree.
+- **`explain_change`** returns commits that blame finds but the index
+  doesn't have yet, with metadata from git and no diff excerpt, and
+  says so in `limitation`.
+
+Known limits: a failed index pass can leave stored commits without a
+tip, which other worktrees may see until the next clean pass or a
+prune; there is no cross-process writer lock (CLI `--force` /
+`--rebuild` or an overlapping second daemon can hit `SQLITE_BUSY`);
+and a worktree git can't open is skipped when computing reachability,
+so its commits can be pruned. See
+[Indexing → Known limits](./architecture/indexing.md#known-limits).
+
 ## v0.7.1 — Release CI token scope
 
 No user-facing binary changes. Fixes GitHub Actions `GITHUB_TOKEN`

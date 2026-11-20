@@ -1,8 +1,8 @@
 # `ohara status`
 
-Print the current freshness of a repo's index: where the watermark
-is, when it was last updated, and how many commits exist on `HEAD`
-that the index hasn't seen yet.
+Print the current freshness of a repo's index: the newest indexed
+commit, when the index was last updated, and how many commits on this
+checkout's `HEAD` the index hasn't seen yet.
 
 ## Usage
 
@@ -31,10 +31,33 @@ commits_behind_head: 0
 compatibility: compatible
 ```
 
-`commits_behind_head` is computed against the current `HEAD` — a
-non-zero value means `ohara index --incremental` has work to do.
-`<none>` for `last_indexed_commit` / `indexed_at` means the repo
-hasn't been indexed yet; run `ohara index`.
+`commits_behind_head` is computed against the `HEAD` of the checkout
+you run it in: it counts the commits reachable from that `HEAD` that
+no worktree's indexed tip covers. A non-zero value means
+`ohara index --incremental` has work to do here. `<none>` for
+`last_indexed_commit` / `indexed_at` means the repo hasn't been
+indexed yet; run `ohara index`.
+
+### Worktrees
+
+A linked git worktree shares its main clone's index, so `status` run
+inside one reports the main clone's `id` and adds a line naming
+the worktree:
+
+```
+repo: /Users/alex/code/my-service-wt/feature-x
+id: 9f1a3b2c8d4e5f6a
+last_indexed_commit: c3d4e5f6a7b8...
+indexed_at: 2026-04-30T18:20:00Z
+commits_behind_head: 2
+compatibility: compatible
+worktree: feature-x (shared index)
+```
+
+`commits_behind_head` is per worktree (each checkout has its own
+`HEAD`); `last_indexed_commit`, `indexed_at` and `compatibility`
+describe the shared index. The main checkout prints no `worktree:`
+line.
 
 ### Compatibility line (v0.7+)
 

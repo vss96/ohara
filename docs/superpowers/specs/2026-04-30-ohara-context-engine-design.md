@@ -92,8 +92,8 @@ ohara/
 ### Key invariants
 
 - **`ohara-mcp` is read-only.** It never indexes, never mutates SQLite. If the index is stale, it surfaces that fact in tool responses but does not try to fix it itself. Indexing in the MCP request path would blow latency budgets unpredictably and create lock contention.
-- **Indexing happens via the CLI, period.** Triggered by user, by git hooks, or by a future cron / shared-index server. One write path; simpler concurrency story.
-- **`<repo-id>` is `hash(first_commit_sha + canonical_path)`.** Stable across renames; unique across multiple clones of the same repo on the same machine.
+- ~~**Indexing happens via the CLI, period.** Triggered by user, by git hooks, or by a future cron / shared-index server. One write path; simpler concurrency story.~~ *(2026-11-20, plan-33: a running `ohara serve` daemon is now also an index writer for incremental work. `ohara index --incremental` hands its pass to a running same-version daemon, and the daemon serves `EnsureIndexed` / `IndexTip` / `PruneUnreachable`, serialising jobs per repo. Full builds, `--force` and `--rebuild` still run in the CLI, and `ohara-mcp` still never writes.)*
+- **`<repo-id>` is `hash(first_commit_sha + canonical_path)`.** Stable across renames; unique across multiple clones of the same repo on the same machine. *(2026-11-20, plan-33: a linked git worktree hashes its main clone's path, so a clone and its worktrees share one `<repo-id>` and one index; plain-clone ids are unchanged.)*
 - **Originally no daemon (v1).** The MCP server lived only as long as Claude Code kept it spawned. As of v0.7.5 / plan-16, `ohara serve` provides an optional Unix-socket daemon that keeps the embedder and per-repo storage warm; indexing remains one-shot CLI invocations. See plan-16 for the daemon design and shipping commit (21bc1af).
 
 ### Concurrency model

@@ -15,6 +15,9 @@ find_pattern(query, k=5)
     └─► FTS5 symbol-name top-100 (BM25 on tree-sitter symbol names)
     │
     ▼
+Worktree visibility filter (drop commits the querying HEAD can't reach)
+    │
+    ▼
 Reciprocal Rank Fusion (k = 60) → top-50 candidates
     │
     ▼
@@ -37,6 +40,29 @@ Dispatched in parallel via `tokio::join!` from the `Retriever`:
   identifiers from HEAD. Top-100.
 
 Each lane returns a best-first list of `HunkId`s.
+
+## Worktree visibility filter
+
+A git clone and its linked worktrees share one index, so the index can
+hold commits that only another worktree's branch contains. Before
+fusion, the retriever drops every candidate whose commit is not the
+querying worktree's `HEAD` or one of its ancestors. It runs before the
+rerank pool is cut, so invisible hits never crowd out visible ones;
+lane sizes are unchanged.
+
+- **Fast path.** First the engine checks every worktree's indexed tip
+  against the querying `HEAD`. When all of them are reachable (always
+  the case with a single checkout) no candidate can be invisible, and
+  the filter is skipped entirely.
+- **Filtered path.** Otherwise the distinct commits among the
+  candidates are checked in one batch with libgit2 ancestry tests.
+  Verdicts are kept in an engine-wide LRU keyed by
+  `(head, commit)` (65,536 entries); ancestry between two commits
+  never changes, so entries are never invalidated.
+
+Visibility is keyed on the `HEAD` commit, never on a branch name, so
+detached-`HEAD` worktrees work the same way. The filter adds well under
+5 ms at p95 (`tests/perf/visibility_filter_bench.rs` guards this).
 
 ## Stage 2: Reciprocal Rank Fusion
 
