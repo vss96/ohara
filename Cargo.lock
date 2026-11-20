@@ -2434,6 +2434,7 @@ dependencies = [
  "ohara-embed",
  "ohara-engine",
  "ohara-git",
+ "ohara-harness",
  "ohara-parse",
  "ohara-storage",
  "serde_json",
