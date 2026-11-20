@@ -92,6 +92,18 @@ impl RoleRunner {
                 ..req.clone()
             };
             let started_at = Utc::now();
+            let running = StepRecord {
+                seq: step.seq + attempt,
+                runtime: rt.name().clone(),
+                state: StepState::Running,
+                started_at,
+                finished_at: None,
+                cost: None,
+                failover_from: previous.clone(),
+                transcript: transcript.clone(),
+                ..step.clone()
+            };
+            store.record_step(&running).await?;
             let outcome = match rt.run(attempt_req).await {
                 Ok(o) => o,
                 Err(e) => {
@@ -105,15 +117,10 @@ impl RoleRunner {
                 }
             };
             let record = StepRecord {
-                seq: step.seq + attempt,
-                runtime: rt.name().clone(),
                 state: step_state(outcome.status),
-                started_at,
                 finished_at: Some(Utc::now()),
                 cost: outcome.cost,
-                failover_from: previous.take(),
-                transcript,
-                ..step.clone()
+                ..running
             };
             store.record_step(&record).await?;
             previous = Some(rt.name().clone());
