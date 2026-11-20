@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn spaced_rust_ignore_attribute_is_detected() {
-        for added in ["# [ignore]", "#[ ignore ]", "#! [ignore]"] {
+        for added in ["# [ignore]", "#[ ignore ]", "#[ ignore = \"slow\" ]"] {
             let after = format!("#[test]\n{added}\nfn a() {{}}\n");
             let v = compare("t.rs", Some("#[test]\nfn a() {}\n"), Some(&after), false);
             assert!(
