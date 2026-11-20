@@ -47,7 +47,21 @@ task's final deadline. A contract with no scripts is refused unless the
 workflow is `research`: with nothing to run, nothing could verify the
 work. Supply scripts with `--edit`.
 
+`approve` (without `--edit`) refuses a contract that differs from the one
+that was shown at creation; use `--edit` to review it. It prints the
+frozen contract, its hash and the sandbox warning. If a previous approve
+froze the contract but could not update the task, re-running it adopts
+that freeze.
+
+If creation fails after the worktree exists, the task is marked
+`aborted` and its worktree and branch are removed. `ohara task` also
+refuses to run when `$OHARA_HOME` is inside the repository, and warns if
+the checkout has uncommitted changes (they are not part of the task's
+starting point).
+
 ## List and show
 
 `list` and `show` read the task log. A `running` task whose heartbeat is
-older than 60 seconds is shown as `interrupted`.
+older than 60 seconds is shown as `interrupted`. Until the supervisor
+lands (next PR), no process runs approved tasks, so they show
+`interrupted` a minute after approval.

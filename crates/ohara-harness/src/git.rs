@@ -169,6 +169,20 @@ impl Git {
             .map(|_| ())
     }
 
+    /// `git worktree remove --force <path>`, run from the main checkout.
+    pub fn worktree_remove(&self, path: &Path) -> Result<()> {
+        self.ensure_own_toplevel()?;
+        let path = path.to_string_lossy();
+        self.run(&["worktree", "remove", "--force", &path])
+            .map(|_| ())
+    }
+
+    /// `git branch -D <branch>`, run from the main checkout.
+    pub fn branch_delete(&self, branch: &str) -> Result<()> {
+        self.ensure_own_toplevel()?;
+        self.run(&["branch", "-D", branch]).map(|_| ())
+    }
+
     /// Paths changed between two commits.
     pub fn diff_names(&self, from: &str, to: &str) -> Result<Vec<String>> {
         let out = self.run(&["diff", "--name-only", "-z", "--no-renames", from, to])?;

@@ -4,16 +4,18 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
-use ohara_core::task::{Deadline, TaskId, TaskRecord, TaskState, TaskStore};
-use ohara_harness::contract::freeze::freeze;
+use ohara_core::task::{ContractHash, Deadline, TaskId, TaskRecord, TaskState, TaskStore};
+use ohara_harness::contract::freeze::{freeze, load_frozen};
 use ohara_harness::contract::Contract;
 use ohara_harness::git::Git;
 
 use super::clock::split_detail;
-use super::{blocking, pending_path, task_dir, worktree_path};
+use super::{blocking, pending_path, shown_path, task_dir, worktree_path};
 
 /// Workflow whose contracts may carry no scripts (rubrics only).
 const SCRIPTLESS_WORKFLOW: &str = "research";
+/// Printed with the contract, once per approval.
+pub const SANDBOX_WARNING: &str = "Phase 1: agents run with your permissions; no sandbox.";
 const MAX_EDIT_ATTEMPTS: usize = 5;
 
 /// Opens `path` for the user to edit.
@@ -74,11 +76,67 @@ fn edit_loop(initial: &str, path: &Path, editor: &mut Editor<'_>) -> Result<Cont
     )
 }
 
+/// What `approve` shows after freezing: the final contract, its hash and the
+/// sandbox warning.
+pub fn approval_report(task: &TaskRecord, frozen: &Contract) -> String {
+    let hash = task
+        .contract_hash
+        .map(|h| h.to_string())
+        .unwrap_or_else(|| frozen.hash().to_string());
+    format!(
+        "task {} approved; running until {}\nfrozen contract:\n{}\ncontract hash: {hash}\n{SANDBOX_WARNING}\n",
+        task.id,
+        task.deadline.0.to_rfc3339(),
+        frozen.to_toml(),
+    )
+}
+
+/// Load (and verify) the contract frozen for an approved `task`.
+pub async fn load_frozen_contract(task: &TaskRecord) -> Result<Contract> {
+    let hash: ContractHash = task.contract_hash.context("task has no contract hash")?;
+    let (id, wt) = (task.id, worktree_path(&task.id)?);
+    let (c, _) = blocking(move || load_frozen(&Git::new(&wt), &id, &hash)).await?;
+    Ok(c)
+}
+
+fn ref_name(id: &TaskId) -> String {
+    format!("refs/ohara/tasks/{id}/contract")
+}
+
+/// Freeze `contract`. If the side ref already exists from an earlier attempt
+/// whose record update failed, adopt it when it matches `contract` apart
+/// from the deadline; otherwise name the ref to delete.
+fn freeze_or_recover(
+    git: &Git,
+    id: &TaskId,
+    contract: &Contract,
+) -> ohara_harness::Result<Contract> {
+    let err = match freeze(git, id, contract) {
+        Ok(_) => return Ok(contract.clone()),
+        Err(e) if e.to_string().contains("already frozen") => e,
+        Err(e) => return Err(e),
+    };
+    let spec = format!("{}:contract.toml", ref_name(id));
+    let frozen = Contract::parse(&git.run(&["show", &spec])?)?;
+    let mut expected = contract.clone();
+    expected.budget.deadline = frozen.budget.deadline;
+    if expected == frozen {
+        return Ok(frozen);
+    }
+    Err(ohara_harness::Error::Contract(format!(
+        "{err}, and it differs from the pending contract; delete {} and approve again",
+        ref_name(id)
+    )))
+}
+
 /// Approve `id`: apply the final deadline, freeze the contract, store its
 /// hash and move the task to `Running` (heartbeat starts at `now`).
 ///
-/// `--for` budgets count from `now`; absolute deadlines are kept. The
-/// contract's own deadline is always set to the task's final deadline.
+/// Without `editor`, the pending contract must be the one `create` showed
+/// (its hash is recorded then); with one, the edited contract is accepted and
+/// becomes the new baseline. `--for` budgets count from `now`; absolute
+/// deadlines are kept. The contract's own deadline is always set to the task's
+/// final deadline. A freeze left by a failed earlier attempt is adopted.
 pub async fn approve(
     store: &dyn TaskStore,
     id: &TaskId,
@@ -98,9 +156,23 @@ pub async fn approve(
     let pending = pending_path(id)?;
     let text = std::fs::read_to_string(&pending)
         .with_context(|| format!("reading the drafted contract {}", pending.display()))?;
-    let mut contract = match editor {
-        Some(ed) => edit_loop(&text, &task_dir(id)?.join("contract.edit.toml"), ed)?,
-        None => Contract::parse(&text)?,
+    let base = match editor {
+        Some(ed) => {
+            let edited = edit_loop(&text, &task_dir(id)?.join("contract.edit.toml"), ed)?;
+            std::fs::write(&pending, edited.to_toml())?;
+            std::fs::write(shown_path(id)?, edited.hash().to_string())?;
+            edited
+        }
+        None => {
+            let parsed = Contract::parse(&text)?;
+            let shown = std::fs::read_to_string(shown_path(id)?).unwrap_or_default();
+            if shown.trim() != parsed.hash().to_string() {
+                bail!(
+                    "contract changed since it was shown; re-run with --edit to review: ohara task approve {id} --edit"
+                );
+            }
+            parsed
+        }
     };
 
     let (for_budget, note) = split_detail(task.detail.as_deref());
@@ -111,24 +183,25 @@ pub async fn approve(
     if deadline <= now {
         bail!("task {id}: deadline {deadline} is in the past");
     }
-    if contract.scripts.is_empty() && task.workflow != SCRIPTLESS_WORKFLOW {
+    if base.scripts.is_empty() && task.workflow != SCRIPTLESS_WORKFLOW {
         bail!(
             "the contract has no scripts, so nothing could verify the work for a {:?} task; \
              add at least one [[script]] (ohara task approve {id} --edit)",
             task.workflow
         );
     }
+    let mut contract = base;
     contract.budget.deadline = Deadline(deadline);
-    std::fs::write(&pending, contract.to_toml())?;
 
     let worktree = worktree_path(id)?;
-    let (task_id, frozen) = (*id, contract);
-    let hash = blocking(move || freeze(&Git::new(&worktree), &task_id, &frozen)).await?;
+    let task_id = *id;
+    let frozen =
+        blocking(move || freeze_or_recover(&Git::new(&worktree), &task_id, &contract)).await?;
 
     let running = TaskRecord {
         state: TaskState::Running,
-        deadline: Deadline(deadline),
-        contract_hash: Some(hash),
+        deadline: frozen.budget.deadline,
+        contract_hash: Some(frozen.hash()),
         heartbeat_at: Some(now),
         detail: note,
         ..task

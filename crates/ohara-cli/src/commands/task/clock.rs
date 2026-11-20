@@ -55,7 +55,7 @@ pub fn parse_until(s: &str, now: DateTime<Utc>) -> Result<Budget> {
         Err(_) => {
             let t = NaiveTime::parse_from_str(s, "%H:%M")
                 .with_context(|| format!("invalid --until {s:?}: expected RFC 3339 or HH:MM"))?;
-            let local = Local::now().date_naive().and_time(t);
+            let local = now.with_timezone(&Local).date_naive().and_time(t);
             let zoned = local
                 .and_local_timezone(Local)
                 .single()
