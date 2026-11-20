@@ -146,4 +146,11 @@ scale_max = 10
         assert_eq!(Contract::parse(&noisy).unwrap().hash(), c.hash());
         assert_eq!(c.scripts[0].effective_min_tests(), 1);
     }
+
+    #[test]
+    fn empty_run_is_rejected() {
+        let bad = SAMPLE.replace(r#"run = ["cargo", "test", "--workspace"]"#, "run = []");
+        let err = Contract::parse(&bad).unwrap_err();
+        assert!(err.to_string().contains("empty run"), "{err}");
+    }
 }

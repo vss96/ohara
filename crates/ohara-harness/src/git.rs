@@ -144,4 +144,54 @@ mod tests {
         assert!(wt.join("a.txt").exists());
         assert!(git.run(&["bogus-subcommand"]).is_err());
     }
+
+    #[test]
+    fn commit_all_refuses_non_repo_subdir_of_outer_repo() {
+        let (outer, outer_git) = repo();
+        std::fs::write(outer.path().join("a.txt"), "1").unwrap();
+        let before = outer_git.commit_all("first").unwrap();
+        let sub = outer.path().join("plain");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("new.txt"), "x").unwrap();
+        let inner = Git::new(&sub);
+        assert!(inner.commit_all("nope").is_err());
+        assert!(inner.reset_hard(&before).is_err());
+        assert_eq!(outer_git.head().unwrap(), before);
+        assert!(outer_git
+            .run(&["status", "--porcelain"])
+            .unwrap()
+            .contains("plain"));
+    }
+
+    #[test]
+    fn commit_all_skips_hooks_and_signing() {
+        let (dir, git) = repo();
+        let hook = dir.path().join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git.run(&["config", "commit.gpgsign", "true"]).unwrap();
+        git.run(&["config", "gpg.program", "false"]).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "1").unwrap();
+        assert!(git.commit_all("checkpoint").is_ok());
+    }
+
+    #[test]
+    fn diff_names_is_nul_split_and_unrenamed() {
+        let (dir, git) = repo();
+        std::fs::write(dir.path().join("caf\u{e9} \"x\".txt"), "1").unwrap();
+        let first = git.commit_all("first").unwrap();
+        std::fs::rename(
+            dir.path().join("caf\u{e9} \"x\".txt"),
+            dir.path().join("b.txt"),
+        )
+        .unwrap();
+        let second = git.commit_all("second").unwrap();
+        let mut names = git.diff_names(&first, &second).unwrap();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["b.txt".to_string(), "caf\u{e9} \"x\".txt".to_string()]
+        );
+    }
 }

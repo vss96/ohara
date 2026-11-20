@@ -225,4 +225,37 @@ mod tests {
         let c = contract(ScriptKind::Check, "all good, trust me", &[]);
         assert!(run(&c).await.satisfied);
     }
+
+    #[test]
+    fn crate_prefixed_required_name_matches() {
+        assert!(matches_name(
+            "contract::check::tests::t",
+            "contract::check::tests::t"
+        ));
+        assert!(matches_name("contract::check::tests::t", "tests::t"));
+        assert!(matches_name(
+            "contract::check::tests::t",
+            "harness::contract::check::tests::t"
+        ));
+        assert!(!matches_name(
+            "other::tests::t",
+            "harness::contract::check::tests::t"
+        ));
+    }
+
+    #[test]
+    fn required_suffix_respects_segment_boundary() {
+        assert!(!matches_name("a::xfoo", "foo"));
+        assert!(matches_name("a::foo", "foo"));
+        assert!(matches_name("foo", "foo"));
+    }
+
+    #[tokio::test]
+    async fn spawn_failure_is_an_unsatisfied_script_not_an_error() {
+        let mut c = contract(ScriptKind::Check, "ok", &[]);
+        c.scripts[0].run = vec!["/definitely/not/a/binary".into()];
+        let r = run(&c).await;
+        assert!(!r.satisfied);
+        assert!(!r.scripts[0].failures.is_empty());
+    }
 }

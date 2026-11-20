@@ -39,7 +39,11 @@ pub fn freeze(git: &Git, task: &TaskId, c: &Contract) -> Result<ContractHash> {
 }
 
 /// Load the frozen contract for `task` with its hash.
-pub fn load_frozen(git: &Git, task: &TaskId) -> Result<(Contract, ContractHash)> {
+pub fn load_frozen(
+    git: &Git,
+    task: &TaskId,
+    _expected: &ContractHash,
+) -> Result<(Contract, ContractHash)> {
     let spec = format!("{}:{CONTRACT_FILE}", ref_name(task));
     let text = git.run(&["show", &spec])?;
     let contract = Contract::parse(&text)?;
