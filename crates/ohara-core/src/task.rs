@@ -150,7 +150,7 @@ impl<'de> Deserialize<'de> for ContractHash {
 }
 
 /// Name of a configured agent runtime.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RuntimeName(pub String);
 
 /// One harness task.
@@ -191,7 +191,7 @@ pub struct TaskRecord {
 }
 
 /// Which part an agent plays in a step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     /// Drafts and freezes the contract.

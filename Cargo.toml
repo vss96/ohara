@@ -9,6 +9,7 @@ members = [
   "crates/ohara-cli",
   "crates/ohara-mcp",
   "crates/ohara-engine",
+  "crates/ohara-harness",
   "tests/perf",
 ]
 
@@ -24,7 +25,7 @@ anyhow = "1"
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-std", "io-util", "signal", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-std", "io-util", "signal", "sync", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
@@ -72,6 +73,8 @@ fs2 = "0.4"
 # padding strategy on the CoreML fixed-shape path).
 tokenizers = "=0.23.2"
 proptest = "1"
+toml = "0.8"
+globset = "0.4"
 
 [profile.release]
 lto = "thin"
