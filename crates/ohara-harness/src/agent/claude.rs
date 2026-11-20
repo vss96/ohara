@@ -71,6 +71,13 @@ impl ClaudeCodeRuntime {
         .map(|s| s.to_string())
         .collect();
         if let Some(cfg) = &req.mcp_config {
+            // Headless acceptEdits denies MCP tools that are not allow-listed.
+            if let Some(slot) = argv.iter().position(|a| a == ALLOWED_TOOLS) {
+                argv[slot] = format!(
+                    "{ALLOWED_TOOLS} {}",
+                    crate::decisions::propose_decision_tool_name()
+                );
+            }
             argv.push("--mcp-config".to_string());
             argv.push(cfg.display().to_string());
         }
@@ -200,10 +207,23 @@ mod tests {
         assert_eq!(a[pos("--permission-mode") + 1], "acceptEdits");
         assert_eq!(
             a[pos("--allowedTools") + 1],
-            "Bash Edit Write Read Glob Grep"
+            "Bash Edit Write Read Glob Grep mcp__ohara__propose_decision"
         );
         assert_eq!(a[pos("--mcp-config") + 1], "/tmp/mcp.json");
         assert!(!a.iter().any(|x| x == "--model"));
+    }
+
+    #[test]
+    fn allowed_tools_include_propose_decision_when_mcp_configured() {
+        let tools = |a: &[String]| {
+            let i = a.iter().position(|x| x == "--allowedTools").unwrap();
+            a[i + 1].clone()
+        };
+        let with = tools(&rt(None).argv(&req(Some("/tmp/mcp.json"), None)));
+        assert!(with.starts_with("Bash Edit Write Read Glob Grep"));
+        assert!(with.split(' ').any(|t| t == "mcp__ohara__propose_decision"));
+        let without = tools(&rt(None).argv(&req(None, None)));
+        assert!(!without.contains("propose_decision"), "{without}");
     }
 
     #[test]

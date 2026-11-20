@@ -6,6 +6,8 @@ pub mod agent;
 pub mod config;
 /// Frozen task contract: model, freeze, and check runner.
 pub mod contract;
+/// Decision settlement and the agent-facing MCP config.
+pub mod decisions;
 /// Error type.
 pub mod error;
 /// Git CLI helper for task worktrees and refs.

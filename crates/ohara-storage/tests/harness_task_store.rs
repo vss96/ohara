@@ -164,6 +164,42 @@ async fn put_decision_upserts_and_lists_by_task() {
 }
 
 #[tokio::test]
+async fn list_decisions_is_chronological_within_and_across_rounds() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = open(&dir).await;
+    let t = task(1_000);
+    // Ids sort opposite to insertion order, so `ORDER BY id` would reverse them.
+    let ids = [
+        "7ZZZZZZZZZZZZZZZZZZZZZZZZZ",
+        "5ZZZZZZZZZZZZZZZZZZZZZZZZZ",
+        "3ZZZZZZZZZZZZZZZZZZZZZZZZZ",
+        "1ZZZZZZZZZZZZZZZZZZZZZZZZZ",
+    ];
+    // (round, chosen) in proposal order; round 2 proposed before round 1 was settled is
+    // not realistic, so keep rounds non-decreasing and check ties keep insertion order.
+    let plan = [
+        (1, "r1-first"),
+        (1, "r1-second"),
+        (2, "r2-first"),
+        (2, "r2-second"),
+    ];
+    for (id, (round, chosen)) in ids.iter().zip(plan) {
+        let mut d = decision(t.id, chosen);
+        d.id = serde_json::from_str(&format!("\"{id}\"")).unwrap();
+        d.round = round;
+        s.put_decision(&d).await.unwrap();
+    }
+    let got: Vec<String> = s
+        .list_decisions(&t.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|d| d.chosen)
+        .collect();
+    assert_eq!(got, ["r1-first", "r1-second", "r2-first", "r2-second"]);
+}
+
+#[tokio::test]
 async fn harness_migrations_do_not_touch_index_schema() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("harness.sqlite");

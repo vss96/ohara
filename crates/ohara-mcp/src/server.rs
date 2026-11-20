@@ -96,8 +96,12 @@ impl OharaServer {
         .await
     }
 
-    pub async fn serve_stdio(self) -> Result<()> {
-        crate::tools::serve(self).await
+    /// Serve over stdio; `harness` enables the harness-only tools.
+    pub async fn serve_stdio(
+        self,
+        harness: Option<crate::tools::propose_decision::HarnessCtx>,
+    ) -> Result<()> {
+        crate::tools::serve(self, harness).await
     }
 }
 

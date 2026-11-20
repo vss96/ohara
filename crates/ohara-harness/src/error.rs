@@ -20,6 +20,9 @@ pub enum Error {
     /// A guard check rejected the work.
     #[error("guard: {0}")]
     Guard(String),
+    /// A child process could not be started (missing or not executable).
+    #[error("spawn: {0}")]
+    Spawn(String),
     /// A git operation failed.
     #[error("git: {0}")]
     Git(String),

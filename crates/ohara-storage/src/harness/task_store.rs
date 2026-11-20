@@ -236,7 +236,10 @@ impl TaskStore for SqliteTaskStore {
     async fn list_decisions(&self, id: &TaskId) -> Result<Vec<DecisionRecord>> {
         let id = id.to_string();
         with_conn(&self.pool, move |c| {
-            let sql = format!("SELECT {DECISION_COLS} FROM decision WHERE task_id=?1 ORDER BY id");
+            // Proposal order: round, then insertion (upserts keep their rowid).
+            let sql = format!(
+                "SELECT {DECISION_COLS} FROM decision WHERE task_id=?1 ORDER BY round, rowid"
+            );
             let mut stmt = c.prepare(&sql)?;
             let rows = stmt.query_map([id], decision_from_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
