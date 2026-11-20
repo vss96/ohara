@@ -118,8 +118,196 @@ mod tests {
     use crate::retriever::{LaneId, RetrievalLane};
     use crate::storage::{HunkHit, HunkId};
     use crate::types::RepoId;
+    use crate::visibility::{CommitVisibility, VisibilityScope};
+    use crate::CommitSha;
     use async_trait::async_trait;
+    use std::collections::HashSet;
     use std::sync::Mutex;
+
+    fn ctx<'a>(
+        query: &'a PatternQuery,
+        repo_id: &'a RepoId,
+        final_k: usize,
+        visibility: Option<VisibilityScope<'a>>,
+    ) -> RunContext<'a> {
+        RunContext {
+            query,
+            repo_id,
+            final_k,
+            now_unix: 1_700_000_000,
+            visibility,
+        }
+    }
+
+    /// A real 40-hex sha derived from `n`.
+    fn sha(n: u32) -> String {
+        format!("{n:040x}")
+    }
+
+    fn make_hit_on(id: HunkId, commit_sha: String) -> HunkHit {
+        let mut h = make_hit(id, 0.9 - (id as f32) * 0.01);
+        h.hunk.commit_sha = commit_sha.clone();
+        h.commit.commit_sha = commit_sha;
+        h
+    }
+
+    /// Visible iff the sha is in the set; records every call's `commits`.
+    struct SetOracle {
+        visible: HashSet<String>,
+        calls: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl SetOracle {
+        fn new(visible: &[u32]) -> Self {
+            Self {
+                visible: visible.iter().map(|n| sha(*n)).collect(),
+                calls: Mutex::new(vec![]),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CommitVisibility for SetOracle {
+        async fn visible(
+            &self,
+            _head: &CommitSha,
+            commits: &[CommitSha],
+        ) -> crate::Result<Vec<bool>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(commits.iter().map(|c| c.as_str().to_string()).collect());
+            Ok(commits
+                .iter()
+                .map(|c| self.visible.contains(c.as_str()))
+                .collect())
+        }
+    }
+
+    fn head() -> CommitSha {
+        CommitSha::parse(&sha(0xfff)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn invisible_commits_are_removed_before_the_rerank_pool_is_cut() {
+        // Best-first on commits [x1, x2, v1, v2]; only v1/v2 visible.
+        // Filtering after the pool cut (size 2) would return nothing.
+        let lanes: Vec<Box<dyn RetrievalLane>> = vec![Box::new(StaticLane(
+            LaneId::Vec,
+            vec![
+                make_hit_on(1, sha(1)),
+                make_hit_on(2, sha(2)),
+                make_hit_on(3, sha(3)),
+                make_hit_on(4, sha(4)),
+            ],
+        ))];
+        let weights = RankingWeights {
+            rerank_top_k: 2,
+            ..weights_with_zero_recency()
+        };
+        let q = default_query();
+        let repo_id = RepoId::from_parts("sha", "/repo");
+        let oracle = SetOracle::new(&[3, 4]);
+        let h = head();
+        let scope = VisibilityScope {
+            head: &h,
+            oracle: &oracle,
+        };
+        let out = run(&lanes, &weights, None, ctx(&q, &repo_id, 20, Some(scope)))
+            .await
+            .unwrap();
+        let commits: Vec<String> = out.iter().map(|h| h.commit.commit_sha.clone()).collect();
+        assert_eq!(commits, vec![sha(3), sha(4)]);
+    }
+
+    #[tokio::test]
+    async fn oracle_is_asked_once_with_distinct_commits() {
+        let lanes: Vec<Box<dyn RetrievalLane>> = vec![
+            Box::new(StaticLane(
+                LaneId::Vec,
+                vec![make_hit_on(1, sha(1)), make_hit_on(2, sha(2))],
+            )),
+            Box::new(StaticLane(
+                LaneId::Bm25Text,
+                vec![make_hit_on(2, sha(2)), make_hit_on(3, sha(3))],
+            )),
+        ];
+        let weights = weights_with_zero_recency();
+        let q = default_query();
+        let repo_id = RepoId::from_parts("sha", "/repo");
+        let oracle = SetOracle::new(&[1, 2, 3]);
+        let h = head();
+        let scope = VisibilityScope {
+            head: &h,
+            oracle: &oracle,
+        };
+        run(&lanes, &weights, None, ctx(&q, &repo_id, 20, Some(scope)))
+            .await
+            .unwrap();
+        let calls = oracle.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "exactly one oracle call");
+        let mut asked = calls[0].clone();
+        asked.sort();
+        assert_eq!(asked, vec![sha(1), sha(2), sha(3)]);
+    }
+
+    #[tokio::test]
+    async fn no_scope_means_no_filtering_and_no_oracle_call() {
+        let lanes: Vec<Box<dyn RetrievalLane>> = vec![Box::new(StaticLane(
+            LaneId::Vec,
+            vec![make_hit_on(1, sha(1)), make_hit_on(2, "not-hex".into())],
+        ))];
+        let weights = weights_with_zero_recency();
+        let q = default_query();
+        let repo_id = RepoId::from_parts("sha", "/repo");
+        let out = run(&lanes, &weights, None, ctx(&q, &repo_id, 20, None))
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn all_candidates_invisible_returns_empty() {
+        let lanes: Vec<Box<dyn RetrievalLane>> = vec![Box::new(StaticLane(
+            LaneId::Vec,
+            vec![make_hit_on(1, sha(1)), make_hit_on(2, sha(2))],
+        ))];
+        let weights = weights_with_zero_recency();
+        let q = default_query();
+        let repo_id = RepoId::from_parts("sha", "/repo");
+        let oracle = SetOracle::new(&[]);
+        let h = head();
+        let scope = VisibilityScope {
+            head: &h,
+            oracle: &oracle,
+        };
+        let out = run(&lanes, &weights, None, ctx(&q, &repo_id, 20, Some(scope)))
+            .await
+            .unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_hex_sha_is_invisible() {
+        let lanes: Vec<Box<dyn RetrievalLane>> = vec![Box::new(StaticLane(
+            LaneId::Vec,
+            vec![make_hit_on(1, "x".into()), make_hit_on(2, sha(2))],
+        ))];
+        let weights = weights_with_zero_recency();
+        let q = default_query();
+        let repo_id = RepoId::from_parts("sha", "/repo");
+        let oracle = SetOracle::new(&[2]);
+        let h = head();
+        let scope = VisibilityScope {
+            head: &h,
+            oracle: &oracle,
+        };
+        let out = run(&lanes, &weights, None, ctx(&q, &repo_id, 20, Some(scope)))
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].hunk_id, 2);
+    }
 
     fn make_hit(id: HunkId, sim: f32) -> HunkHit {
         use crate::types::{ChangeKind, CommitMeta, Hunk};
@@ -194,7 +382,7 @@ mod tests {
         let weights = weights_with_zero_recency();
         let q = default_query();
         let repo_id = RepoId::from_parts("sha", "/repo");
-        let out = run(&lanes, &weights, None, &q, &repo_id, 20, 1_700_000_000)
+        let out = run(&lanes, &weights, None, ctx(&q, &repo_id, 20, None))
             .await
             .unwrap();
         assert_eq!(out.len(), 3, "all three unique ids survive rrf");
@@ -219,7 +407,7 @@ mod tests {
         };
         let q = default_query();
         let repo_id = RepoId::from_parts("sha", "/repo");
-        let out = run(&lanes, &weights, None, &q, &repo_id, 20, 1_700_000_000)
+        let out = run(&lanes, &weights, None, ctx(&q, &repo_id, 20, None))
             .await
             .unwrap();
         assert_eq!(out.len(), 2, "both unique ids survive rrf with k=1");
@@ -279,7 +467,7 @@ mod tests {
         let repo_id = RepoId::from_parts("sha", "/repo");
         // Caller asks for final_k = 5; lanes MUST still gather
         // `lane_top_k` = 100 candidates each.
-        let _ = run(&lanes, &weights, None, &q, &repo_id, 5, 1_700_000_000)
+        let _ = run(&lanes, &weights, None, ctx(&q, &repo_id, 5, None))
             .await
             .unwrap();
 
@@ -301,7 +489,7 @@ mod tests {
         let weights = weights_with_zero_recency();
         let q = default_query();
         let repo_id = RepoId::from_parts("sha", "/repo");
-        let out = run(&lanes, &weights, None, &q, &repo_id, 20, 1_700_000_000)
+        let out = run(&lanes, &weights, None, ctx(&q, &repo_id, 20, None))
             .await
             .unwrap();
         assert_eq!(out[0].hunk_id, 10);
