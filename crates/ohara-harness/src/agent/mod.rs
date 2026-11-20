@@ -48,7 +48,16 @@ pub trait AgentRuntime: Send + Sync {
 }
 
 const RATE_LIMIT_MARKERS: [&str; 3] = ["rate limit", "429", "quota"];
-const AUTH_MARKERS: [&str; 4] = ["not logged in", "unauthorized", "401", "login"];
+const AUTH_MARKERS: [&str; 8] = [
+    "not logged in",
+    "please log in",
+    "please login",
+    "/login",
+    "invalid api key",
+    "unauthorized",
+    "401",
+    "authentication failed",
+];
 
 /// Classify a failed run from the tail of its output. Shared by all adapters.
 pub fn classify_failure(stdout_tail: &str) -> AgentStatus {
