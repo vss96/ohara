@@ -2,14 +2,20 @@
 //! decisions into `Settled` or `Rejected` ones and attaches evidence only it
 //! can produce.
 
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-use ohara_core::task::decision::{Assumption, DecisionId, DecisionRecord, DecisionState, Evidence};
-use ohara_core::task::{RuntimeName, TaskId, TaskRecord, TaskStore};
+use chrono::Utc;
+use ohara_core::task::decision::{DecisionId, DecisionRecord, DecisionState, Evidence};
+use ohara_core::task::{Deadline, RuntimeName, TaskId, TaskRecord, TaskStore};
 
+use crate::agent::process::run_streaming;
 use crate::contract::check::ScriptResult;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::git::Git;
+
+/// Longest an assumption check may run before it counts as failed.
+const CHECK_TIMEOUT: chrono::Duration = chrono::Duration::seconds(60);
 
 /// What `settle_round` did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,24 +27,177 @@ pub struct SettleReport {
 }
 
 /// Settle or reject every `Proposed` decision of `round`.
+///
+/// `git` is rooted at the task worktree, which must be checked out at
+/// `checkpoint_sha`; assumption `check` argvs are agent-controlled and run
+/// there (never in the user's repo) as plain argv under a deadline, with
+/// their output logged under `logs`. A decision is
+/// rejected when a check exits non-zero (or cannot run) or when a
+/// `parent_id` names no decision of this task. Otherwise it is settled with
+/// the checkpoint, the contract `scripts` results and the `runtime`, and
+/// gains a parent edge to every earlier settled decision whose checkpoint
+/// diff touches a file this round's diff touches (over-link, never
+/// under-link).
 pub async fn settle_round(
-    _store: &dyn TaskStore,
-    _git: &Git,
-    _task: &TaskRecord,
-    _round: u32,
-    _checkpoint_sha: &str,
-    _scripts: &[ScriptResult],
-    _runtime: &RuntimeName,
+    store: &dyn TaskStore,
+    git: &Git,
+    task: &TaskRecord,
+    round: u32,
+    checkpoint_sha: &str,
+    scripts: &[ScriptResult],
+    runtime: &RuntimeName,
+    logs: &Path,
 ) -> Result<SettleReport> {
-    Ok(SettleReport {
+    let all = store.list_decisions(&task.id).await?;
+    let proposed: Vec<&DecisionRecord> = all
+        .iter()
+        .filter(|d| d.round == round && d.state == DecisionState::Proposed)
+        .collect();
+    let mut report = SettleReport {
         settled: 0,
         rejected: 0,
-    })
+    };
+    if proposed.is_empty() {
+        return Ok(report);
+    }
+    let known: HashSet<DecisionId> = all.iter().map(|d| d.id).collect();
+    let overlaps = overlapping_ancestors(git, task, &all, round, checkpoint_sha).await?;
+    let evidence = Evidence {
+        script_results: scripts.iter().map(Into::into).collect(),
+        runtime: Some(runtime.clone()),
+    };
+    for d in proposed {
+        let mut next = d.clone();
+        match rejection(d, &known, git.cwd(), logs).await {
+            Some(reason) => {
+                next.state = DecisionState::Rejected;
+                next.rejected_reason = Some(reason);
+                report.rejected += 1;
+            }
+            None => {
+                next.state = DecisionState::Settled;
+                next.checkpoint_sha = Some(checkpoint_sha.to_string());
+                next.evidence = evidence.clone();
+                for id in &overlaps {
+                    if !next.parent_ids.contains(id) {
+                        next.parent_ids.push(*id);
+                    }
+                }
+                report.settled += 1;
+            }
+        }
+        store.put_decision(&next).await?;
+    }
+    Ok(report)
 }
 
-/// Write an MCP config that runs `ohara-mcp --harness-task <id>`.
-pub fn mcp_config_for(_task: &TaskId, dir: &Path) -> Result<PathBuf> {
-    Ok(dir.join("mcp.json"))
+/// Why `d` must be rejected, or `None` when it stands.
+async fn rejection(
+    d: &DecisionRecord,
+    known: &HashSet<DecisionId>,
+    cwd: &Path,
+    logs: &Path,
+) -> Option<String> {
+    if let Some(p) = d.parent_ids.iter().find(|p| !known.contains(p)) {
+        return Some(format!("parent decision {} does not exist", p.0));
+    }
+    for (i, a) in d.assumptions.iter().enumerate() {
+        let Some(argv) = &a.check else {
+            continue;
+        };
+        if let Err(why) = run_check(argv, cwd, &logs.join(format!("{}-{i}.log", d.id.0))).await {
+            return Some(format!("assumption {:?} failed: {why}", a.text));
+        }
+    }
+    None
+}
+
+/// Run one assumption check: argv only (no shell), cwd fixed to the task
+/// worktree, killed at [`CHECK_TIMEOUT`], output teed to `log`.
+async fn run_check(argv: &[String], cwd: &Path, log: &Path) -> std::result::Result<(), String> {
+    let deadline = Deadline(Utc::now() + CHECK_TIMEOUT);
+    let exit = run_streaming(argv, None, cwd, deadline, log)
+        .await
+        .map_err(|e| format!("could not run check: {e}"))?;
+    match (exit.killed_at_deadline, exit.code) {
+        (true, _) => Err("timed out".to_string()),
+        (false, Some(0)) => Ok(()),
+        (false, code) => Err(format!("exited with {code:?}")),
+    }
+}
+
+/// Ids of earlier settled decisions whose checkpoint diff shares a file with
+/// this round's diff.
+///
+/// A checkpoint's diff runs from the previous distinct checkpoint (or the
+/// task's base commit) to itself, so rounds that settled nothing widen the
+/// next diff rather than leaving a gap.
+async fn overlapping_ancestors(
+    git: &Git,
+    task: &TaskRecord,
+    all: &[DecisionRecord],
+    round: u32,
+    checkpoint_sha: &str,
+) -> Result<Vec<DecisionId>> {
+    let mut earlier: Vec<&DecisionRecord> = all
+        .iter()
+        .filter(|d| d.round < round && d.state == DecisionState::Settled)
+        .filter(|d| d.checkpoint_sha.is_some())
+        .collect();
+    earlier.sort_by_key(|d| d.round);
+    let mut checkpoints: Vec<&str> = Vec::new();
+    for d in &earlier {
+        let c = d.checkpoint_sha.as_deref().unwrap_or_default();
+        if checkpoints.last() != Some(&c) {
+            checkpoints.push(c);
+        }
+    }
+    let base = checkpoints
+        .last()
+        .copied()
+        .unwrap_or(task.base_sha.as_str());
+    let this: BTreeSet<String> = diff_names(git, base, checkpoint_sha).await?;
+    let mut out = Vec::new();
+    for d in earlier {
+        let c = d.checkpoint_sha.as_deref().unwrap_or_default();
+        let from = match checkpoints.iter().position(|x| *x == c) {
+            Some(i) if i > 0 => checkpoints[i - 1],
+            _ => task.base_sha.as_str(),
+        };
+        let files = diff_names(git, from, c).await?;
+        if !files.is_disjoint(&this) {
+            out.push(d.id);
+        }
+    }
+    Ok(out)
+}
+
+async fn diff_names(git: &Git, from: &str, to: &str) -> Result<BTreeSet<String>> {
+    let git = git.clone();
+    let (from, to) = (from.to_string(), to.to_string());
+    let names = tokio::task::spawn_blocking(move || git.diff_names(&from, &to))
+        .await
+        .map_err(|e| Error::Git(format!("diff task: {e}")))??;
+    Ok(names.into_iter().collect())
+}
+
+/// Write an MCP config that runs `ohara-mcp --harness-task <id>` and return
+/// its path (`<dir>/mcp.json`).
+pub fn mcp_config_for(task: &TaskId, dir: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let config = serde_json::json!({
+        "mcpServers": {
+            "ohara": {
+                "command": "ohara-mcp",
+                "args": ["--harness-task", task.to_string()],
+            }
+        }
+    });
+    let path = dir.join("mcp.json");
+    let body = serde_json::to_string_pretty(&config)
+        .map_err(|e| Error::Config(format!("mcp config: {e}")))?;
+    std::fs::write(&path, body)?;
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -46,7 +205,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
-    use ohara_core::task::decision::{CostIfWrong, Evidence};
+    use ohara_core::task::decision::{Assumption, CostIfWrong};
     use ohara_core::task::{CostCents, Deadline, Outcome, StepRecord, TaskRecord, TaskState};
     use std::sync::Mutex;
 
@@ -191,9 +350,19 @@ mod tests {
         store.put_decision(&d).await.unwrap();
 
         let rt = RuntimeName("claude".into());
-        let report = settle_round(&store, &git, &task, 1, &ckpt, &[script_result()], &rt)
-            .await
-            .unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let report = settle_round(
+            &store,
+            &git,
+            &task,
+            1,
+            &ckpt,
+            &[script_result()],
+            &rt,
+            logs.path(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             report,
             SettleReport {
@@ -227,7 +396,8 @@ mod tests {
         }
 
         let rt = RuntimeName("claude".into());
-        let report = settle_round(&store, &git, &task, 1, &ckpt, &[], &rt)
+        let logs = tempfile::tempdir().unwrap();
+        let report = settle_round(&store, &git, &task, 1, &ckpt, &[], &rt, logs.path())
             .await
             .unwrap();
         assert_eq!(
@@ -259,20 +429,21 @@ mod tests {
         let task = task_record(&base);
         let store = MemStore::default();
         let rt = RuntimeName("claude".into());
+        let logs = tempfile::tempdir().unwrap();
 
         // Round 1 touches shared.txt, round 2 touches only other.txt,
         // round 3 touches shared.txt again.
         let c1 = commit_file(&dir, &git, "shared.txt");
         let d1 = proposed(&task, 1, vec![]);
         store.put_decision(&d1).await.unwrap();
-        settle_round(&store, &git, &task, 1, &c1, &[], &rt)
+        settle_round(&store, &git, &task, 1, &c1, &[], &rt, logs.path())
             .await
             .unwrap();
 
         let c2 = commit_file(&dir, &git, "other.txt");
         let d2 = proposed(&task, 2, vec![]);
         store.put_decision(&d2).await.unwrap();
-        settle_round(&store, &git, &task, 2, &c2, &[], &rt)
+        settle_round(&store, &git, &task, 2, &c2, &[], &rt, logs.path())
             .await
             .unwrap();
 
@@ -280,7 +451,7 @@ mod tests {
         let c3 = git.commit_all("again").unwrap();
         let d3 = proposed(&task, 3, vec![]);
         store.put_decision(&d3).await.unwrap();
-        settle_round(&store, &git, &task, 3, &c3, &[], &rt)
+        settle_round(&store, &git, &task, 3, &c3, &[], &rt, logs.path())
             .await
             .unwrap();
 
@@ -289,6 +460,36 @@ mod tests {
         assert!(by(d1.id).parent_ids.is_empty());
         assert!(by(d2.id).parent_ids.is_empty());
         assert_eq!(by(d3.id).parent_ids, vec![d1.id]);
+    }
+
+    #[tokio::test]
+    async fn checks_run_in_the_worktree_as_plain_argv() {
+        let (dir, git, base) = repo();
+        let ckpt = commit_file(&dir, &git, "a.txt");
+        let task = task_record(&base);
+        let store = MemStore::default();
+        let in_worktree = proposed(&task, 1, vec![argv(&["test", "-f", "a.txt"])]);
+        // One argv element is a program name, never shell text.
+        let shell_text = proposed(&task, 1, vec![argv(&["true && true"])]);
+        store.put_decision(&in_worktree).await.unwrap();
+        store.put_decision(&shell_text).await.unwrap();
+
+        let rt = RuntimeName("claude".into());
+        let logs = tempfile::tempdir().unwrap();
+        let report = settle_round(&store, &git, &task, 1, &ckpt, &[], &rt, logs.path())
+            .await
+            .unwrap();
+        assert_eq!(
+            report,
+            SettleReport {
+                settled: 1,
+                rejected: 1
+            }
+        );
+        let all = store.list_decisions(&task.id).await.unwrap();
+        let state = |id| all.iter().find(|d| d.id == id).unwrap().state;
+        assert_eq!(state(in_worktree.id), DecisionState::Settled);
+        assert_eq!(state(shell_text.id), DecisionState::Rejected);
     }
 
     #[test]
