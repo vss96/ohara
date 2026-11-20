@@ -124,8 +124,22 @@ mod tests {
             });
             Ok(())
         }
-        async fn remove_indexed_tip(&self, _: &RepoId, _: &WorktreeKey) -> Result<()> {
-            Ok(())
+        async fn remove_indexed_tip(
+            &self,
+            _: &RepoId,
+            _: &WorktreeKey,
+            _: &CommitSha,
+        ) -> Result<bool> {
+            Ok(false)
+        }
+        async fn replace_indexed_tip(
+            &self,
+            _: &RepoId,
+            _: &WorktreeKey,
+            _: &CommitSha,
+            _: &CommitSha,
+        ) -> Result<bool> {
+            Ok(false)
         }
         async fn indexed_commit_shas(&self, _: &RepoId) -> Result<Vec<CommitSha>> {
             Ok(vec![])

@@ -117,7 +117,10 @@ or worktree `HEAD` reaches, together with their hunks, vectors and
 FTS rows, in batches of 500 per transaction, then tidies
 `indexed_tip`: retired tips nothing reaches are removed; a linked
 worktree that no longer exists has its row turned into a retired tip
-while a ref still reaches it, and removed otherwise.
+while a ref still reaches it, and removed otherwise; a main or live
+worktree tip on a commit being deleted is rewound to its merge base with
+that checkout's `HEAD` (or removed when there is none). The tip edits
+run before the deletes and are compare-and-swap on the sha prune read.
 
 Schema version (`repo.schema_version`) is bumped when migrations land.
 A v0.3 binary on a v0.2 index runs migration V2; a v0.2 binary on a

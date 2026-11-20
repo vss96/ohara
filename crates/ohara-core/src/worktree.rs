@@ -136,8 +136,25 @@ pub trait TipStore: Send + Sync {
         sha: &CommitSha,
     ) -> Result<()>;
 
-    /// Remove the tip for `worktree`, if any.
-    async fn remove_indexed_tip(&self, repo_id: &RepoId, worktree: &WorktreeKey) -> Result<()>;
+    /// Remove the tip for `worktree` only while it still names `expected`
+    /// (compare-and-delete). Returns whether a row was removed; `false`
+    /// means another writer moved or removed the tip meanwhile.
+    async fn remove_indexed_tip(
+        &self,
+        repo_id: &RepoId,
+        worktree: &WorktreeKey,
+        expected: &CommitSha,
+    ) -> Result<bool>;
+
+    /// Move the tip for `worktree` from `expected` to `new` only while it
+    /// still names `expected` (compare-and-swap). Returns whether it moved.
+    async fn replace_indexed_tip(
+        &self,
+        repo_id: &RepoId,
+        worktree: &WorktreeKey,
+        expected: &CommitSha,
+        new: &CommitSha,
+    ) -> Result<bool>;
 
     /// Shas of every commit currently indexed for the repo.
     async fn indexed_commit_shas(&self, repo_id: &RepoId) -> Result<Vec<CommitSha>>;

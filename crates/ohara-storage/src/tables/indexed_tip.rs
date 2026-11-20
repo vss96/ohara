@@ -29,11 +29,29 @@ pub fn upsert(c: &Connection, repo_id: &str, key: &str, sha: &str) -> Result<()>
     Ok(())
 }
 
-/// Delete the tip for `(repo_id, key)`, if present.
-pub fn remove(c: &Connection, repo_id: &str, key: &str) -> Result<()> {
-    c.execute(
-        "DELETE FROM indexed_tip WHERE repo_id = ?1 AND worktree_key = ?2",
-        params![repo_id, key],
+/// Delete the tip for `(repo_id, key)` only while it names `sha`.
+/// Returns whether a row was deleted.
+pub fn remove_if(c: &Connection, repo_id: &str, key: &str, sha: &str) -> Result<bool> {
+    let n = c.execute(
+        "DELETE FROM indexed_tip WHERE repo_id = ?1 AND worktree_key = ?2 AND sha = ?3",
+        params![repo_id, key, sha],
     )?;
-    Ok(())
+    Ok(n > 0)
+}
+
+/// Move the tip for `(repo_id, key)` from `expected` to `new` only while it
+/// names `expected`; stamps `updated_at`. Returns whether it moved.
+pub fn replace_if(
+    c: &Connection,
+    repo_id: &str,
+    key: &str,
+    expected: &str,
+    new: &str,
+) -> Result<bool> {
+    let n = c.execute(
+        "UPDATE indexed_tip SET sha = ?4, updated_at = ?5
+         WHERE repo_id = ?1 AND worktree_key = ?2 AND sha = ?3",
+        params![repo_id, key, expected, new, Utc::now().to_rfc3339()],
+    )?;
+    Ok(n > 0)
 }

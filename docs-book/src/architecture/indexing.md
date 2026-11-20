@@ -173,8 +173,15 @@ The daemon's index work:
   worktree `HEAD` (detached ones included) reaches any more, then
   tidy the tips: a retired tip is dropped once nothing reaches it; a
   linked worktree that no longer exists has its tip retired while a
-  ref still reaches it, and dropped otherwise. The main tip is never
-  dropped. [`ohara prune`](../cli/prune.md) sends this to a running
+  ref still reaches it, and dropped otherwise. A tip of the main
+  checkout or of a live worktree whose commit is being deleted (the
+  checkout was reset away from it) is rewound to the merge base of that
+  tip and the checkout's current `HEAD`, or removed when that merge base
+  is missing or not indexed; the checkout's next pass then records a
+  fresh tip (the daemon accepts a pass on a store whose last tip was
+  removed this way). Tips are settled before any commit is deleted, and
+  each edit is a compare-and-swap on the tip prune read, so a tip
+  another writer moved meanwhile is left alone. [`ohara prune`](../cli/prune.md) sends this to a running
   same-version daemon, or runs the same step in-process (no models
   loaded) when none is reachable.
 

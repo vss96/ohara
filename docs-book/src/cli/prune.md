@@ -30,7 +30,15 @@ ohara prune [PATH]
   filter; pruning drops the unreachable ones.
 - **Tips of removed worktrees.** A linked worktree that no longer
   exists has its tip retired while a ref still reaches it, and dropped
-  otherwise. The main checkout's tip is never removed.
+  otherwise.
+- **Tips on pruned commits are moved back.** When the main checkout or
+  a live worktree was reset away from its indexed tip, that tip's
+  commit is pruned, so the tip moves back to the merge base of the old
+  tip and the checkout's current `HEAD`. If you later restore the
+  commit (say from the reflog), the next index pass re-indexes it. When
+  there is no indexed merge base (the old commit was garbage-collected,
+  for instance), the tip is removed and the checkout's next index pass
+  records a new one.
 
 ## Where it runs
 

@@ -3,7 +3,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use ohara_core::{CommitSha, CommitVisibility, OhraError};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// [`CommitVisibility`] backed by libgit2 ancestry checks.
@@ -156,6 +156,14 @@ fn main_repo(path: &Path) -> Result<git2::Repository> {
 /// included. Unopenable worktrees and unborn HEADs are skipped with a
 /// warning; any other HEAD read error fails.
 fn worktree_heads(main: &git2::Repository) -> Result<Vec<git2::Oid>> {
+    Ok(named_worktree_heads(main)?
+        .into_iter()
+        .map(|(_, oid)| oid)
+        .collect())
+}
+
+/// [`worktree_heads`] keyed by worktree name.
+fn named_worktree_heads(main: &git2::Repository) -> Result<Vec<(String, git2::Oid)>> {
     let mut out = Vec::new();
     for name in main.worktrees()?.iter().flatten() {
         let wt_repo = match main
@@ -182,9 +190,50 @@ fn worktree_heads(main: &git2::Repository) -> Result<Vec<git2::Oid>> {
             tracing::debug!(worktree = %name, "worktree HEAD has no direct target; skipping");
             continue;
         };
-        out.push(oid);
+        out.push((name.to_string(), oid));
     }
     Ok(out)
+}
+
+/// The current HEAD of every checkout of the repository containing `path`:
+/// the main checkout under `""`, each linked worktree under its name. Unborn
+/// and unopenable HEADs are absent. Prune uses it to rewind a tip whose
+/// commit it is about to delete.
+pub fn checkout_heads(path: &Path) -> Result<HashMap<String, CommitSha>> {
+    let main = main_repo(path)?;
+    let mut out = HashMap::new();
+    match main.head() {
+        Ok(h) => {
+            let oid = h.peel_to_commit().context("peel main HEAD")?.id();
+            out.insert(String::new(), sha_of(oid)?);
+        }
+        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {}
+        Err(e) => return Err(anyhow::Error::new(e).context("read main HEAD")),
+    }
+    for (name, oid) in named_worktree_heads(&main)? {
+        out.insert(name, sha_of(oid)?);
+    }
+    Ok(out)
+}
+
+/// The merge base of `a` and `b`, or `None` when they share no history or
+/// either commit object is missing (e.g. collected by `git gc`).
+pub fn merge_base(path: &Path, a: &CommitSha, b: &CommitSha) -> Result<Option<CommitSha>> {
+    let repo = git2::Repository::discover(path)?;
+    let a = git2::Oid::from_str(a.as_str())?;
+    let b = git2::Oid::from_str(b.as_str())?;
+    if repo.find_commit(a).is_err() || repo.find_commit(b).is_err() {
+        return Ok(None);
+    }
+    match repo.merge_base(a, b) {
+        Ok(oid) => Ok(Some(sha_of(oid)?)),
+        Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(None),
+        Err(e) => Err(anyhow::Error::new(e).context("merge base")),
+    }
+}
+
+fn sha_of(oid: git2::Oid) -> Result<CommitSha> {
+    CommitSha::parse(&oid.to_string()).map_err(|e| anyhow!("{e}"))
 }
 
 #[cfg(test)]

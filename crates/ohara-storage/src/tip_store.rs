@@ -43,11 +43,34 @@ impl TipStore for SqliteStorage {
         .await
     }
 
-    async fn remove_indexed_tip(&self, repo_id: &RepoId, worktree: &WorktreeKey) -> Result<()> {
+    async fn remove_indexed_tip(
+        &self,
+        repo_id: &RepoId,
+        worktree: &WorktreeKey,
+        expected: &CommitSha,
+    ) -> Result<bool> {
         let id = repo_id.as_str().to_string();
         let key = worktree.as_str().to_string();
+        let sha = expected.as_str().to_string();
         with_conn(self.write_pool(), move |c| {
-            indexed_tip::remove(c, &id, &key)
+            indexed_tip::remove_if(c, &id, &key, &sha)
+        })
+        .await
+    }
+
+    async fn replace_indexed_tip(
+        &self,
+        repo_id: &RepoId,
+        worktree: &WorktreeKey,
+        expected: &CommitSha,
+        new: &CommitSha,
+    ) -> Result<bool> {
+        let id = repo_id.as_str().to_string();
+        let key = worktree.as_str().to_string();
+        let expected = expected.as_str().to_string();
+        let new = new.as_str().to_string();
+        with_conn(self.write_pool(), move |c| {
+            indexed_tip::replace_if(c, &id, &key, &expected, &new)
         })
         .await
     }
@@ -134,8 +157,35 @@ mod tests {
             .await
             .unwrap();
         s.set_indexed_tip(&id, &slot1(), &sha(B)).await.unwrap();
-        s.remove_indexed_tip(&id, &slot1()).await.unwrap();
+        assert!(
+            !s.remove_indexed_tip(&id, &slot1(), &sha(C)).await.unwrap(),
+            "a tip that moved on is not removed"
+        );
+        assert!(s.remove_indexed_tip(&id, &slot1(), &sha(B)).await.unwrap());
         assert_eq!(tips(&s, &id).await, vec![("".into(), A.into())]);
+    }
+
+    #[tokio::test]
+    async fn replace_indexed_tip_moves_only_a_tip_that_still_names_expected() {
+        let (_d, s, id) = setup().await;
+        let main = WorktreeKey::main();
+        s.set_indexed_tip(&id, &main, &sha(B)).await.unwrap();
+        assert!(!s
+            .replace_indexed_tip(&id, &main, &sha(C), &sha(A))
+            .await
+            .unwrap());
+        assert!(!s
+            .replace_indexed_tip(&id, &slot1(), &sha(B), &sha(A))
+            .await
+            .unwrap());
+        assert_eq!(tips(&s, &id).await, vec![("".into(), B.into())]);
+        assert!(s
+            .replace_indexed_tip(&id, &main, &sha(B), &sha(A))
+            .await
+            .unwrap());
+        assert_eq!(tips(&s, &id).await, vec![("".into(), A.into())]);
+        let st = s.get_index_status(&id).await.unwrap();
+        assert_eq!(st.last_indexed_commit.as_deref(), Some(A));
     }
 
     #[tokio::test]
@@ -171,7 +221,7 @@ mod tests {
             .any(|t| t.worktree == retired && t.worktree.is_retired() && t.sha == sha(B)));
         let st = s.get_index_status(&id).await.unwrap();
         assert_eq!(st.last_indexed_commit.as_deref(), Some(A));
-        s.remove_indexed_tip(&id, &retired).await.unwrap();
+        assert!(s.remove_indexed_tip(&id, &retired, &sha(B)).await.unwrap());
         assert_eq!(s.indexed_tips(&id).await.unwrap().len(), 1);
     }
 

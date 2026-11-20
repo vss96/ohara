@@ -240,7 +240,9 @@ impl IndexService {
 
     /// Delete indexed commits no ref or worktree HEAD reaches, then tidy
     /// tips: a retired tip goes once unreachable; a gone worktree's tip is
-    /// retired while a ref still reaches it, else dropped. The main tip stays.
+    /// retired while a ref still reaches it, else dropped. A main or live
+    /// worktree tip on a deleted commit is rewound to its merge base with
+    /// that checkout's HEAD, or dropped when there is none.
     pub(crate) async fn prune_unreachable(
         &self,
         engine: &RetrievalEngine,
@@ -276,8 +278,9 @@ fn outcome(indexed: bool, new_commits: u64, start: Instant) -> EnsureIndexedOutc
     }
 }
 
-/// Whether some indexed tip `t` has `visible(t, sha)`. No tips at all is
-/// [`EngineError::NoIndex`]: the daemon never indexes from scratch. The
+/// Whether some indexed tip `t` has `visible(t, sha)`. No tips in a store
+/// that was never indexed is [`EngineError::NoIndex`]: the daemon never
+/// indexes from scratch. The
 /// main checkout is never covered before it has its own tip, so its first
 /// pass runs and takes over the HEAD-symbol snapshot.
 async fn covered(
@@ -292,7 +295,10 @@ async fn covered(
         .await
         .map_err(EngineError::from)?;
     if tips.is_empty() {
-        return Err(no_index(handle));
+        return match ever_indexed(handle).await? {
+            true => Ok(false),
+            false => Err(no_index(handle)),
+        };
     }
     if main_needs_first_run(&handle.worktree, &tips) {
         return Ok(false);
@@ -312,6 +318,20 @@ async fn covered(
     Ok(false)
 }
 
+/// Whether a full index pass ever completed into this store (it stamps
+/// the index metadata). Prune can drop the last tip, when the tip's commit
+/// is gone and has no merge base with HEAD; such a store is still indexed,
+/// and the next pass re-establishes the tip.
+async fn ever_indexed(handle: &RepoHandle) -> crate::Result<bool> {
+    let stored = handle
+        .store
+        .storage
+        .get_index_metadata(&handle.repo_id)
+        .await
+        .map_err(EngineError::from)?;
+    Ok(!stored.components.is_empty())
+}
+
 fn no_index(handle: &RepoHandle) -> EngineError {
     EngineError::NoIndex {
         path: handle.repo_path.display().to_string(),
@@ -329,7 +349,7 @@ async fn index_locked(engine: &RetrievalEngine, handle: &RepoHandle) -> crate::R
         .await
         .map_err(EngineError::from)?
         .is_empty();
-    if !has_tips {
+    if !has_tips && !ever_indexed(handle).await? {
         return Err(no_index(handle));
     }
     let meta = crate::engine::compose_response_meta(handle).await?;
