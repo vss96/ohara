@@ -59,11 +59,11 @@ impl RepoIdentity {
             .with_context(|| format!("canonicalize {}", id_base.display()))?
             .to_string_lossy()
             .into_owned();
-        let first = match GitWalker::from_repository(main).first_commit_sha() {
-            Ok(sha) => sha,
-            Err(_) => {
-                GitWalker::from_repository(Repository::open(repo.path())?).first_commit_sha()?
-            }
+        let unborn = head_is_unborn(&main)?;
+        let workdir = repo.workdir().context("linked worktree has no workdir")?;
+        let first = match unborn {
+            true => GitWalker::open(workdir)?.first_commit_sha()?,
+            false => GitWalker::from_repository(main).first_commit_sha()?,
         };
         let name = repo
             .path()
@@ -71,7 +71,6 @@ impl RepoIdentity {
             .and_then(|n| n.to_str())
             .context("worktree admin dir has no name")?;
         let worktree = WorktreeKey::linked(name).map_err(|e| anyhow::anyhow!("{e}"))?;
-        let workdir = repo.workdir().context("linked worktree has no workdir")?;
         let worktree_path = std::fs::canonicalize(workdir)
             .with_context(|| format!("canonicalize {}", workdir.display()))?;
         Ok(Self::build(first, id_path, worktree_path, worktree))
@@ -90,6 +89,16 @@ impl RepoIdentity {
             first_commit_sha,
             worktree,
         }
+    }
+}
+
+/// True only when HEAD points at a branch that has no commits yet.
+/// Any other failure to read HEAD is a real error and propagates.
+fn head_is_unborn(repo: &Repository) -> Result<bool> {
+    match repo.head() {
+        Ok(_) => Ok(false),
+        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => Ok(true),
+        Err(e) => Err(anyhow::Error::new(e).context("read main repository HEAD")),
     }
 }
 
@@ -224,5 +233,27 @@ mod tests {
             RepoIdentity::resolve(&wt).unwrap().repo_id,
             RepoIdentity::resolve(main.path()).unwrap().repo_id
         );
+    }
+
+    #[test]
+    fn linked_worktree_of_unborn_main_falls_back_to_worktree_root() {
+        let main = tempfile::tempdir().unwrap();
+        let wt_parent = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(main.path());
+        let wt = wt_parent.path().join("w");
+        add_worktree(&repo, "w", &wt);
+        // Point the main repo's HEAD at a branch with no commits.
+        repo.set_head("refs/heads/unborn-main").unwrap();
+        assert!(head_is_unborn(&repo).unwrap());
+        let id = RepoIdentity::resolve(&wt).unwrap();
+        let wt_root = GitWalker::open(&wt).unwrap().first_commit_sha().unwrap();
+        assert_eq!(id.first_commit_sha, wt_root);
+    }
+
+    #[test]
+    fn head_is_unborn_is_false_for_a_repo_with_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_commit(dir.path());
+        assert!(!head_is_unborn(&repo).unwrap());
     }
 }
