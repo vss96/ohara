@@ -853,3 +853,24 @@ async fn no_fallback_keeps_legacy_behaviour() {
         "{lim}"
     );
 }
+
+#[tokio::test]
+async fn explain_change_with_fallback_hydrates_unindexed_commits_from_git() {
+    let mut storage = FakeStorageOrch::new();
+    storage.seed_commit(cm("aaaaaaaaaaaa", 1_000, "indexed change"));
+    storage.seed_hunk("aaaaaaaaaaaa", "src/a.rs", "+    a();\n");
+    let u = "uuuuuuuuuuuuuuuu";
+    let lookup = MapLookup(HashMap::from([(u.to_string(), cm(u, 2_000, "from git"))]));
+    let blamer = ScriptedBlamer {
+        out: fallback_ranges("aaaaaaaaaaaa", u),
+        last_args: Mutex::new(None),
+    };
+    let id = RepoId::from_parts("first", "/r");
+    let (hits, meta) =
+        explain_change_with_fallback(&storage, &blamer, Some(&lookup), &id, &fallback_query())
+            .await
+            .unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].commit_sha, u, "the git-hydrated commit is newest");
+    assert!((meta.blame_coverage - 1.0).abs() < 1e-6);
+}
