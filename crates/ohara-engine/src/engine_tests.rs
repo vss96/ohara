@@ -1609,3 +1609,98 @@ async fn prune_drops_a_main_tip_with_no_merge_base_and_the_next_daemon_pass_rest
         vec![(String::new(), head.to_string())]
     );
 }
+
+// ---- PR #138 review: daemon lifecycle ----
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn shutdown_waits_for_a_running_index_job_past_the_grace_period() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (_main, slot1) = repo_with_worktree().await;
+    let wt_repo = git2::Repository::open(&slot1).unwrap();
+    let head = commit_file(&wt_repo, "c.rs", "fn three() {}\n", "third").to_string();
+    let emb = Arc::new(QueueEmbedder::new(std::time::Duration::ZERO, true));
+    let engine = Arc::new(RetrievalEngine::new(emb.clone(), Arc::new(DummyReranker)));
+
+    let sock_dir = tempfile::tempdir().unwrap();
+    let sock = sock_dir.path().join("d.sock");
+    let stop = tokio_util::sync::CancellationToken::new();
+    let server = {
+        let (engine, sock, stop) = (engine.clone(), sock.clone(), stop.clone());
+        tokio::spawn(async move {
+            crate::server::serve_unix_with_grace(
+                engine,
+                &sock,
+                stop,
+                std::time::Duration::from_millis(100),
+            )
+            .await
+        })
+    };
+    while !sock.exists() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let client = {
+        let (sock, slot1, head) = (sock.clone(), slot1.clone(), head.clone());
+        tokio::spawn(async move {
+            let mut conn = tokio::net::UnixStream::connect(&sock).await.unwrap();
+            let req = crate::ipc::Request {
+                id: 1,
+                repo_path: Some(slot1.display().to_string()),
+                method: crate::ipc::RequestMethod::EnsureIndexed { sha: head },
+            };
+            let body = serde_json::to_vec(&req).unwrap();
+            crate::ipc::write_frame(&mut conn, &body).await.unwrap();
+            crate::ipc::read_frame(&mut conn).await
+        })
+    };
+    emb.started.notified().await;
+
+    // Shut down mid-job and hold the job past the grace period.
+    stop.cancel();
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    emb.release();
+
+    server.await.unwrap().expect("server");
+    let reply = client.await.unwrap().expect("the job's reply is delivered");
+    let resp: crate::ipc::Response = serde_json::from_slice(&reply).unwrap();
+    assert!(resp.error.is_none(), "job must finish: {resp:?}");
+    assert_eq!(tip_of(&slot1).await.as_deref(), Some(head.as_str()));
+    assert!(!engine.index_service.is_busy(), "no job outlives shutdown");
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn a_job_starting_after_the_idle_shutdown_decision_is_refused() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (_main, slot1) = repo_with_worktree().await;
+    let (_rec, engine) = recording_engine();
+
+    assert!(engine.begin_idle_shutdown(std::time::Duration::ZERO));
+    let err = engine
+        .index_worktree(&slot1)
+        .await
+        .expect_err("no job may start once shutdown was decided");
+    assert!(err.to_string().contains("shutting down"), "got {err}");
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn index_tip_for_a_worktree_subdirectory_coalesces_with_its_root() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (_main, slot1) = repo_with_worktree().await;
+    let sub = slot1.join("src");
+    std::fs::create_dir_all(&sub).unwrap();
+    let engine = make_test_engine();
+    assert!(engine.enqueue_index_tip(slot1.clone()));
+    assert!(
+        !engine.enqueue_index_tip(sub),
+        "a subdirectory names the same worktree"
+    );
+}

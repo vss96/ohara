@@ -122,6 +122,12 @@ impl RetrievalEngine {
         Duration::from_secs(now.saturating_sub(last))
     }
 
+    /// The idle watchdog's decision: `true` when the engine has been idle
+    /// for at least `idle`, in which case the daemon shuts down.
+    pub fn begin_idle_shutdown(&self, idle: Duration) -> bool {
+        self.idle_for() >= idle
+    }
+
     /// Returns the number of times `find_pattern` served `ResponseMeta`
     /// from the in-memory [`MetaCache`] (i.e. skipped storage).
     ///

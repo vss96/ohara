@@ -249,6 +249,19 @@ mod tests {
     }
 
     #[test]
+    fn an_interrupted_write_says_to_wait_before_running_in_process() {
+        let r = DaemonCallResult::Interrupted("reply lost".into()).route_write::<u32>(&[]);
+        let DaemonRoute::Refuse(msg) = r else {
+            panic!("an interrupted write must be refused");
+        };
+        assert!(msg.contains("ohara status"), "{msg}");
+        assert!(
+            msg.contains("only once it has finished"),
+            "--no-daemon must not be offered as an immediate retry: {msg}"
+        );
+    }
+
+    #[test]
     fn rebuild_refusal_appends_the_remedy_once() {
         let msg = rebuild_refusal("index needs rebuild (x)");
         assert_eq!(msg.matches(REBUILD_REMEDY).count(), 1);

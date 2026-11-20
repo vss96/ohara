@@ -114,7 +114,7 @@ pub async fn run_daemon_with_engine(
                 if watchdog_stop.is_cancelled() {
                     break;
                 }
-                if watchdog_engine.idle_for() >= idle {
+                if watchdog_engine.begin_idle_shutdown(idle) {
                     info!(?idle, "idle timeout reached, shutting down");
                     watchdog_stop.cancel();
                     break;
