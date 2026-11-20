@@ -101,8 +101,6 @@ pub(crate) fn seed_starters(dir: &Path) -> Result<()> {
 impl Workflow {
     /// Parse one workflow file's text. `name` is the file stem.
     pub fn parse(name: &str, text: &str) -> Result<Self> {
-        return Err(Error::Config("unimplemented".into()));
-        #[allow(unreachable_code)]
         validate_name(name)?;
         let raw: RawWorkflow =
             toml::from_str(text).map_err(|e| Error::Config(format!("workflow {name}: {e}")))?;

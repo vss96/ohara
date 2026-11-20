@@ -38,13 +38,16 @@ fn render(template: &str, values: &[(&str, &str)]) -> String {
                 .find(|(k, _)| *k == key)
                 .map(|(_, v)| (end, *v))
         });
-        let Some((end, value)) = hit else {
-            out.push_str("{{");
-            rest = after;
-            continue;
-        };
-        out.push_str(value);
-        rest = &after[end + 2..];
+        match hit {
+            Some((end, value)) => {
+                out.push_str(value);
+                rest = &after[end + 2..];
+            }
+            None => {
+                out.push_str("{{");
+                rest = after;
+            }
+        }
     }
     out.push_str(rest);
     out
@@ -120,8 +123,6 @@ pub(crate) async fn draft_in(
     cwd: &Path,
     task_dir: &Path,
 ) -> Result<Contract> {
-    return Err(Error::Contract("unimplemented".into()));
-    #[allow(unreachable_code)]
     let template = template_contract(task, wf)?;
     let scratch = task_dir.join("draft");
     std::fs::create_dir_all(&scratch)?;
@@ -290,18 +291,16 @@ mod tests {
             cost: None,
             exit_code: None,
         };
-        let fake = Arc::new(
-            FakeRuntime::new(name, vec![outcome]).with_edit(move |req| {
-                let Some(body) = draft else { return };
-                let marker = "exactly this file, and nowhere else:";
-                let path = req
-                    .prompt
-                    .split_once(marker)
-                    .map(|(_, rest)| rest.trim().lines().next().unwrap_or("").trim().to_string())
-                    .unwrap();
-                std::fs::write(path, body).unwrap();
-            }),
-        );
+        let fake = Arc::new(FakeRuntime::new(name, vec![outcome]).with_edit(move |req| {
+            let Some(body) = draft else { return };
+            let marker = "exactly this file, and nowhere else:";
+            let path = req
+                .prompt
+                .split_once(marker)
+                .map(|(_, rest)| rest.trim().lines().next().unwrap_or("").trim().to_string())
+                .unwrap();
+            std::fs::write(path, body).unwrap();
+        }));
         let by = fake.clone();
         (RoleRunner::new(&cfg, move |_, _| by.clone()).unwrap(), fake)
     }
@@ -384,9 +383,16 @@ scale_max = 10
         let dir = tempfile::tempdir().unwrap();
         let (runner, _) = runner(Some(VALID), AgentStatus::Crashed);
         let store = MemStore::default();
-        let c = draft_in(&runner, &store, &task("t"), &bug_workflow(), dir.path(), dir.path())
-            .await
-            .unwrap();
+        let c = draft_in(
+            &runner,
+            &store,
+            &task("t"),
+            &bug_workflow(),
+            dir.path(),
+            dir.path(),
+        )
+        .await
+        .unwrap();
         assert_eq!(c.scripts[0].name, "tests");
         assert_eq!(store.updated.lock().unwrap().len(), 1);
     }
