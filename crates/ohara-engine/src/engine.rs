@@ -7,11 +7,13 @@ use crate::cache::EmbeddingCache;
 use crate::cache::MetaCache;
 use crate::error::EngineError;
 use crate::handle::{RepoHandle, RepoStore};
+use crate::index_service::{EnsureIndexedOutcome, IndexService, PruneOutcome};
 use ohara_core::embed::RerankProvider;
 use ohara_core::explain::ExplainQuery;
 use ohara_core::index_metadata::CompatibilityStatus;
 use ohara_core::query::{PatternQuery, ResponseMeta};
 use ohara_core::types::RepoId;
+use ohara_core::CommitSha;
 use ohara_core::EmbeddingProvider;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,7 +23,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 mod open;
-mod visibility;
+pub(crate) mod visibility;
 
 /// Result returned by [`RetrievalEngine::find_pattern`].
 ///
@@ -67,6 +69,8 @@ pub struct RetrievalEngine {
     /// Unix-second timestamp of the last dispatched request.
     /// Written by [`Self::touch`]; read by [`Self::idle_for`].
     last_request_at: AtomicU64,
+    /// Plan-33 daemon-side indexing; serialises jobs per repository.
+    index_service: IndexService,
 }
 
 impl RetrievalEngine {
@@ -89,6 +93,7 @@ impl RetrievalEngine {
             ancestry_filtered_count: AtomicU64::new(0),
             blame_cache_hit_count: AtomicU64::new(0),
             last_request_at: AtomicU64::new(now_unix),
+            index_service: IndexService::default(),
         }
     }
 
@@ -223,6 +228,41 @@ impl RetrievalEngine {
         self.cached_meta(&handle).await
     }
 
+    /// Blocks until `sha` is covered by some indexed tip, running one
+    /// incremental index of this worktree if needed. `indexed == false`
+    /// means it already was. Never indexes a repo from scratch.
+    pub async fn ensure_indexed(
+        &self,
+        repo_path: impl AsRef<Path>,
+        sha: &CommitSha,
+    ) -> crate::Result<EnsureIndexedOutcome> {
+        self.index_service
+            .ensure_indexed(self, repo_path.as_ref(), sha)
+            .await
+    }
+
+    /// Index this worktree's HEAD now (used by the queue worker and by
+    /// [`Self::ensure_indexed`]).
+    pub async fn index_worktree(
+        &self,
+        repo_path: impl AsRef<Path>,
+    ) -> crate::Result<EnsureIndexedOutcome> {
+        self.index_service
+            .index_worktree(self, repo_path.as_ref())
+            .await
+    }
+
+    /// Delete indexed commits no ref or worktree HEAD reaches and the tips
+    /// of linked worktrees that no longer exist.
+    pub async fn prune_unreachable(
+        &self,
+        repo_path: impl AsRef<Path>,
+    ) -> crate::Result<PruneOutcome> {
+        self.index_service
+            .prune_unreachable(self, repo_path.as_ref())
+            .await
+    }
+
     /// Ask the reranker to drop its session when idle for at least `idle`.
     /// Returns `true` when a session was dropped (plan-29 tiered unload).
     pub async fn unload_idle_reranker(&self, idle: std::time::Duration) -> bool {
@@ -319,7 +359,7 @@ impl RetrievalEngine {
 /// internally-consistent `--embed-cache=diff` index then assesses as
 /// `Compatible`, not `NeedsRebuild`. Mirrors the same override in
 /// `ohara-cli`'s `status` command.
-async fn compose_response_meta(handle: &RepoHandle) -> crate::Result<ResponseMeta> {
+pub(crate) async fn compose_response_meta(handle: &RepoHandle) -> crate::Result<ResponseMeta> {
     let behind = ohara_git::GitCommitsBehind::open(&handle.repo_path)
         .map_err(|e| EngineError::Git(format!("commits_behind open: {e}")))?;
     let st = ohara_core::query::compute_worktree_index_status(

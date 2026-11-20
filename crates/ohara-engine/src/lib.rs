@@ -10,6 +10,7 @@ pub mod daemon;
 mod engine;
 mod error;
 mod handle;
+mod index_service;
 pub mod ipc;
 pub mod registry;
 mod runtime_metadata;
@@ -24,6 +25,7 @@ pub use engine::FindPatternResult;
 pub use engine::RetrievalEngine;
 pub use error::EngineError;
 pub use handle::{RepoHandle, RepoStore};
+pub use index_service::{EnsureIndexedOutcome, PruneOutcome};
 pub use runtime_metadata::current_runtime_metadata;
 pub use server::serve_unix;
 

@@ -1,7 +1,7 @@
 //! `TipStore` implementation for [`SqliteStorage`].
 
 use crate::storage_impl::with_conn;
-use crate::tables::{indexed_tip, repo};
+use crate::tables::{indexed_tip, prune, repo};
 use crate::SqliteStorage;
 use async_trait::async_trait;
 use ohara_core::{CommitSha, IndexedTip, RepoId, Result, TipStore, WorktreeKey};
@@ -55,12 +55,26 @@ impl TipStore for SqliteStorage {
         .await
     }
 
+    /// The index holds one repository, so every commit row is this repo's.
     async fn indexed_commit_shas(&self, _repo_id: &RepoId) -> Result<Vec<CommitSha>> {
-        Ok(vec![]) // Task 11
+        let rows = with_conn(self.pool(), |c| prune::list_commit_shas(c)).await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for sha in rows {
+            let Ok(parsed) = CommitSha::parse(&sha) else {
+                tracing::warn!(sha = %sha, "skipping commit row with invalid sha");
+                continue;
+            };
+            out.push(parsed);
+        }
+        Ok(out)
     }
 
-    async fn delete_commits(&self, _repo_id: &RepoId, _shas: &[CommitSha]) -> Result<u64> {
-        Ok(0) // Task 11
+    async fn delete_commits(&self, _repo_id: &RepoId, shas: &[CommitSha]) -> Result<u64> {
+        if shas.is_empty() {
+            return Ok(0);
+        }
+        let shas: Vec<String> = shas.iter().map(|s| s.as_str().to_string()).collect();
+        with_conn(self.write_pool(), move |c| prune::delete_commits(c, &shas)).await
     }
 }
 

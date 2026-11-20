@@ -5,6 +5,7 @@
 use super::RetrievalEngine;
 use crate::error::EngineError;
 use crate::handle::{RepoHandle, RepoStore};
+use ohara_core::types::RepoId;
 use ohara_git::RepoIdentity;
 use std::path::Path;
 use std::sync::Arc;
@@ -109,5 +110,15 @@ impl RetrievalEngine {
         self.meta_cache.invalidate(&repo_id);
         self.blame_cache.invalidate_repo(&repo_id);
         Ok(())
+    }
+
+    /// Drop the caches an index or prune job makes stale for `repo_id`:
+    /// the `MetaCache` entries of every worktree and the `BlameCache`
+    /// entries. The query `EmbeddingCache` and the `AncestryCache` are
+    /// not repo state, so they stay.
+    pub(crate) fn refresh_repo_caches(&self, repo_id: &RepoId) {
+        // Keep RepoStore/RepoHandles: same DB file, and dropping them races open_repo into a second pool.
+        self.meta_cache.invalidate(repo_id);
+        self.blame_cache.invalidate_repo(repo_id);
     }
 }

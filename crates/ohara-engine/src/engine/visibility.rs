@@ -2,7 +2,7 @@
 //! worktree's HEAD cannot reach.
 
 use super::RetrievalEngine;
-use crate::cache::CachedVisibility;
+use crate::cache::{AncestryCache, CachedVisibility};
 use crate::error::EngineError;
 use crate::handle::RepoHandle;
 use ohara_core::query::{PatternHit, PatternQuery};
@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 /// HEAD commit of the checkout at `repo_path`, read off the async executor.
-async fn read_head(repo_path: &Path) -> crate::Result<CommitSha> {
+pub(crate) async fn read_head(repo_path: &Path) -> crate::Result<CommitSha> {
     let path = repo_path.to_path_buf();
     let hex = tokio::task::spawn_blocking(move || -> crate::Result<String> {
         let repo = git2::Repository::open(&path)
@@ -29,6 +29,11 @@ async fn read_head(repo_path: &Path) -> crate::Result<CommitSha> {
 }
 
 impl RetrievalEngine {
+    /// The engine-wide ancestry cache shared by every visibility oracle.
+    pub(crate) fn ancestry_cache(&self) -> Arc<AncestryCache> {
+        self.ancestry.clone()
+    }
+
     /// Number of `find_pattern` calls that needed the ancestry filter
     /// (some indexed tip was not reachable from the querying HEAD).
     pub fn ancestry_filtered_queries(&self) -> u64 {
