@@ -11,6 +11,7 @@ use crate::error::Result;
 pub mod fake;
 pub mod generic;
 pub mod process;
+pub mod roles;
 
 /// One agent invocation.
 #[derive(Debug, Clone)]
