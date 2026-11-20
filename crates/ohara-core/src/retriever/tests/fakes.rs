@@ -268,15 +268,14 @@ pub struct ScriptedReranker {
 #[async_trait]
 impl RerankProvider for ScriptedReranker {
     async fn rerank(&self, _query: &str, candidates: &[&str]) -> crate::Result<Vec<f32>> {
-        // Keys are diff texts; the passage is `message\n\n<diff>`
-        // (`rerank::rerank_passage`), so match on the diff suffix.
+        // Keys are diff texts; the passage is `<message>\n\n<diff>`
+        // (`rerank::rerank_passage`). Fake messages (`msg-{sha}`) hold no
+        // blank line, so the diff is everything after the first one.
         Ok(candidates
             .iter()
             .map(|c| {
-                self.scores
-                    .iter()
-                    .find(|(diff, _)| c.ends_with(diff.as_str()))
-                    .map_or(0.0, |(_, s)| *s)
+                let diff = c.split_once("\n\n").map_or(*c, |(_, d)| d);
+                *self.scores.get(diff).unwrap_or(&0.0)
             })
             .collect())
     }

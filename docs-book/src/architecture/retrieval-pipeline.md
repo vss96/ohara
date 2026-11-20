@@ -93,8 +93,11 @@ The top 50 fused candidates feed the next stage.
 ## Stage 3: cross-encoder rerank
 
 `bge-reranker-base` (~110 MB ONNX, CPU-only) scores each
-`(query, hunk_text)` pair pointwise. The model downloads on first use
-and is cached locally.
+`(query, passage)` pair pointwise, where the passage is
+`<commit_message>\n\n<diff_text>`. The message carries the change's
+intent, which the diff often never names, and it leads so the model's
+512-token truncation only trims the end of the diff. The model
+downloads on first use and is cached locally.
 
 Opt-out: `find_pattern` accepts `no_rerank: true` (MCP) or
 `--no-rerank` (CLI). When opted out, the `Retriever` skips the model
