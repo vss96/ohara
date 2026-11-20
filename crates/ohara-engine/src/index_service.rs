@@ -11,7 +11,9 @@ use ohara_core::index_metadata::{
     runtime_metadata_from, CompatibilityStatus, RuntimeIndexMetadata,
 };
 use ohara_core::types::RepoId;
-use ohara_core::{CommitSha, CommitVisibility, EmbedMode, IndexedTip, Indexer, TipContext};
+use ohara_core::{
+    CommitSha, CommitVisibility, EmbedMode, IndexedTip, Indexer, TipContext, WorktreeKey,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -41,7 +43,9 @@ pub struct EnsureIndexedOutcome {
 pub struct PruneOutcome {
     /// Commits removed from the index because nothing reaches them any more.
     pub commits_deleted: u64,
-    /// Linked-worktree tips removed because their worktree no longer exists.
+    /// Tips removed: those of linked worktrees that no longer exist (kept
+    /// as retired tips while a ref still reaches them) and retired tips
+    /// that nothing reaches any more.
     pub tips_removed: u64,
 }
 
@@ -211,8 +215,9 @@ impl IndexService {
         Ok(outcome(true, new_commits, start))
     }
 
-    /// Delete indexed commits no ref or worktree HEAD reaches, then drop
-    /// tips of linked worktrees that no longer exist. The main tip stays.
+    /// Delete indexed commits no ref or worktree HEAD reaches, then tidy
+    /// tips: a retired tip goes once unreachable; a gone worktree's tip is
+    /// retired while a ref still reaches it, else dropped. The main tip stays.
     pub(crate) async fn prune_unreachable(
         &self,
         engine: &RetrievalEngine,
@@ -258,19 +263,62 @@ async fn prune_locked(handle: &RepoHandle) -> crate::Result<(u64, u64)> {
             .await
             .map_err(EngineError::from)?;
     }
-    let stale: Vec<IndexedTip> = tips
+    let mut tips_removed = 0u64;
+    let all = tips
         .indexed_tips(&handle.repo_id)
         .await
-        .map_err(EngineError::from)?
-        .into_iter()
-        .filter(|t| !t.worktree.is_main() && !live_worktrees.contains(t.worktree.as_str()))
-        .collect();
-    for tip in &stale {
+        .map_err(EngineError::from)?;
+    for tip in all {
+        let fate = tip_fate(&tip, &reachable, &live_worktrees);
+        if fate == TipFate::Keep {
+            continue;
+        }
+        if fate == TipFate::Retire {
+            let key = WorktreeKey::retired(&tip.worktree, &tip.sha);
+            tips.set_indexed_tip(&handle.repo_id, &key, &tip.sha)
+                .await
+                .map_err(EngineError::from)?;
+        }
         tips.remove_indexed_tip(&handle.repo_id, &tip.worktree)
             .await
             .map_err(EngineError::from)?;
+        tips_removed += 1;
     }
-    Ok((commits_deleted, stale.len() as u64))
+    Ok((commits_deleted, tips_removed))
+}
+
+/// What prune does with one indexed tip.
+#[derive(Debug, PartialEq, Eq)]
+enum TipFate {
+    Keep,
+    /// Remove it.
+    Drop,
+    /// Its worktree is gone but a ref still reaches its commits: keep it
+    /// as a retired tip so those commits stay behind the visibility filter.
+    Retire,
+}
+
+/// The main tip always stays. A live worktree's tip stays. A retired tip
+/// stays while some ref or worktree HEAD reaches it. A gone worktree's tip
+/// is retired while reachable, else dropped.
+fn tip_fate(tip: &IndexedTip, reachable: &HashSet<String>, live: &HashSet<String>) -> TipFate {
+    let reached = reachable.contains(tip.sha.as_str());
+    if tip.worktree.is_main() {
+        return TipFate::Keep;
+    }
+    if tip.worktree.is_retired() {
+        return match reached {
+            true => TipFate::Keep,
+            false => TipFate::Drop,
+        };
+    }
+    if live.contains(tip.worktree.as_str()) {
+        return TipFate::Keep;
+    }
+    match reached {
+        true => TipFate::Retire,
+        false => TipFate::Drop,
+    }
 }
 
 /// Metadata describing the engine's live embedder (model id, dimension)
