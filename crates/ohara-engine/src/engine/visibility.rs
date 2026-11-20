@@ -11,21 +11,16 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-/// HEAD commit of the checkout at `repo_path`, read off the async executor.
-pub(crate) async fn read_head(repo_path: &Path) -> crate::Result<CommitSha> {
+/// HEAD commit of the checkout containing `repo_path` (discovered upward,
+/// so a subdirectory works), read off the async executor. `None` when HEAD
+/// is an unborn branch.
+pub(crate) async fn read_head(repo_path: &Path) -> crate::Result<Option<CommitSha>> {
     let path = repo_path.to_path_buf();
-    let hex = tokio::task::spawn_blocking(move || -> crate::Result<String> {
-        let repo = git2::Repository::open(&path)
-            .map_err(|e| EngineError::Git(format!("open {}: {e}", path.display())))?;
-        let commit = repo
-            .head()
-            .and_then(|h| h.peel_to_commit())
-            .map_err(|e| EngineError::Git(format!("read HEAD: {e}")))?;
-        Ok(commit.id().to_string())
+    tokio::task::spawn_blocking(move || {
+        ohara_git::read_head(&path).map_err(|e| EngineError::Git(format!("read HEAD: {e:#}")))
     })
     .await
-    .map_err(|e| EngineError::Internal(format!("head task: {e}")))??;
-    CommitSha::parse(&hex).map_err(EngineError::from)
+    .map_err(|e| EngineError::Internal(format!("head task: {e}")))?
 }
 
 impl RetrievalEngine {
@@ -40,8 +35,8 @@ impl RetrievalEngine {
         self.ancestry_filtered_count.load(Ordering::Relaxed)
     }
 
-    /// Perf-harness only (`perf-hooks` feature): skip the whole visibility
-    /// step (HEAD read, tip check and post-filter) so a benchmark can
+    /// Perf-harness only (`perf-hooks` feature): skip the visibility step
+    /// (tip check and post-filter; HEAD is still read) so a benchmark can
     /// measure what the filter adds. Never enabled by the shipped binaries.
     #[cfg(feature = "perf-hooks")]
     #[doc(hidden)]
@@ -50,11 +45,12 @@ impl RetrievalEngine {
     }
 
     /// Run the retriever for `handle`, filtering to commits visible from
-    /// the worktree's HEAD. When every indexed tip is visible (or none
-    /// exist) the unfiltered fast path is taken.
+    /// `head`, the worktree's HEAD. When every indexed tip is visible (or
+    /// none exist) the unfiltered fast path is taken.
     pub(super) async fn retrieve_visible(
         &self,
         handle: &RepoHandle,
+        head: &CommitSha,
         query: &PatternQuery,
         now_unix: i64,
     ) -> crate::Result<Vec<PatternHit>> {
@@ -67,7 +63,6 @@ impl RetrievalEngine {
                 .map_err(EngineError::from)?;
             return Ok(hits);
         }
-        let head = read_head(&handle.repo_path).await?;
         let tips = handle
             .store
             .tips
@@ -79,12 +74,12 @@ impl RetrievalEngine {
         let oracle = CachedVisibility::new(Arc::new(git), self.ancestry.clone());
         let tip_shas: Vec<CommitSha> = tips.into_iter().map(|t| t.sha).collect();
         let verdicts = oracle
-            .visible(&head, &tip_shas)
+            .visible(head, &tip_shas)
             .await
             .map_err(EngineError::from)?;
         let all_visible = verdicts.iter().all(|v| *v);
         let scope = (!all_visible).then_some(VisibilityScope {
-            head: &head,
+            head,
             oracle: &oracle,
         });
         if scope.is_some() {

@@ -211,6 +211,16 @@ impl RetrievalEngine {
         repo_path: impl AsRef<Path>,
         query: PatternQuery,
     ) -> crate::Result<FindPatternResult> {
+        // An unborn HEAD has no history to search (and no repo identity yet).
+        let Some(head) = visibility::read_head(repo_path.as_ref()).await? else {
+            return Ok(FindPatternResult {
+                hits: Vec::new(),
+                meta: ResponseMeta {
+                    hint: Some("HEAD has no commits yet; nothing to search".into()),
+                    ..ResponseMeta::default()
+                },
+            });
+        };
         let handle = self.open_repo(repo_path).await?;
         let meta = self.cached_meta(&handle).await?;
         // Plan-29: refuse before touching the vector index. KNN against
@@ -223,7 +233,9 @@ impl RetrievalEngine {
             });
         }
         let now_unix = chrono::Utc::now().timestamp();
-        let hits = self.retrieve_visible(&handle, &query, now_unix).await?;
+        let hits = self
+            .retrieve_visible(&handle, &head, &query, now_unix)
+            .await?;
         Ok(FindPatternResult { hits, meta })
     }
 

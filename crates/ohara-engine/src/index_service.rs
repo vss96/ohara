@@ -380,7 +380,9 @@ async fn index_locked(engine: &RetrievalEngine, handle: &RepoHandle) -> crate::R
             })
         }
     }
-    let head = read_head(&handle.repo_path).await?;
+    let head = read_head(&handle.repo_path)
+        .await?
+        .ok_or_else(|| EngineError::Git("HEAD has no commits yet; nothing to index".into()))?;
     let commit_source = Arc::new(
         ohara_git::GitCommitSource::open(&handle.repo_path)
             .map_err(|e| EngineError::Git(format!("open commit source: {e:#}")))?,

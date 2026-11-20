@@ -1,13 +1,13 @@
 //! `--incremental` fast path and tip bookkeeping helpers for `ohara index`.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use ohara_core::{CommitSha, CommitsBehind, TipStore};
 use ohara_git::RepoIdentity;
 
 /// HEAD of the worktree as a validated [`CommitSha`].
 pub(super) fn head_sha(id: &RepoIdentity) -> Result<CommitSha> {
-    let head = ohara_git::GitWalker::open(&id.worktree_path)?.head_commit_sha()?;
-    Ok(CommitSha::parse(&head)?)
+    ohara_git::read_head(&id.worktree_path)?
+        .ok_or_else(|| anyhow!("HEAD has no commits yet; nothing to index"))
 }
 
 /// True when every commit reachable from HEAD is already covered by an

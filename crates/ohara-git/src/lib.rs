@@ -11,11 +11,13 @@
 
 pub mod blame;
 pub mod diff;
+pub mod head;
 pub mod identity;
 pub mod visibility;
 pub mod walker;
 
 pub use blame::Blamer;
+pub use head::read_head;
 pub use identity::RepoIdentity;
 pub use visibility::{reachable_commit_shas, GitVisibility};
 pub use walker::GitWalker;
