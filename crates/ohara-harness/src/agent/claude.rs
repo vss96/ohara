@@ -15,7 +15,9 @@ use ohara_core::task::{CostCents, RuntimeName};
 
 use super::process::run_streaming;
 use super::stream::{last_json_line, last_json_line_in_file};
-use super::{classify_failure, AgentOutcome, AgentRequest, AgentRuntime, AgentStatus};
+use super::{
+    classify_error_result, classify_failure, AgentOutcome, AgentRequest, AgentRuntime, AgentStatus,
+};
 use crate::error::Result;
 
 const ALLOWED_TOOLS: &str = "Bash Edit Write Read Glob Grep";
@@ -33,16 +35,6 @@ struct ResultEvent {
     is_error: bool,
     result: String,
     cost: Option<CostCents>,
-}
-
-/// Classify an `is_error` result event. The result text is preferred; when it
-/// is generic (classifies as `Crashed`) the stdout/stderr tail is consulted,
-/// since rate-limit/auth markers sometimes appear only there.
-fn classify_error_result(result: &str, tail: &str) -> AgentStatus {
-    match classify_failure(result) {
-        AgentStatus::Crashed => classify_failure(tail),
-        specific => specific,
-    }
 }
 
 /// Status for a parsed result event. A clean result alone is not success:

@@ -101,6 +101,16 @@ pub fn classify_failure(stdout_tail: &str) -> AgentStatus {
     AgentStatus::Crashed
 }
 
+/// Classify an `is_error` result event. The result text is preferred; when it
+/// is generic (classifies as `Crashed`) the stdout/stderr tail is consulted,
+/// since rate-limit/auth markers sometimes appear only there.
+pub(crate) fn classify_error_result(result: &str, tail: &str) -> AgentStatus {
+    match classify_failure(result) {
+        AgentStatus::Crashed => classify_failure(tail),
+        specific => specific,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
