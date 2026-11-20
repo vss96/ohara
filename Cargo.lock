@@ -2510,6 +2510,7 @@ dependencies = [
  "ohara-cli",
  "ohara-core",
  "ohara-embed",
+ "ohara-engine",
  "ohara-mcp",
  "ohara-storage",
  "ort",
