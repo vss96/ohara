@@ -326,6 +326,18 @@ mod tests {
     }
 
     #[test]
+    fn walk_from_a_given_commit_ignores_where_head_has_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c1, _c2, c3, _f1) = branched_fixture(dir.path());
+        // HEAD is `feat` (f1); walking from c3 must not see f1.
+        let w = GitWalker::open(dir.path()).unwrap();
+        assert_eq!(
+            msgs(&w.list_commits_from_hiding(&c3, &[&c1]).unwrap()),
+            ["c2", "c3"]
+        );
+    }
+
+    #[test]
     fn missing_or_malformed_hide_entries_are_skipped() {
         let dir = tempfile::tempdir().unwrap();
         let (_c1, c2, _c3, _f1) = branched_fixture(dir.path());

@@ -1482,11 +1482,12 @@ mod phase_timing_tests {
         }
     }
 
-    /// Records the `hide` argument of `list_commits_hiding`; can poison one sha.
+    /// Records the `from` / `hide` arguments of the hiding walk; can poison one sha.
     struct HidingSource {
         commits: Vec<CommitMeta>,
         poison: Option<String>,
         seen_hide: Mutex<Option<Vec<String>>>,
+        seen_from: Mutex<Option<String>>,
     }
 
     impl HidingSource {
@@ -1495,6 +1496,7 @@ mod phase_timing_tests {
                 commits,
                 poison: None,
                 seen_hide: Mutex::new(None),
+                seen_from: Mutex::new(None),
             }
         }
     }
@@ -1509,6 +1511,14 @@ mod phase_timing_tests {
         async fn list_commits_hiding(&self, hide: &[String]) -> Result<Vec<CommitMeta>> {
             *self.seen_hide.lock().unwrap() = Some(hide.to_vec());
             Ok(self.commits.clone())
+        }
+        async fn list_commits_from_hiding(
+            &self,
+            from: &str,
+            hide: &[String],
+        ) -> Result<Vec<CommitMeta>> {
+            *self.seen_from.lock().unwrap() = Some(from.to_string());
+            self.list_commits_hiding(hide).await
         }
         async fn hunks_for_commit(&self, sha: &str) -> Result<Vec<Hunk>> {
             if self.poison.as_deref() == Some(sha) {
@@ -1580,6 +1590,8 @@ mod phase_timing_tests {
             .await
             .expect("run");
 
+        let from = source.seen_from.lock().unwrap().clone();
+        assert_eq!(from, Some("f".repeat(40)), "walk must start at ctx.head");
         let mut hidden = source.seen_hide.lock().unwrap().clone().expect("hide seen");
         hidden.sort();
         assert_eq!(hidden, vec!["a".repeat(40), "b".repeat(40)]);
