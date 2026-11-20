@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 mod prune;
-use prune::prune_locked;
+use prune::{prune_and_refresh, prune_retired_after_index};
 
 /// Result of [`RetrievalEngine::ensure_indexed`] and
 /// [`RetrievalEngine::index_worktree`].
@@ -227,15 +227,7 @@ impl IndexService {
         let handle = engine.open_repo(repo_path).await?;
         let lock = self.lock_for(&handle.repo_id)?;
         let _job = lock.lock().await;
-        let result = prune_locked(&handle).await;
-        // Refresh even on failure: earlier delete batches are already committed.
-        engine.refresh_repo_caches(&handle.repo_id);
-        let (commits_deleted, tips_removed) = result?;
-        tracing::info!(commits_deleted, tips_removed, "pruned unreachable commits");
-        Ok(PruneOutcome {
-            commits_deleted,
-            tips_removed,
-        })
+        prune_and_refresh(engine, &handle).await
     }
 }
 
@@ -305,7 +297,8 @@ fn no_index(handle: &RepoHandle) -> EngineError {
 
 /// One incremental pass over `handle`'s worktree. Caller holds the repo's
 /// job lock. Refuses unless the stored index is fully `Compatible` so
-/// mismatched vectors are never appended.
+/// mismatched vectors are never appended. A successful pass then prunes
+/// under the same lock when the repo has a retired tip.
 async fn index_locked(engine: &RetrievalEngine, handle: &RepoHandle) -> crate::Result<u64> {
     let store = &handle.store;
     let has_tips = !store
@@ -396,5 +389,6 @@ async fn index_locked(engine: &RetrievalEngine, handle: &RepoHandle) -> crate::R
         new_commits = report.new_commits,
         "indexed worktree"
     );
+    prune_retired_after_index(engine, handle).await;
     Ok(report.new_commits as u64)
 }

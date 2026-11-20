@@ -1,6 +1,8 @@
 //! Prune for the shared store (plan-33): delete commits no ref or
 //! worktree HEAD reaches and tidy the indexed tips.
 
+use super::PruneOutcome;
+use crate::engine::RetrievalEngine;
 use crate::error::EngineError;
 use crate::handle::RepoHandle;
 use ohara_core::{CommitSha, IndexedTip, WorktreeKey};
@@ -9,6 +11,43 @@ use std::path::PathBuf;
 
 /// Commits deleted per `TipStore::delete_commits` call (one transaction each).
 const PRUNE_BATCH: usize = 500;
+
+/// The prune job body shared by [`RetrievalEngine::prune_unreachable`] and
+/// the auto-prune after an index job. Caller holds the repo's job lock.
+pub(super) async fn prune_and_refresh(
+    engine: &RetrievalEngine,
+    handle: &RepoHandle,
+) -> crate::Result<PruneOutcome> {
+    let result = prune_locked(handle).await;
+    // Refresh even on failure: earlier delete batches are already committed.
+    engine.refresh_repo_caches(&handle.repo_id);
+    let (commits_deleted, tips_removed) = result?;
+    tracing::info!(commits_deleted, tips_removed, "pruned unreachable commits");
+    Ok(PruneOutcome {
+        commits_deleted,
+        tips_removed,
+    })
+}
+
+/// After a successful index job: when the repo has a retired tip (left by
+/// a reset, amend or rebase), prune so an unreachable one stops keeping
+/// the visibility fast path off. Caller holds the repo's job lock. A
+/// failure is logged and never fails the index job.
+pub(super) async fn prune_retired_after_index(engine: &RetrievalEngine, handle: &RepoHandle) {
+    let tips = match handle.store.tips.indexed_tips(&handle.repo_id).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "auto-prune: could not list tips");
+            return;
+        }
+    };
+    if !tips.iter().any(|t| t.worktree.is_retired()) {
+        return;
+    }
+    if let Err(e) = prune_and_refresh(engine, handle).await {
+        tracing::warn!(error = %e, "auto-prune after index failed");
+    }
+}
 
 /// Prune body; returns `(commits_deleted, tips_removed)`. Caller holds
 /// the repo's job lock and refreshes caches whatever the result.
