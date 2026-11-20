@@ -16,9 +16,26 @@ use crate::query::PatternQuery;
 use crate::retriever::{ranking, rerank, RankingWeights, RetrievalLane};
 use crate::storage::{HunkHit, HunkId};
 use crate::types::RepoId;
+use crate::visibility::VisibilityScope;
+use crate::CommitSha;
 use futures::future::join_all;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+/// Per-call inputs to [`run`].
+pub struct RunContext<'a> {
+    /// The query being served.
+    pub query: &'a PatternQuery,
+    /// Repo the lanes search.
+    pub repo_id: &'a RepoId,
+    /// Hard truncation after recency.
+    pub final_k: usize,
+    /// Timestamp the recency multiplier ages against.
+    pub now_unix: i64,
+    /// When `Some`, candidates not reachable from the scope's HEAD are
+    /// dropped before RRF fusion. `None` leaves behaviour unchanged.
+    pub visibility: Option<VisibilityScope<'a>>,
+}
 
 /// Run the full coordinator pipeline.
 ///
@@ -29,17 +46,20 @@ use std::sync::Arc;
 /// - `reranker`: when `Some`, the cross-encoder runs on the post-RRF pool.
 ///   When `None`, that step is skipped (degraded mode: post-RRF order
 ///   with recency multiplier still applied).
-/// - `final_k`: hard truncation after recency.
-/// - `now_unix`: timestamp the recency multiplier ages against.
+/// - `context`: per-call inputs (see [`RunContext`]).
 pub async fn run(
     lanes: &[Box<dyn RetrievalLane>],
     weights: &RankingWeights,
     reranker: Option<&Arc<dyn RerankProvider>>,
-    query: &PatternQuery,
-    repo_id: &RepoId,
-    final_k: usize,
-    now_unix: i64,
+    context: RunContext<'_>,
 ) -> crate::Result<Vec<HunkHit>> {
+    let RunContext {
+        query,
+        repo_id,
+        final_k,
+        now_unix,
+        visibility,
+    } = context;
     // 1. Fire all lanes in parallel. Disabled lanes return Ok(vec![])
     //    without touching storage. Lanes gather up to `lane_top_k`
     //    candidates each (the documented per-lane fan-in for RRF);
@@ -67,6 +87,12 @@ pub async fn run(
             })
             .collect();
         rankings.push(ranking);
+    }
+
+    // 2b. Drop candidates the querying worktree cannot see, before the
+    //     rerank pool is cut so invisible hits never crowd out visible ones.
+    if let Some(scope) = visibility {
+        retain_visible(&mut rankings, &mut by_id, scope).await?;
     }
 
     // 3. RRF fuse + truncate to rerank pool. `fuse_to_pool` shares hits
@@ -109,6 +135,51 @@ pub async fn run(
     // 6. Truncate to caller's final_k.
     hits.truncate(final_k);
     Ok(hits)
+}
+
+/// Ask the oracle once about every distinct commit in `by_id`, then remove
+/// invisible hunks from `by_id` and every ranking. A sha that is not a valid
+/// `CommitSha` is invisible.
+async fn retain_visible(
+    rankings: &mut [Vec<HunkId>],
+    by_id: &mut HashMap<HunkId, Arc<HunkHit>>,
+    scope: VisibilityScope<'_>,
+) -> crate::Result<()> {
+    let mut distinct: Vec<CommitSha> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    for hit in by_id.values() {
+        let raw = hit.commit.commit_sha.as_str();
+        if !seen.insert(raw) {
+            continue;
+        }
+        if let Ok(parsed) = CommitSha::parse(raw) {
+            distinct.push(parsed);
+        }
+    }
+    if distinct.is_empty() {
+        by_id.clear();
+        rankings.iter_mut().for_each(Vec::clear);
+        return Ok(());
+    }
+    let verdicts = scope.oracle.visible(scope.head, &distinct).await?;
+    if verdicts.len() != distinct.len() {
+        return Err(crate::OhraError::Git(format!(
+            "visibility oracle returned {} verdicts for {} commits",
+            verdicts.len(),
+            distinct.len()
+        )));
+    }
+    let visible: HashSet<&str> = distinct
+        .iter()
+        .zip(verdicts)
+        .filter(|(_, ok)| *ok)
+        .map(|(c, _)| c.as_str())
+        .collect();
+    by_id.retain(|_, h| visible.contains(h.commit.commit_sha.as_str()));
+    for ranking in rankings.iter_mut() {
+        ranking.retain(|id| by_id.contains_key(id));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
