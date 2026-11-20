@@ -152,11 +152,16 @@ impl HarnessConfig {
                 )));
             }
         }
+        for role in ALL_ROLES {
+            if !self.roles.0.contains_key(&role) {
+                return Err(Error::Config(format!(
+                    "roles.{}: no runtime configured",
+                    role.as_str()
+                )));
+            }
+        }
         for (role, list) in &self.roles.0 {
-            let key = serde_json::to_value(role)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_string))
-                .unwrap_or_else(|| format!("{role:?}"));
+            let key = role.as_str();
             if list.is_empty() {
                 return Err(Error::Config(format!("roles.{key}: runtime list is empty")));
             }

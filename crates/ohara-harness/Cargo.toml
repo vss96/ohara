@@ -10,7 +10,6 @@ ohara-core = { path = "../ohara-core" }
 thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 toml.workspace = true
 globset.workspace = true
 tokio.workspace = true

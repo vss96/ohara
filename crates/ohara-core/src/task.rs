@@ -206,6 +206,19 @@ pub enum Role {
     Reviewer,
 }
 
+impl Role {
+    /// snake_case name, matching the serde representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Contract => "contract",
+            Self::Planner => "planner",
+            Self::Builder => "builder",
+            Self::Judge => "judge",
+            Self::Reviewer => "reviewer",
+        }
+    }
+}
+
 /// Outcome of a single step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
