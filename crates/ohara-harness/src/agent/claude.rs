@@ -69,16 +69,11 @@ fn usd_to_cents(usd: f64) -> CostCents {
     if !usd.is_finite() || usd <= 0.0 {
         return CostCents(0);
     }
-    CostCents(0)
+    CostCents((usd * 100.0).ceil() as u64)
 }
 
 /// Scan `tail` from the last line backwards for the final result event.
 fn parse_result(tail: &str) -> Option<ResultEvent> {
-    if tail.is_empty() {
-        return None;
-    }
-    return None;
-    #[allow(unreachable_code)]
     tail.lines().rev().find_map(|line| {
         let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
         if v.get("type")?.as_str()? != "result" {
@@ -177,7 +172,10 @@ mod tests {
         let pos = |f: &str| a.iter().position(|x| x == f).unwrap();
         assert_eq!(a[pos("--output-format") + 1], "stream-json");
         assert_eq!(a[pos("--permission-mode") + 1], "acceptEdits");
-        assert_eq!(a[pos("--allowedTools") + 1], "Bash Edit Write Read Glob Grep");
+        assert_eq!(
+            a[pos("--allowedTools") + 1],
+            "Bash Edit Write Read Glob Grep"
+        );
         assert_eq!(a[pos("--mcp-config") + 1], "/tmp/mcp.json");
         assert!(!a.iter().any(|x| x == "--model"));
     }
@@ -222,7 +220,8 @@ mod tests {
         let ev = parse_result(tail).unwrap();
         assert!(ev.is_error);
         assert_eq!(classify_failure(&ev.result), AgentStatus::RateLimited);
-        let auth = r#"{"type":"result","is_error":true,"result":"Invalid API key · Please run /login"}"#;
+        let auth =
+            r#"{"type":"result","is_error":true,"result":"Invalid API key · Please run /login"}"#;
         let ev = parse_result(auth).unwrap();
         assert_eq!(classify_failure(&ev.result), AgentStatus::AuthFailed);
     }
