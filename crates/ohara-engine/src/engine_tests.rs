@@ -1338,3 +1338,21 @@ async fn main_indexes_after_a_linked_first_index_and_takes_over_head_symbols() {
     assert!(names.contains(&"two".to_string()), "got {names:?}");
     assert!(!names.contains(&"slot_only".to_string()), "got {names:?}");
 }
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn repeated_incremental_runs_replace_head_symbols_without_duplicates() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (main, _slot1) = repo_with_worktree().await;
+    let repo = git2::Repository::open(main.path()).unwrap();
+    commit_file(&repo, "c.rs", "fn three() {}\n", "third");
+    index_checkout(main.path()).await;
+    commit_file(&repo, "d.rs", "fn four() {}\n", "fourth");
+    index_checkout(main.path()).await;
+    let names = head_symbol_names(main.path());
+    let unique: std::collections::HashSet<&String> = names.iter().collect();
+    assert_eq!(unique.len(), names.len(), "duplicates: {names:?}");
+    assert!(names.contains(&"four".to_string()), "got {names:?}");
+}

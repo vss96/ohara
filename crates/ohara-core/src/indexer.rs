@@ -593,6 +593,8 @@ mod phase_timing_tests {
         last_metadata: Mutex<Option<Vec<(String, String)>>>,
         /// Number of `put_head_symbols` calls (plan-33 tip tests).
         head_puts: Mutex<usize>,
+        /// The stored HEAD-symbol snapshot.
+        head_snapshot: Mutex<Vec<Symbol>>,
     }
 
     impl FakeStorage {
@@ -603,6 +605,7 @@ mod phase_timing_tests {
                 seen_commits: Mutex::new(HashSet::new()),
                 last_metadata: Mutex::new(None),
                 head_puts: Mutex::new(0),
+                head_snapshot: Mutex::new(Vec::new()),
             }
         }
 
@@ -643,12 +646,14 @@ mod phase_timing_tests {
             std::thread::sleep(self.write_sleep);
             Ok(())
         }
-        async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> Result<()> {
+        async fn put_head_symbols(&self, _: &RepoId, symbols: &[Symbol]) -> Result<()> {
             *self.head_puts.lock().unwrap() += 1;
+            *self.head_snapshot.lock().unwrap() = symbols.to_vec();
             std::thread::sleep(self.write_sleep);
             Ok(())
         }
         async fn clear_head_symbols(&self, _: &RepoId) -> Result<()> {
+            self.head_snapshot.lock().unwrap().clear();
             Ok(())
         }
         async fn knn_hunks(
@@ -1665,6 +1670,61 @@ mod phase_timing_tests {
             .await
             .expect("run");
         assert_eq!(*storage.head_puts.lock().unwrap(), 1);
+    }
+
+    /// Fails HEAD-symbol extraction.
+    struct FailingSymbolSource;
+
+    #[async_trait]
+    impl SymbolSource for FailingSymbolSource {
+        async fn extract_head_symbols(&self) -> Result<Vec<Symbol>> {
+            Err(crate::OhraError::Git("extraction failed".into()))
+        }
+    }
+
+    fn named_symbol(name: &str) -> Symbol {
+        Symbol {
+            file_path: "src/a.rs".into(),
+            language: "rust".into(),
+            kind: crate::types::SymbolKind::Function,
+            name: name.into(),
+            qualified_name: None,
+            sibling_names: Vec::new(),
+            span_start: 0,
+            span_end: 1,
+            blob_sha: "b".into(),
+            source_text: format!("fn {name}() {{}}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_head_symbol_extraction_keeps_the_previous_snapshot() {
+        // Main's first run (a linked worktree wrote the snapshot) used to
+        // clear it before extracting; a failed extraction left it empty.
+        let tips = Arc::new(FakeTips::with(vec![(
+            WorktreeKey::linked("slot-1").unwrap(),
+            sha40('b'),
+        )]));
+        let storage = zero_storage();
+        *storage.head_snapshot.lock().unwrap() = vec![named_symbol("kept")];
+        let indexer = tip_indexer(storage.clone(), tips, WorktreeKey::main());
+        let repo_id = RepoId::from_parts("first", "/tmp/r");
+        let res = indexer
+            .run(
+                &repo_id,
+                Arc::new(HidingSource::new(vec![])),
+                Arc::new(FailingSymbolSource),
+            )
+            .await;
+        assert!(res.is_err(), "a failed extraction fails the run");
+        let names: Vec<String> = storage
+            .head_snapshot
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        assert_eq!(names, vec!["kept".to_string()]);
     }
 
     #[tokio::test]
