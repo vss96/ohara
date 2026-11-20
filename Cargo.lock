@@ -2432,6 +2432,7 @@ dependencies = [
  "ohara-git",
  "ohara-parse",
  "ohara-storage",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

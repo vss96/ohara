@@ -1291,3 +1291,50 @@ async fn prune_retires_a_removed_worktrees_tip_while_its_branch_survives() {
         "branch slot-1 still reaches {a1}: its tip must stay as a retired tip, got {tips:?}"
     );
 }
+
+// ---- plan-33 final review I3: HEAD-symbol ownership ----
+
+/// Names in the shared HEAD-symbol snapshot of the repo at `path`.
+fn head_symbol_names(path: &Path) -> Vec<String> {
+    let id = ohara_git::RepoIdentity::resolve(path).unwrap();
+    let db_path = ohara_core::paths::index_db_path(&id.repo_id).unwrap();
+    let c = rusqlite::Connection::open(db_path).unwrap();
+    let mut stmt = c.prepare("SELECT name FROM symbol ORDER BY name").unwrap();
+    let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+    rows.map(Result::unwrap).collect()
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn main_indexes_after_a_linked_first_index_and_takes_over_head_symbols() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let main = tempfile::tempdir().unwrap();
+    build_test_repo(main.path());
+    let repo = git2::Repository::open(main.path()).unwrap();
+    let main_head = commit_file(&repo, "b.rs", "fn two() {}\n", "second");
+    let wt_path = main.path().join(".wt").join("slot-1");
+    std::fs::create_dir_all(wt_path.parent().unwrap()).unwrap();
+    repo.worktree("slot-1", &wt_path, None).unwrap();
+    let slot1 = std::fs::canonicalize(wt_path).unwrap();
+    let wt = git2::Repository::open(&slot1).unwrap();
+    commit_file(&wt, "slot_only.rs", "fn slot_only() {}\n", "slot only");
+
+    // Linked worktree indexes first: with no main tip it owns HEAD symbols.
+    index_checkout(&slot1).await;
+    assert!(tip_of(main.path()).await.is_none());
+    assert!(head_symbol_names(main.path()).contains(&"slot_only".to_string()));
+
+    // Main's HEAD is covered by slot-1's tip, yet main must still run.
+    let (_rec, engine) = recording_engine();
+    let out = engine
+        .ensure_indexed(main.path(), &sha_of(main_head))
+        .await
+        .expect("ensure_indexed");
+    assert!(out.indexed, "main without a tip must index");
+    assert_eq!(tip_of(main.path()).await, Some(main_head.to_string()));
+    let names = head_symbol_names(main.path());
+    assert!(names.contains(&"two".to_string()), "got {names:?}");
+    assert!(!names.contains(&"slot_only".to_string()), "got {names:?}");
+}

@@ -179,4 +179,19 @@ mod tests {
         );
         assert!(WorktreeKey::from_stored("slot-1/not-a-sha").is_err());
     }
+
+    #[test]
+    fn only_main_without_a_main_tip_needs_its_first_run() {
+        let slot = WorktreeKey::linked("slot-1").unwrap();
+        let tip = |w: WorktreeKey| IndexedTip {
+            worktree: w,
+            sha: CommitSha::parse(P).unwrap(),
+        };
+        let linked_only = vec![tip(slot.clone())];
+        assert!(main_needs_first_run(&WorktreeKey::main(), &linked_only));
+        assert!(main_needs_first_run(&WorktreeKey::main(), &[]));
+        assert!(!main_needs_first_run(&slot, &linked_only));
+        let with_main = vec![tip(WorktreeKey::main()), tip(slot.clone())];
+        assert!(!main_needs_first_run(&WorktreeKey::main(), &with_main));
+    }
 }

@@ -1594,7 +1594,7 @@ mod phase_timing_tests {
 
     #[tokio::test]
     async fn linked_worktree_run_never_touches_head_symbols() {
-        let tips = Arc::new(FakeTips::default());
+        let tips = Arc::new(FakeTips::with(vec![(WorktreeKey::main(), sha40('a'))]));
         let storage = zero_storage();
         let indexer = tip_indexer(
             storage.clone(),
@@ -1612,6 +1612,30 @@ mod phase_timing_tests {
             .expect("run");
         assert_eq!(report.head_symbols, 0);
         assert_eq!(*storage.head_puts.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn linked_worktree_writes_head_symbols_while_main_has_no_tip() {
+        let tips = Arc::new(FakeTips::with(vec![(
+            WorktreeKey::linked("slot-2").unwrap(),
+            sha40('b'),
+        )]));
+        let storage = zero_storage();
+        let indexer = tip_indexer(
+            storage.clone(),
+            tips,
+            WorktreeKey::linked("slot-1").unwrap(),
+        );
+        let repo_id = RepoId::from_parts("first", "/tmp/r");
+        indexer
+            .run(
+                &repo_id,
+                Arc::new(HidingSource::new(vec![fake_commit("c1")])),
+                no_symbols(),
+            )
+            .await
+            .expect("run");
+        assert_eq!(*storage.head_puts.lock().unwrap(), 1);
     }
 
     #[tokio::test]
