@@ -35,7 +35,7 @@ impl RoleRunner {
     pub fn new(
         config: &HarnessConfig,
         factory: impl Fn(&RuntimeName, &RuntimeSpec) -> Arc<dyn AgentRuntime>,
-    ) -> Self {
+    ) -> Result<Self> {
         let mut runtimes = BTreeMap::new();
         for (role, names) in &config.roles.0 {
             let built = names
@@ -44,7 +44,7 @@ impl RoleRunner {
                 .collect();
             runtimes.insert(*role, built);
         }
-        Self { runtimes }
+        Ok(Self { runtimes })
     }
 
     /// Try each runtime for `role` in order. Each attempt is recorded as its
@@ -233,7 +233,8 @@ mod tests {
                 .cloned()
                 .map(|f| f as Arc<dyn AgentRuntime>)
                 .expect("test runtime")
-        });
+        })
+        .unwrap();
         (r, fakes)
     }
 
@@ -267,6 +268,13 @@ mod tests {
         assert_eq!(steps[1].state, StepState::Passed);
         assert_eq!(steps[1].failover_from, Some(name("claude")));
         assert_eq!(steps[1].seq, s.seq + 1);
+        assert_ne!(steps[0].transcript, steps[1].transcript);
+        assert_eq!(steps[0].transcript, fakes[0].calls()[0].transcript);
+        assert_eq!(steps[1].transcript, fakes[1].calls()[0].transcript);
+        assert_eq!(
+            steps[1].transcript,
+            std::path::PathBuf::from("/tmp/t.1.codex.log")
+        );
         assert_eq!(last, steps[1]);
     }
 
@@ -324,5 +332,53 @@ mod tests {
         let steps = store.list_steps(&s.task_id).await.unwrap();
         assert_eq!(steps.len(), 2);
         assert!(steps.iter().any(|x| x.state == StepState::Failed));
+    }
+
+    #[tokio::test]
+    async fn chained_runs_do_not_overwrite_failover_rows() {
+        let (r, _) = runner(vec![
+            (
+                "claude",
+                vec![
+                    outcome(AgentStatus::RateLimited),
+                    outcome(AgentStatus::Completed),
+                ],
+            ),
+            ("codex", vec![outcome(AgentStatus::Completed)]),
+        ]);
+        let store = MemStore::default();
+        let s = step();
+        let (_, first) = r
+            .run(Role::Builder, request(), s.clone(), &store, || Ok(()))
+            .await
+            .unwrap();
+        let mut next = s.clone();
+        next.seq = first.seq + 1;
+        r.run(Role::Builder, request(), next, &store, || Ok(()))
+            .await
+            .unwrap();
+        let mut seqs: Vec<u32> = store
+            .list_steps(&s.task_id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|x| x.seq)
+            .collect();
+        seqs.sort();
+        seqs.dedup();
+        assert_eq!(seqs.len(), 3);
+    }
+
+    #[test]
+    fn unknown_runtime_name_is_a_config_error() {
+        let mut cfg = config(&["claude"]);
+        cfg.roles.0.insert(Role::Judge, vec![name("ghost")]);
+        let res = RoleRunner::new(&cfg, |_, _| -> Arc<dyn AgentRuntime> {
+            Arc::new(FakeRuntime::new(name("claude"), vec![]))
+        });
+        match res {
+            Err(Error::Config(m)) => assert!(m.contains("ghost")),
+            _ => panic!("expected config error"),
+        }
     }
 }
