@@ -47,6 +47,14 @@ pub use storage::{
     CommitRecord, EmbedCacheStats, HunkHit, HunkId, HunkRecord, Storage, StorageCache,
     StorageExplain, StorageRead, StorageStatus, StorageWrite, Vector,
 };
+pub use task::decision::{
+    Assumption, CostIfWrong, DecisionId, DecisionRecord, DecisionState, Evidence, ScriptResult,
+    Verdict,
+};
+pub use task::{
+    ContractHash, CostCents, Deadline, Outcome, Role, RuntimeName, StepRecord, StepState, TaskId,
+    TaskRecord, TaskState, TaskStore,
+};
 pub use types::{
     ulid_for_commit, AttributionKind, ChangeKind, CommitMeta, ContentHash, Hunk, HunkSymbol,
     Provenance, RepoId, Symbol, SymbolKind,
