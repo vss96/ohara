@@ -124,9 +124,6 @@ mod tests {
         ) -> crate::Result<()> {
             Ok(())
         }
-        async fn clear_head_symbols(&self, _: &RepoId) -> crate::Result<()> {
-            Ok(())
-        }
         async fn knn_hunks(
             &self,
             _: &RepoId,

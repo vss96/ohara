@@ -20,7 +20,7 @@ ohara index [PATH] [-i | --interactive] [--incremental] [--force] \
 | `PATH` (positional) | `.` | Path to the repo. |
 | `-i`, `--interactive` | off | Launch a guided wizard that prompts for embedding provider, resource intensity, index mode, and (opt-in) advanced knobs, previews the equivalent command, then runs it. Requires a TTY. Other tuning flags are ignored when `-i` is set — the wizard owns the tuning. |
 | `--incremental` | off | Skip the indexer (and embedder init) when every commit reachable from HEAD is already covered by an indexed tip. Used by the post-commit hook to make no-op re-indexes nearly free. When there is work and an `ohara serve` daemon of the same version is running, the pass runs in the daemon (see [Worktrees](#worktrees)). |
-| `--force` | off | Clear existing HEAD symbol rows and re-extract from scratch. Used after upgrades that change the AST chunker. Wins over `--incremental` if both are set; commit/hunk history is untouched. In a linked worktree it leaves HEAD symbols alone (they follow the main checkout). |
+| `--force` | off | Re-extract HEAD symbols and replace the snapshot in one transaction (the old one stays until the new one is ready). Used after upgrades that change the AST chunker. Wins over `--incremental` if both are set; commit/hunk history is untouched. In a linked worktree it leaves HEAD symbols alone once the main checkout has been indexed (they follow the main checkout). |
 | `--rebuild` | off | **Destructive.** Delete the entire index for this repo and rebuild from scratch. Stronger than `--force` (which only refreshes HEAD-symbol rows). Used when `ohara status` reports `compatibility: needs rebuild` (the binary's embedder dimension or model differs from what the index was built with). Requires `--yes` to confirm; conflicts with `--incremental` and `--force`. |
 | `--yes` | off | Confirm a destructive operation. Currently only valid alongside `--rebuild`. |
 | `--commit-batch` | from `--resources` | Commits per storage transaction. Smaller = less peak RAM and more frequent fsyncs; larger = faster but uses more memory. When unset, `--resources` picks a value from host core count. |
@@ -113,9 +113,10 @@ each worktree only see commits its own `HEAD` reaches.
 - The head-snapshot symbol lane describes the main checkout. Once the
   main checkout has been indexed, indexing from a linked worktree
   never extracts or replaces HEAD symbols, and `--force` there prints
-  `HEAD symbols follow the main worktree; not clearing them here`
-  instead of clearing them. Until then (the shared index was first
-  built from a linked worktree) linked worktrees write them, and the
+  `HEAD symbols follow the main worktree; not refreshing them here`.
+  Until then (the shared index was first built from a linked
+  worktree) linked worktrees write them, `--force` there refreshes
+  them like it does in the main checkout, and the
   main checkout's first `ohara index --incremental` always runs a pass
   that records its tip and takes the HEAD symbols over.
 - `--rebuild` inside a linked worktree deletes the index shared by the

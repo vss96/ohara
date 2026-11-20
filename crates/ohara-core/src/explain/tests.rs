@@ -104,9 +104,6 @@ impl Storage for FakeStorageOrch {
     async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> Result<()> {
         Ok(())
     }
-    async fn clear_head_symbols(&self, _: &RepoId) -> Result<()> {
-        unreachable!()
-    }
     async fn knn_hunks(
         &self,
         _: &RepoId,

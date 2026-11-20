@@ -70,10 +70,6 @@ impl crate::Storage for InMemoryCacheStorage {
         Ok(())
     }
 
-    async fn clear_head_symbols(&self, _repo_id: &crate::types::RepoId) -> crate::Result<()> {
-        Ok(())
-    }
-
     async fn knn_hunks(
         &self,
         _repo_id: &crate::types::RepoId,

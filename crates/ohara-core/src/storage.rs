@@ -174,12 +174,6 @@ pub trait Storage: Send + Sync {
     /// an empty snapshot in between.
     async fn put_head_symbols(&self, repo_id: &RepoId, symbols: &[Symbol]) -> Result<()>;
 
-    /// Drop all HEAD symbol rows for `repo_id` (and the matching
-    /// `vec_symbol` / `fts_symbol_name` rows). Used by `ohara index
-    /// --force` before re-extracting symbols so the AST sibling-merge
-    /// chunker can repopulate without duplicates.
-    async fn clear_head_symbols(&self, repo_id: &RepoId) -> Result<()>;
-
     // --- Read lanes (retrieval) ---
 
     /// Vector KNN over hunk diff embeddings. Ordered best-first.

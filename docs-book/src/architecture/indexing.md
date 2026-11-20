@@ -205,16 +205,19 @@ mismatched vectors.
 
 ## `--force` rebuild path
 
-Clears existing HEAD symbol rows before the pass and re-extracts from
-scratch. Used after upgrading to a new ohara that changed the AST
+Re-extracts HEAD symbols even when `HEAD` is already indexed; like
+every pass, the new snapshot replaces the old one in one transaction
+after extraction, so nothing is cleared up front. Used after upgrading to a new ohara that changed the AST
 chunker (e.g. the v0.3 sibling-merge chunker would otherwise produce
 duplicate symbols when run over a v0.2-era index).
 
 `--force` only touches HEAD symbols. Commit and hunk history are
 untouched — they're append-only and embed-stable. `--force` wins over
 `--incremental` if both flags are set. In a linked worktree `--force`
-leaves the HEAD symbols alone (they follow the main checkout) and
-says so; run it from the main checkout to refresh them.
+leaves the HEAD symbols alone once the main checkout has a tip (they
+follow the main checkout) and says so; run it from the main checkout
+to refresh them. Before main has a tip the linked worktree owns the
+snapshot and `--force` refreshes it.
 
 ## Index compatibility (v0.7)
 

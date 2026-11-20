@@ -649,10 +649,6 @@ mod phase_timing_tests {
             std::thread::sleep(self.write_sleep);
             Ok(())
         }
-        async fn clear_head_symbols(&self, _: &RepoId) -> Result<()> {
-            self.head_snapshot.lock().unwrap().clear();
-            Ok(())
-        }
         async fn knn_hunks(
             &self,
             _: &RepoId,
@@ -1830,9 +1826,6 @@ mod plan_26_repo_root_tests {
             async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> crate::Result<()> {
                 Ok(())
             }
-            async fn clear_head_symbols(&self, _: &RepoId) -> crate::Result<()> {
-                Ok(())
-            }
             async fn knn_hunks(
                 &self,
                 _: &RepoId,
@@ -2028,9 +2021,6 @@ mod plan_28_workers_tests {
                 _: &crate::types::RepoId,
                 _: &[crate::types::Symbol],
             ) -> crate::Result<()> {
-                Ok(())
-            }
-            async fn clear_head_symbols(&self, _: &crate::types::RepoId) -> crate::Result<()> {
                 Ok(())
             }
             async fn knn_hunks(

@@ -130,15 +130,6 @@ impl Storage for SqliteStorage {
         .await
     }
 
-    async fn clear_head_symbols(&self, _repo_id: &RepoId) -> CoreResult<()> {
-        // Plan 3 / Track D: drop all symbol rows + their FTS5 mirror so a
-        // subsequent put_head_symbols (driven by `ohara index --force`)
-        // doesn't double-count. The symbol table is HEAD-scoped — it holds
-        // only the latest snapshot, never historical, so a blanket DELETE
-        // is the right semantics.
-        with_conn(&self.write_pool, crate::tables::symbol::clear_all).await
-    }
-
     async fn knn_hunks(
         &self,
         _repo_id: &RepoId,

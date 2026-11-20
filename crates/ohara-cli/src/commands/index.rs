@@ -50,11 +50,11 @@ pub struct Args {
     /// Used by the post-commit hook so empty re-indexes are nearly free.
     #[arg(long)]
     pub incremental: bool,
-    /// Force a full re-walk of HEAD symbols even when the watermark
-    /// already points at HEAD. Clears existing symbol rows first so the
-    /// new AST sibling-merge chunker (Plan 3 / Track C) populates the
-    /// index without duplicates. Mutually exclusive with `--incremental`
-    /// (force wins if both are set).
+    /// Force a full re-extract of HEAD symbols even when HEAD is already
+    /// indexed; the new snapshot replaces the old one atomically. A linked
+    /// worktree leaves the snapshot to the main checkout once main has a
+    /// tip. Mutually exclusive with `--incremental` (force wins if both
+    /// are set).
     #[arg(long)]
     pub force: bool,
     /// Plan 13: delete the existing index for this repo and rebuild
@@ -272,18 +272,14 @@ pub async fn run(args: Args, no_daemon: bool) -> Result<IndexerReport> {
         }
     }
 
-    // --force: clear existing HEAD symbol rows so the v0.3 AST sibling-merge
-    // chunker (Track C) can repopulate without duplicates. The watermark and
-    // commit/hunk history are untouched — only HEAD-snapshot symbols are
-    // re-extracted. `force` wins over `incremental`.
+    // --force: a full pass whose HEAD-symbol step (when this worktree owns
+    // the snapshot) replaces the snapshot atomically, so nothing is cleared
+    // up front. Commit/hunk history is untouched. `force` wins over
+    // `incremental`.
     if args.force {
         let tips = ohara_core::TipStore::indexed_tips(storage.as_ref(), &repo_id).await?;
-        match force::force_note(&id.worktree, &tips) {
-            None => {
-                tracing::info!("force: clearing existing HEAD symbol rows");
-                storage.clear_head_symbols(&repo_id).await?;
-            }
-            Some(note) => println!("{note}"),
+        if let Some(note) = force::force_note(&id.worktree, &tips) {
+            println!("{note}");
         }
     }
 
