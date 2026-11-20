@@ -1,10 +1,10 @@
-//! Plan-16 I.2: end-to-end fallback path. try_daemon_call must yield
-//! None when the daemon socket is dead, so callers can drop to a
-//! standalone in-process engine.
+//! Plan-16 I.2: end-to-end fallback path. try_daemon_call must report
+//! a typed non-success outcome when the daemon socket is dead or absent,
+//! so callers can drop to a standalone in-process engine.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use ohara_engine::client::{try_daemon_call, DaemonHandle};
+use ohara_engine::client::{try_daemon_call, DaemonCallResult, DaemonHandle};
 use ohara_engine::ipc::{Request, RequestMethod};
 use std::path::PathBuf;
 
@@ -26,7 +26,7 @@ async fn dead_socket_via_discover_yields_none() {
         },
     )
     .await;
-    assert!(resp.is_none(), "dead socket must yield None");
+    assert!(matches!(resp, DaemonCallResult::ConnectFailed(_)));
 }
 
 #[tokio::test]
@@ -40,7 +40,7 @@ async fn discover_returning_error_yields_none() {
         },
     )
     .await;
-    assert!(resp.is_none(), "discover error must yield None");
+    assert!(matches!(resp, DaemonCallResult::ConnectFailed(_)));
 }
 
 #[tokio::test]
@@ -54,5 +54,5 @@ async fn discover_returning_none_yields_none() {
         },
     )
     .await;
-    assert!(resp.is_none(), "discover None must yield None");
+    assert!(matches!(resp, DaemonCallResult::Unavailable));
 }

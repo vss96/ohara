@@ -1,39 +1,46 @@
-//! `try_daemon_call`: wraps discover + Client::call with transparent fallback.
-//!
-//! Returns `None` on any failure so the caller can fall back to standalone mode.
+//! `try_daemon_call`: wraps discover + Client::call and reports a typed
+//! [`DaemonCallResult`] so callers can tell "no daemon" from "daemon
+//! unreachable" from "daemon answered with an error".
 
+use crate::client::outcome::DaemonCallResult;
 use crate::client::{Client, DaemonHandle};
-use crate::ipc::{Request, Response};
+use crate::ipc::Request;
 
 /// Try to route `req` through a running daemon.
 ///
 /// 1. Calls `discover()` to obtain a [`DaemonHandle`].
 /// 2. Connects to the daemon's socket and issues `req`.
-/// 3. Returns `Some(response)` on success.
 ///
-/// Returns `None` — without propagating the error — whenever anything fails,
-/// so the caller can transparently fall back to standalone execution.
+/// Never propagates an error: every failure is a [`DaemonCallResult`]
+/// variant. Use [`DaemonCallResult::route`] to decide what to do.
 pub async fn try_daemon_call(
     discover: impl FnOnce() -> crate::Result<Option<DaemonHandle>>,
     req: Request,
-) -> Option<Response> {
+) -> DaemonCallResult {
     let h = match discover() {
         Ok(Some(h)) => h,
         Ok(None) => {
             tracing::debug!("no compatible daemon; falling back to standalone");
-            return None;
+            return DaemonCallResult::Unavailable;
         }
         Err(e) => {
             tracing::warn!(error = %e, "daemon discover failed; falling back to standalone");
-            return None;
+            return DaemonCallResult::ConnectFailed(format!("discover: {e}"));
         }
     };
-    match Client::connect(&h.socket_path).call(req).await {
-        Ok(r) => Some(r),
+    let resp = match Client::connect(&h.socket_path).call(req).await {
+        Ok(r) => r,
         Err(e) => {
             tracing::warn!(error=%e, pid=h.pid, "daemon call failed; falling back to standalone");
-            None
+            return DaemonCallResult::ConnectFailed(format!("call: {e}"));
         }
+    };
+    if let Some(err) = resp.error {
+        return DaemonCallResult::DaemonErrored(err);
+    }
+    match resp.result {
+        Some(value) => DaemonCallResult::Ok(value),
+        None => DaemonCallResult::ConnectFailed("daemon response missing result".into()),
     }
 }
 
@@ -44,7 +51,7 @@ mod try_call_tests {
     use crate::ipc::{Request, RequestMethod};
 
     #[tokio::test]
-    async fn discover_error_returns_none() {
+    async fn discover_error_is_connect_failed() {
         let resp = try_daemon_call(
             || Err(crate::error::EngineError::Internal("nope".into())),
             Request {
@@ -54,11 +61,14 @@ mod try_call_tests {
             },
         )
         .await;
-        assert!(resp.is_none(), "discover error must propagate as None");
+        assert!(
+            matches!(resp, DaemonCallResult::ConnectFailed(_)),
+            "discover error must be ConnectFailed"
+        );
     }
 
     #[tokio::test]
-    async fn dead_socket_returns_none() {
+    async fn dead_socket_is_connect_failed() {
         let dead = std::path::PathBuf::from("/tmp/ohara-dead-socket-from-test.sock");
         let _ = std::fs::remove_file(&dead); // belt-and-suspenders
         let h = DaemonHandle {
@@ -75,6 +85,9 @@ mod try_call_tests {
             },
         )
         .await;
-        assert!(resp.is_none(), "connect to dead socket must yield None");
+        assert!(
+            matches!(resp, DaemonCallResult::ConnectFailed(_)),
+            "connect to dead socket must be ConnectFailed"
+        );
     }
 }
