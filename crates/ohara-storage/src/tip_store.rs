@@ -1,4 +1,68 @@
-//! `TipStore` implementation for [`SqliteStorage`](crate::SqliteStorage).
+//! `TipStore` implementation for [`SqliteStorage`].
+
+use crate::storage_impl::with_conn;
+use crate::tables::{indexed_tip, repo};
+use crate::SqliteStorage;
+use async_trait::async_trait;
+use ohara_core::{CommitSha, IndexedTip, RepoId, Result, TipStore, WorktreeKey};
+
+#[async_trait]
+impl TipStore for SqliteStorage {
+    async fn indexed_tips(&self, repo_id: &RepoId) -> Result<Vec<IndexedTip>> {
+        let id = repo_id.as_str().to_string();
+        let rows = with_conn(self.pool(), move |c| indexed_tip::list(c, &id)).await?;
+        let mut tips = Vec::with_capacity(rows.len());
+        for (key, sha) in rows {
+            let parsed = CommitSha::parse(&sha);
+            let Ok(sha) = parsed else {
+                tracing::warn!(worktree_key = %key, "skipping indexed tip with invalid sha");
+                continue;
+            };
+            let worktree = match key.is_empty() {
+                true => WorktreeKey::main(),
+                false => match WorktreeKey::linked(&key) {
+                    Ok(w) => w,
+                    Err(_) => continue,
+                },
+            };
+            tips.push(IndexedTip { worktree, sha });
+        }
+        Ok(tips)
+    }
+
+    async fn set_indexed_tip(
+        &self,
+        repo_id: &RepoId,
+        worktree: &WorktreeKey,
+        sha: &CommitSha,
+    ) -> Result<()> {
+        let id = repo_id.as_str().to_string();
+        let key = worktree.as_str().to_string();
+        let sha = sha.as_str().to_string();
+        with_conn(self.write_pool(), move |c| match key.is_empty() {
+            true => repo::set_watermark(c, &id, &sha),
+            false => indexed_tip::upsert(c, &id, &key, &sha),
+        })
+        .await
+    }
+
+    async fn remove_indexed_tip(&self, repo_id: &RepoId, worktree: &WorktreeKey) -> Result<()> {
+        let id = repo_id.as_str().to_string();
+        let key = worktree.as_str().to_string();
+        with_conn(self.write_pool(), move |c| {
+            indexed_tip::remove(c, &id, &key)
+        })
+        .await
+    }
+
+    async fn indexed_commit_shas(&self, _repo_id: &RepoId) -> Result<Vec<CommitSha>> {
+        Ok(vec![]) // Task 11
+    }
+
+    async fn delete_commits(&self, _repo_id: &RepoId, _shas: &[CommitSha]) -> Result<u64> {
+        Ok(0) // Task 11
+    }
+}
 
 #[cfg(test)]
 mod tests {

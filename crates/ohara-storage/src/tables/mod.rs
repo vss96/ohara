@@ -7,5 +7,6 @@ pub mod explain;
 pub mod hunk;
 pub mod hunk_symbol;
 pub mod index_metadata;
+pub mod indexed_tip;
 pub mod repo;
 pub mod symbol;

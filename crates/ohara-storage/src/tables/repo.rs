@@ -1,3 +1,4 @@
+use crate::tables::indexed_tip;
 use anyhow::Result;
 use chrono::Utc;
 use ohara_core::query::IndexStatus;
@@ -13,10 +14,13 @@ pub fn upsert(c: &Connection, id: &str, path: &str, first_commit_sha: &str) -> R
     Ok(())
 }
 
+/// Status of the repo, read from the main (`''`) tip plus `repo.indexed_at`.
 pub fn get_status(c: &Connection, id: &str) -> Result<IndexStatus> {
     let row: Option<(Option<String>, Option<String>)> = c
         .query_row(
-            "SELECT last_indexed_commit, indexed_at FROM repo WHERE id = ?1",
+            "SELECT t.sha, r.indexed_at FROM repo r
+             LEFT JOIN indexed_tip t ON t.repo_id = r.id AND t.worktree_key = ''
+             WHERE r.id = ?1",
             params![id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -29,11 +33,15 @@ pub fn get_status(c: &Connection, id: &str) -> Result<IndexStatus> {
     })
 }
 
-pub fn set_watermark(c: &Connection, id: &str, sha: &str) -> Result<()> {
+/// Records `sha` as the main tip and bumps `repo.indexed_at`, atomically.
+pub fn set_watermark(c: &mut Connection, id: &str, sha: &str) -> Result<()> {
     let now = Utc::now().to_rfc3339();
-    c.execute(
-        "UPDATE repo SET last_indexed_commit = ?2, indexed_at = ?3 WHERE id = ?1",
-        params![id, sha, now],
+    let tx = c.transaction()?;
+    indexed_tip::upsert(&tx, id, "", sha)?;
+    tx.execute(
+        "UPDATE repo SET indexed_at = ?2 WHERE id = ?1",
+        params![id, now],
     )?;
+    tx.commit()?;
     Ok(())
 }
