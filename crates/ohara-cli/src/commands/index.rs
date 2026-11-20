@@ -10,6 +10,7 @@ use crate::resources::{apply_intensity, detect_host, pick_resources, ResourcePla
 
 mod rebuild;
 mod summary;
+mod daemon_route;
 mod up_to_date;
 use rebuild::{assert_rebuild_safe, delete_index_files};
 use summary::{failed_commits_notice, index_summary_human, phase_timings_json};
