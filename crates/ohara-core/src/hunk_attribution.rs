@@ -43,13 +43,21 @@ pub struct AttributionInputs<'a> {
 /// inside this crate (rather than calling `ohara-parse`) because
 /// `ohara-core` is the dependency root — leaf crates implement its
 /// traits, never the other way round.
+///
+/// Line numbers are clamped to the file's last line (as counted by
+/// [`crate::diff_text::count_lines`], minimum 1): the EOF offset of a
+/// newline-terminated file sits *after* the final `\n` but still
+/// belongs to the last line, not a phantom line past it.
 fn byte_span_to_line_span(span_start: u32, span_end: u32, source: &str) -> (u32, u32) {
     let bytes = source.as_bytes();
     let start = (span_start as usize).min(bytes.len());
     let end = (span_end as usize).min(bytes.len());
+    let last_line = crate::diff_text::count_lines(source).max(1);
     let line_at = |pos: usize| -> u32 {
         let counted = bytes[..pos].iter().filter(|&&b| b == b'\n').count();
-        u32::try_from(counted + 1).unwrap_or(u32::MAX)
+        u32::try_from(counted + 1)
+            .unwrap_or(u32::MAX)
+            .min(last_line)
     };
     let line_start = line_at(start);
     let line_end = if end == 0 {
@@ -231,6 +239,19 @@ pub fn attribute_hunk(inputs: &AttributionInputs<'_>) -> Vec<HunkSymbol> {
 mod tests {
     use super::*;
     use crate::types::AttributionKind;
+
+    #[test]
+    fn byte_span_to_line_span_clamps_eof_offset_after_trailing_newline() {
+        // Regression for #122: an offset at EOF of a newline-terminated
+        // file must map to the last real line, not a phantom line
+        // `count_lines(source) + 1`.
+        assert_eq!(byte_span_to_line_span(2, 0, "A\n"), (1, 1));
+        assert_eq!(byte_span_to_line_span(2, 2, "A\n"), (1, 1));
+        assert_eq!(byte_span_to_line_span(4, 4, "A\nB\n"), (2, 2));
+        // Unterminated last line and empty source are unaffected.
+        assert_eq!(byte_span_to_line_span(3, 3, "A\nB"), (2, 2));
+        assert_eq!(byte_span_to_line_span(0, 0, ""), (1, 1));
+    }
 
     #[test]
     fn parse_post_image_ranges_extracts_start_and_count() {
@@ -547,7 +568,6 @@ mod tests {
             }
 
             #[test]
-            #[ignore = "tracked in #122: byte_span_to_line_span returns count_lines(source) + 1 for empty span at EOF after trailing newline"]
             fn byte_span_to_line_span_never_exceeds_count_lines(
                 lines in proptest::collection::vec("[a-zA-Z0-9_ ]{1,20}", 1..=10),
                 span_start in 0u32..=250,
