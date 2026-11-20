@@ -1,7 +1,7 @@
 //! Commit reachability over libgit2: the [`GitVisibility`] oracle used to
 //! scope retrieval to a worktree's HEAD, and [`reachable_commit_shas`] for pruning.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use ohara_core::{CommitSha, CommitVisibility, OhraError};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ pub struct GitVisibility {
 impl GitVisibility {
     /// Validate that a repository can be discovered at `path`.
     pub fn open(path: &Path) -> Result<Self> {
-        git2::Repository::discover(path).map_err(|e| anyhow!("discover repo: {e}"))?;
+        git2::Repository::discover(path).map_err(|e| anyhow!("discover repo: {e:#}"))?;
         Ok(Self {
             repo_path: path.to_path_buf(),
         })
@@ -25,7 +25,7 @@ fn visible_blocking(path: &Path, head: &str, commits: &[String]) -> Result<Vec<b
     let repo = git2::Repository::discover(path)?;
     let head_oid = git2::Oid::from_str(head)?;
     repo.find_commit(head_oid)
-        .map_err(|e| anyhow!("head {head} not found: {e}"))?;
+        .map_err(|e| anyhow!("head {head} not found: {e:#}"))?;
     let mut out = Vec::with_capacity(commits.len());
     for c in commits {
         let Ok(oid) = git2::Oid::from_str(c) else {
@@ -53,8 +53,8 @@ impl CommitVisibility for GitVisibility {
         let commits: Vec<String> = commits.iter().map(|c| c.as_str().to_string()).collect();
         tokio::task::spawn_blocking(move || visible_blocking(&path, &head, &commits))
             .await
-            .map_err(|e| OhraError::Git(format!("visible: join: {e}")))?
-            .map_err(|e| OhraError::Git(format!("visible: {e}")))
+            .map_err(|e| OhraError::Git(format!("visible: join: {e:#}")))?
+            .map_err(|e| OhraError::Git(format!("visible: {e:#}")))
     }
 }
 
@@ -78,20 +78,34 @@ pub fn reachable_commit_shas(path: &Path) -> Result<HashSet<String>> {
     };
     let mut walk = main.revwalk()?;
     walk.push_glob("refs/*")?;
-    let _ = walk.push_head();
+    match walk.push_head() {
+        Ok(()) => {}
+        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {}
+        Err(e) => return Err(anyhow::Error::new(e).context("push main HEAD")),
+    }
     for name in main.worktrees()?.iter().flatten() {
-        let Ok(wt) = main.find_worktree(name) else {
+        let wt_repo = match main
+            .find_worktree(name)
+            .and_then(|wt| git2::Repository::open_from_worktree(&wt))
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(worktree = %name, error = %e, "skipping unopenable worktree");
+                continue;
+            }
+        };
+        let head = match wt_repo.head() {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(worktree = %name, error = %e, "skipping worktree with unreadable HEAD");
+                continue;
+            }
+        };
+        let Some(oid) = head.target() else {
             continue;
         };
-        let Ok(wt_repo) = git2::Repository::open_from_worktree(&wt) else {
-            continue;
-        };
-        let Ok(head) = wt_repo.head() else {
-            continue;
-        };
-        if let Some(oid) = head.target() {
-            let _ = walk.push(oid);
-        }
+        walk.push(oid)
+            .with_context(|| format!("push HEAD {oid} of worktree {name}"))?;
     }
     let mut out = HashSet::new();
     for oid in walk {
@@ -190,9 +204,9 @@ mod tests {
     fn reachable_includes_branches_and_detached_worktree_heads_but_not_dangling_commits() {
         let fx = fixture();
         let d = commit(&fx.repo, None, Some(fx.c[0]), "dangling");
-        let wt_dir = fx.dir.path().join("../wt-linked");
-        let wt_path = wt_dir.as_path();
-        let _ = std::fs::remove_dir_all(wt_path);
+        let wt_tmp = tempfile::tempdir().unwrap();
+        let wt_path = wt_tmp.path().join("wt");
+        let wt_path = wt_path.as_path();
         let feat = fx
             .repo
             .find_branch("feat", git2::BranchType::Local)
@@ -217,6 +231,5 @@ mod tests {
         // Also works from the linked worktree path.
         let set2 = reachable_commit_shas(wt_path).unwrap();
         assert!(set2.contains(&fx.f1.to_string()));
-        let _ = std::fs::remove_dir_all(wt_path);
     }
 }
