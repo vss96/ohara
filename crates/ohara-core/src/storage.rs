@@ -355,26 +355,22 @@ pub trait StorageRead: Send + Sync {
     ) -> Result<std::collections::HashMap<HunkId, Vec<HunkSymbol>>>;
 }
 
+/// The indexer's write path: repo registration, the index watermark,
+/// and persisting commits, hunks, and HEAD symbols.
+///
+/// Split out of [`Storage`] (issue #98).
 #[async_trait]
-pub trait Storage: StorageCache + StorageExplain + StorageRead + Send + Sync {
-    // --- Repo lifecycle ---
-
+pub trait StorageWrite: Send + Sync {
     /// Register a repository in the index. Idempotent on `repo_id`:
     /// re-calling with the same id updates `path` / `first_commit_sha`
     /// without dropping previously indexed rows.
     async fn open_repo(&self, repo_id: &RepoId, path: &str, first_commit_sha: &str) -> Result<()>;
-
-    /// Return the current index watermark for `repo_id`. A fresh repo
-    /// returns `IndexStatus { last_indexed_commit: None, .. }`.
-    async fn get_index_status(&self, repo_id: &RepoId) -> Result<IndexStatus>;
 
     /// Advance the watermark to `sha`. The indexer calls this after
     /// every commit it successfully indexes; it must be monotonic in
     /// caller-visible terms (callers always pass the newest commit
     /// they've persisted).
     async fn set_last_indexed_commit(&self, repo_id: &RepoId, sha: &str) -> Result<()>;
-
-    // --- Write path ---
 
     /// Persist a commit's metadata + message embedding. Idempotent on
     /// `record.meta.commit_sha` (INSERT OR REPLACE).
@@ -407,8 +403,18 @@ pub trait Storage: StorageCache + StorageExplain + StorageRead + Send + Sync {
     /// --force` before re-extracting symbols so the AST sibling-merge
     /// chunker can repopulate without duplicates.
     async fn clear_head_symbols(&self, repo_id: &RepoId) -> Result<()>;
+}
 
-    // --- Index metadata (plan 13) ---
+/// Facts about the index itself: freshness watermark, stamped component
+/// versions (plan 13), the newest indexed commit, and per-method metrics.
+///
+/// Split out of [`Storage`] (issue #98) so `compute_index_status` and
+/// `ohara status`-style readers, and their fakes, depend only on this seam.
+#[async_trait]
+pub trait StorageStatus: Send + Sync {
+    /// Return the current index watermark for `repo_id`. A fresh repo
+    /// returns `IndexStatus { last_indexed_commit: None, .. }`.
+    async fn get_index_status(&self, repo_id: &RepoId) -> Result<IndexStatus>;
 
     /// Read every `index_metadata` row for `repo_id` as a typed
     /// `StoredIndexMetadata`. Components absent from the table are
@@ -446,4 +452,18 @@ pub trait Storage: StorageCache + StorageExplain + StorageRead + Send + Sync {
         let _ = repo_id;
         Ok(None)
     }
+}
+
+/// The full persistence surface: every seam at once. Implemented
+/// automatically for any type implementing all of them, so backends and
+/// test fakes implement the seams, never `Storage` itself. Consumers
+/// that need only one slice should take that seam instead (issue #98).
+pub trait Storage:
+    StorageCache + StorageExplain + StorageRead + StorageWrite + StorageStatus + Send + Sync
+{
+}
+
+impl<T> Storage for T where
+    T: StorageCache + StorageExplain + StorageRead + StorageWrite + StorageStatus + ?Sized
+{
 }

@@ -465,7 +465,7 @@ mod count_added_lines_tests {
 mod phase_timing_tests {
     use super::*;
     use crate::query::IndexStatus;
-    use crate::storage::{CommitRecord, HunkRecord};
+    use crate::storage::{CommitRecord, HunkRecord, StorageWrite};
     use crate::types::{ChangeKind, CommitMeta, Hunk, RepoId, Symbol};
     use async_trait::async_trait;
     use std::collections::HashSet;
@@ -556,10 +556,7 @@ mod phase_timing_tests {
     }
 
     #[async_trait]
-    impl crate::Storage for FakeStorage {
-        async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> Result<()> {
-            Ok(())
-        }
+    impl crate::storage::StorageStatus for FakeStorage {
         async fn get_index_status(&self, _: &RepoId) -> Result<IndexStatus> {
             Ok(IndexStatus {
                 last_indexed_commit: None,
@@ -567,10 +564,35 @@ mod phase_timing_tests {
                 indexed_at: None,
             })
         }
+
+        async fn get_index_metadata(
+            &self,
+            _: &RepoId,
+        ) -> Result<crate::index_metadata::StoredIndexMetadata> {
+            Ok(crate::index_metadata::StoredIndexMetadata::default())
+        }
+
+        async fn put_index_metadata(
+            &self,
+            _: &RepoId,
+            components: &[(String, String)],
+        ) -> Result<()> {
+            *self.last_metadata.lock().unwrap() = Some(components.to_vec());
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl crate::storage::StorageWrite for FakeStorage {
+        async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+
         async fn set_last_indexed_commit(&self, _: &RepoId, sha: &str) -> Result<()> {
             *self.last_indexed.lock().unwrap() = Some(sha.to_string());
             Ok(())
         }
+
         async fn put_commit(&self, _: &RepoId, record: &CommitRecord) -> Result<()> {
             std::thread::sleep(self.write_sleep);
             self.seen_commits
@@ -579,32 +601,22 @@ mod phase_timing_tests {
                 .insert(record.meta.commit_sha.clone());
             Ok(())
         }
+
         async fn commit_exists(&self, sha: &str) -> Result<bool> {
             Ok(self.seen_commits.lock().unwrap().contains(sha))
         }
+
         async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> Result<()> {
             std::thread::sleep(self.write_sleep);
             Ok(())
         }
+
         async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> Result<()> {
             std::thread::sleep(self.write_sleep);
             Ok(())
         }
+
         async fn clear_head_symbols(&self, _: &RepoId) -> Result<()> {
-            Ok(())
-        }
-        async fn get_index_metadata(
-            &self,
-            _: &RepoId,
-        ) -> Result<crate::index_metadata::StoredIndexMetadata> {
-            Ok(crate::index_metadata::StoredIndexMetadata::default())
-        }
-        async fn put_index_metadata(
-            &self,
-            _: &RepoId,
-            components: &[(String, String)],
-        ) -> Result<()> {
-            *self.last_metadata.lock().unwrap() = Some(components.to_vec());
             Ok(())
         }
     }
@@ -1417,10 +1429,7 @@ mod plan_26_repo_root_tests {
         struct MinStorage;
 
         #[async_trait]
-        impl crate::Storage for MinStorage {
-            async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> crate::Result<()> {
-                Ok(())
-            }
+        impl crate::storage::StorageStatus for MinStorage {
             async fn get_index_status(&self, _: &RepoId) -> crate::Result<IndexStatus> {
                 Ok(IndexStatus {
                     last_indexed_commit: None,
@@ -1428,35 +1437,50 @@ mod plan_26_repo_root_tests {
                     indexed_at: None,
                 })
             }
-            async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> crate::Result<()> {
-                Ok(())
-            }
-            async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> crate::Result<()> {
-                Ok(())
-            }
-            async fn commit_exists(&self, _: &str) -> crate::Result<bool> {
-                Ok(false)
-            }
-            async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> crate::Result<()> {
-                Ok(())
-            }
-            async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> crate::Result<()> {
-                Ok(())
-            }
-            async fn clear_head_symbols(&self, _: &RepoId) -> crate::Result<()> {
-                Ok(())
-            }
+
             async fn get_index_metadata(
                 &self,
                 _: &RepoId,
             ) -> crate::Result<crate::index_metadata::StoredIndexMetadata> {
                 Ok(crate::index_metadata::StoredIndexMetadata::default())
             }
+
             async fn put_index_metadata(
                 &self,
                 _: &RepoId,
                 _: &[(String, String)],
             ) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        #[async_trait]
+        impl crate::storage::StorageWrite for MinStorage {
+            async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> crate::Result<()> {
+                Ok(())
+            }
+
+            async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> crate::Result<()> {
+                Ok(())
+            }
+
+            async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> crate::Result<()> {
+                Ok(())
+            }
+
+            async fn commit_exists(&self, _: &str) -> crate::Result<bool> {
+                Ok(false)
+            }
+
+            async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> crate::Result<()> {
+                Ok(())
+            }
+
+            async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> crate::Result<()> {
+                Ok(())
+            }
+
+            async fn clear_head_symbols(&self, _: &RepoId) -> crate::Result<()> {
                 Ok(())
             }
         }
@@ -1614,15 +1638,7 @@ mod plan_28_workers_tests {
         struct MinStorage;
 
         #[async_trait::async_trait]
-        impl crate::Storage for MinStorage {
-            async fn open_repo(
-                &self,
-                _: &crate::types::RepoId,
-                _: &str,
-                _: &str,
-            ) -> crate::Result<()> {
-                Ok(())
-            }
+        impl crate::storage::StorageStatus for MinStorage {
             async fn get_index_status(
                 &self,
                 _: &crate::types::RepoId,
@@ -1633,6 +1649,34 @@ mod plan_28_workers_tests {
                     indexed_at: None,
                 })
             }
+
+            async fn get_index_metadata(
+                &self,
+                _: &crate::types::RepoId,
+            ) -> crate::Result<crate::index_metadata::StoredIndexMetadata> {
+                Ok(crate::index_metadata::StoredIndexMetadata::default())
+            }
+
+            async fn put_index_metadata(
+                &self,
+                _: &crate::types::RepoId,
+                _: &[(String, String)],
+            ) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl crate::storage::StorageWrite for MinStorage {
+            async fn open_repo(
+                &self,
+                _: &crate::types::RepoId,
+                _: &str,
+                _: &str,
+            ) -> crate::Result<()> {
+                Ok(())
+            }
+
             async fn set_last_indexed_commit(
                 &self,
                 _: &crate::types::RepoId,
@@ -1640,6 +1684,7 @@ mod plan_28_workers_tests {
             ) -> crate::Result<()> {
                 Ok(())
             }
+
             async fn put_commit(
                 &self,
                 _: &crate::types::RepoId,
@@ -1647,9 +1692,11 @@ mod plan_28_workers_tests {
             ) -> crate::Result<()> {
                 Ok(())
             }
+
             async fn commit_exists(&self, _: &str) -> crate::Result<bool> {
                 Ok(false)
             }
+
             async fn put_hunks(
                 &self,
                 _: &crate::types::RepoId,
@@ -1657,6 +1704,7 @@ mod plan_28_workers_tests {
             ) -> crate::Result<()> {
                 Ok(())
             }
+
             async fn put_head_symbols(
                 &self,
                 _: &crate::types::RepoId,
@@ -1664,20 +1712,8 @@ mod plan_28_workers_tests {
             ) -> crate::Result<()> {
                 Ok(())
             }
+
             async fn clear_head_symbols(&self, _: &crate::types::RepoId) -> crate::Result<()> {
-                Ok(())
-            }
-            async fn get_index_metadata(
-                &self,
-                _: &crate::types::RepoId,
-            ) -> crate::Result<crate::index_metadata::StoredIndexMetadata> {
-                Ok(crate::index_metadata::StoredIndexMetadata::default())
-            }
-            async fn put_index_metadata(
-                &self,
-                _: &crate::types::RepoId,
-                _: &[(String, String)],
-            ) -> crate::Result<()> {
                 Ok(())
             }
         }

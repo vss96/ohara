@@ -91,7 +91,7 @@ mod tests {
     use crate::query::IndexStatus;
     use crate::storage::{CommitRecord, HunkHit, HunkId, HunkRecord as StorageHunkRecord};
     use crate::types::{CommitMeta, Hunk, HunkSymbol, RepoId, Symbol};
-    use crate::{Result, Storage};
+    use crate::Result;
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
 
@@ -137,10 +137,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl Storage for RecordingStorage {
-        async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> Result<()> {
-            Ok(())
-        }
+    impl crate::storage::StorageStatus for RecordingStorage {
         async fn get_index_status(&self, _: &RepoId) -> Result<IndexStatus> {
             Ok(IndexStatus {
                 last_indexed_commit: None,
@@ -148,9 +145,26 @@ mod tests {
                 indexed_at: None,
             })
         }
+
+        async fn get_index_metadata(&self, _: &RepoId) -> Result<StoredIndexMetadata> {
+            Ok(StoredIndexMetadata::default())
+        }
+
+        async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl crate::storage::StorageWrite for RecordingStorage {
+        async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+
         async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> Result<()> {
             Ok(())
         }
+
         async fn put_commit(&self, _: &RepoId, record: &CommitRecord) -> Result<()> {
             self.commits
                 .lock()
@@ -158,23 +172,21 @@ mod tests {
                 .push(record.meta.commit_sha.clone());
             Ok(())
         }
+
         async fn commit_exists(&self, _: &str) -> Result<bool> {
             Ok(false)
         }
+
         async fn put_hunks(&self, _: &RepoId, rows: &[StorageHunkRecord]) -> Result<()> {
             self.hunk_counts.lock().unwrap().push(rows.len());
             Ok(())
         }
+
         async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> Result<()> {
             Ok(())
         }
+
         async fn clear_head_symbols(&self, _: &RepoId) -> Result<()> {
-            Ok(())
-        }
-        async fn get_index_metadata(&self, _: &RepoId) -> Result<StoredIndexMetadata> {
-            Ok(StoredIndexMetadata::default())
-        }
-        async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> Result<()> {
             Ok(())
         }
     }

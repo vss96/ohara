@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use clap::Args as ClapArgs;
 use ohara_core::index_metadata::CompatibilityStatus;
-use ohara_core::{Indexer, IndexerReport, PhaseTimings, Storage};
+use ohara_core::{Indexer, IndexerReport, PhaseTimings, StorageStatus, StorageWrite};
 use std::path::PathBuf;
 use std::sync::Arc;
 

@@ -72,10 +72,7 @@ impl FakeStorage {
 }
 
 #[async_trait]
-impl crate::Storage for FakeStorage {
-    async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> crate::Result<()> {
-        Ok(())
-    }
+impl crate::storage::StorageStatus for FakeStorage {
     async fn get_index_status(&self, _: &RepoId) -> crate::Result<IndexStatus> {
         Ok(IndexStatus {
             last_indexed_commit: None,
@@ -83,32 +80,47 @@ impl crate::Storage for FakeStorage {
             indexed_at: None,
         })
     }
-    async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> crate::Result<()> {
-        Ok(())
-    }
-    async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> crate::Result<()> {
-        Ok(())
-    }
-    async fn commit_exists(&self, _: &str) -> crate::Result<bool> {
-        unreachable!("retriever tests should not exercise commit_exists")
-    }
-    async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> crate::Result<()> {
-        Ok(())
-    }
-    async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> crate::Result<()> {
-        Ok(())
-    }
-    async fn clear_head_symbols(&self, _: &RepoId) -> crate::Result<()> {
-        unreachable!("retriever tests should not exercise clear_head_symbols")
-    }
+
     async fn get_index_metadata(
         &self,
         _: &RepoId,
     ) -> crate::Result<crate::index_metadata::StoredIndexMetadata> {
         Ok(crate::index_metadata::StoredIndexMetadata::default())
     }
+
     async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> crate::Result<()> {
         Ok(())
+    }
+}
+
+#[async_trait]
+impl crate::storage::StorageWrite for FakeStorage {
+    async fn open_repo(&self, _: &RepoId, _: &str, _: &str) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn set_last_indexed_commit(&self, _: &RepoId, _: &str) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn put_commit(&self, _: &RepoId, _: &CommitRecord) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn commit_exists(&self, _: &str) -> crate::Result<bool> {
+        unreachable!("retriever tests should not exercise commit_exists")
+    }
+
+    async fn put_hunks(&self, _: &RepoId, _: &[HunkRecord]) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn put_head_symbols(&self, _: &RepoId, _: &[Symbol]) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn clear_head_symbols(&self, _: &RepoId) -> crate::Result<()> {
+        unreachable!("retriever tests should not exercise clear_head_symbols")
     }
 }
 
