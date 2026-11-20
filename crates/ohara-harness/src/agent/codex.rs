@@ -1,28 +1,211 @@
 //! Codex adapter (`codex exec --json`).
+//!
+//! Flags verified against `codex exec --help` on codex-cli 0.163.0:
+//! `--json` (JSONL events on stdout), `--skip-git-repo-check`, `-C/--cd <DIR>`,
+//! `-s/--sandbox workspace-write`, `-m/--model` and `-c key=value` (dotted
+//! path, value parsed as TOML). The prompt is the trailing positional
+//! argument. stdin is null (run_streaming), so codex does not wait for input.
+//!
+//! MCP: the request's Claude-format JSON (`{"mcpServers":{name:{command,args,env}}}`)
+//! is translated to `-c mcp_servers.<name>.command/args/env` overrides.
+//!
+//! Events used: `item.completed` with `item.type == "agent_message"` (final
+//! message = the last one) and `turn.failed` (`error.message`). Other
+//! `error` events and `item.completed` items of type `error` are transient
+//! warnings and are ignored. We parse the events rather than using
+//! `-o/--output-last-message`: the events are already in the transcript and
+//! carry the failure case too. `turn.completed` only has token counts, never
+//! a USD cost, so `cost` is always `None`.
+
+use async_trait::async_trait;
 use ohara_core::task::RuntimeName;
 
-use super::{AgentRequest, AgentStatus};
+use super::process::run_streaming;
+use super::stream::{last_json_line, last_json_line_in_file};
+use super::{classify_failure, AgentOutcome, AgentRequest, AgentRuntime, AgentStatus};
+use crate::error::{Error, Result};
 
 pub struct CodexRuntime {
     name: RuntimeName,
     model: Option<String>,
 }
 
+/// Final state of a codex run: success with the last agent message, or the
+/// `turn.failed` error message.
+#[derive(Debug, Clone, PartialEq)]
+enum Final {
+    Message(String),
+    Failed(String),
+}
+
 impl CodexRuntime {
     pub fn new(name: RuntimeName, model: Option<String>) -> Self {
         Self { name, model }
     }
-    fn argv(&self, _req: &AgentRequest, _mcp: &[String]) -> Vec<String> {
-        vec![]
+
+    /// `mcp` is the already-translated `-c` override list (see [`mcp_overrides`]).
+    fn argv(&self, req: &AgentRequest, mcp: &[String]) -> Vec<String> {
+        let mut argv: Vec<String> = [
+            "codex",
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "-C",
+            &req.cwd.display().to_string(),
+            "--sandbox",
+            "workspace-write",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        if let Some(model) = req.model.as_ref().or(self.model.as_ref()) {
+            argv.push("-m".to_string());
+            argv.push(model.clone());
+        }
+        argv.extend(mcp.iter().cloned());
+        argv.push(req.prompt.clone());
+        argv
     }
 }
 
-fn mcp_overrides(_json: &str) -> crate::error::Result<Vec<String>> {
-    Ok(vec![])
+/// A TOML basic string. JSON string escapes are valid TOML escapes.
+fn toml_str(s: &str) -> String {
+    serde_json::Value::String(s.to_string()).to_string()
 }
 
-fn parse_final(_tail: &str) -> Option<(AgentStatus, String)> {
-    None
+fn toml_key(name: &str) -> String {
+    let bare = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    match bare {
+        true => name.to_string(),
+        false => toml_str(name),
+    }
+}
+
+fn str_list(v: Option<&serde_json::Value>) -> Vec<String> {
+    v.and_then(|a| a.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(toml_str)).collect())
+        .unwrap_or_default()
+}
+
+/// Translate a Claude-format mcp config into codex `-c` override args.
+fn mcp_overrides(json: &str) -> Result<Vec<String>> {
+    let v: serde_json::Value = serde_json::from_str(json)
+        .map_err(|e| Error::Runtime(format!("codex: invalid mcp config json: {e}")))?;
+    let servers = v
+        .get("mcpServers")
+        .and_then(|s| s.as_object())
+        .ok_or_else(|| Error::Runtime("codex: mcp config has no mcpServers object".into()))?;
+    let mut out = Vec::new();
+    for (name, spec) in servers {
+        let command = spec
+            .get("command")
+            .and_then(|c| c.as_str())
+            .ok_or_else(|| Error::Runtime(format!("codex: mcp server {name} has no command")))?;
+        let prefix = format!("mcp_servers.{}", toml_key(name));
+        out.push("-c".to_string());
+        out.push(format!("{prefix}.command={}", toml_str(command)));
+        let args = str_list(spec.get("args"));
+        if !args.is_empty() {
+            out.push("-c".to_string());
+            out.push(format!("{prefix}.args=[{}]", args.join(",")));
+        }
+        let env: Vec<String> = spec
+            .get("env")
+            .and_then(|e| e.as_object())
+            .map(|e| {
+                e.iter()
+                    .filter_map(|(k, v)| Some(format!("{}={}", toml_str(k), toml_str(v.as_str()?))))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !env.is_empty() {
+            out.push("-c".to_string());
+            out.push(format!("{prefix}.env={{{}}}", env.join(",")));
+        }
+    }
+    Ok(out)
+}
+
+fn pick_final(v: &serde_json::Value) -> Option<Final> {
+    match v.get("type")?.as_str()? {
+        "turn.failed" => {
+            let msg = v.get("error")?.get("message")?.as_str()?;
+            Some(Final::Failed(msg.to_string()))
+        }
+        "item.completed" => {
+            let item = v.get("item")?;
+            if item.get("type")?.as_str()? != "agent_message" {
+                return None;
+            }
+            Some(Final::Message(item.get("text")?.as_str()?.to_string()))
+        }
+        _ => None,
+    }
+}
+
+fn to_status(f: Final) -> (AgentStatus, String) {
+    match f {
+        Final::Message(m) => (AgentStatus::Completed, m),
+        Final::Failed(m) => (classify_failure(&m), m),
+    }
+}
+
+/// Last relevant event in `tail`, as a status plus message.
+fn parse_final(tail: &str) -> Option<(AgentStatus, String)> {
+    last_json_line(tail, pick_final).map(to_status)
+}
+
+#[async_trait]
+impl AgentRuntime for CodexRuntime {
+    fn name(&self) -> &RuntimeName {
+        &self.name
+    }
+
+    async fn run(&self, req: AgentRequest) -> Result<AgentOutcome> {
+        let mcp = match &req.mcp_config {
+            Some(path) => mcp_overrides(&tokio::fs::read_to_string(path).await?)?,
+            None => Vec::new(),
+        };
+        let exit = run_streaming(
+            &self.argv(&req, &mcp),
+            None,
+            &req.cwd,
+            req.deadline,
+            &req.transcript,
+        )
+        .await?;
+        let found = match parse_final(&exit.stdout_tail) {
+            Some(f) => Some(f),
+            None => last_json_line_in_file(&req.transcript, pick_final)
+                .await
+                .map(to_status),
+        };
+        if exit.killed_at_deadline {
+            return Ok(AgentOutcome {
+                status: AgentStatus::TimedOut,
+                final_message: found.map(|f| f.1).unwrap_or(exit.stdout_tail),
+                cost: None,
+                exit_code: exit.code,
+            });
+        }
+        let Some((status, final_message)) = found else {
+            return Ok(AgentOutcome {
+                status: classify_failure(&exit.stdout_tail),
+                final_message: exit.stdout_tail,
+                cost: None,
+                exit_code: exit.code,
+            });
+        };
+        Ok(AgentOutcome {
+            status,
+            final_message,
+            cost: None,
+            exit_code: exit.code,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -54,16 +237,34 @@ mod tests {
         assert_eq!(
             a,
             [
-                "codex", "exec", "--json", "--skip-git-repo-check", "-C", "/work", "--sandbox",
-                "workspace-write", "do it"
+                "codex",
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "-C",
+                "/work",
+                "--sandbox",
+                "workspace-write",
+                "do it"
             ]
         );
-        let m = rt(Some("a")).argv(&req(Some("b")), &["x=1".into()]);
+        let m = rt(Some("a")).argv(&req(Some("b")), &["-c".into(), "x=1".into()]);
         assert_eq!(
             m,
             [
-                "codex", "exec", "--json", "--skip-git-repo-check", "-C", "/work", "--sandbox",
-                "workspace-write", "-m", "b", "-c", "x=1", "do it"
+                "codex",
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "-C",
+                "/work",
+                "--sandbox",
+                "workspace-write",
+                "-m",
+                "b",
+                "-c",
+                "x=1",
+                "do it"
             ]
         );
         assert_eq!(rt(Some("a")).argv(&req(None), &[])[9], "a");
@@ -109,5 +310,20 @@ mod tests {
         );
         let a = r#"{"type":"turn.failed","error":{"message":"401 Unauthorized"}}"#;
         assert_eq!(parse_final(a).unwrap().0, AgentStatus::AuthFailed);
+    }
+
+    #[tokio::test]
+    #[ignore = "runs the real `codex` CLI; needs login"]
+    async fn codex_live_smoke() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = req(None);
+        r.cwd = dir.path().to_path_buf();
+        r.prompt = "reply with the word ok".into();
+        r.transcript = dir.path().join("t.log");
+        r.deadline = Deadline(Utc::now() + chrono::Duration::seconds(180));
+        let o = rt(None).run(r).await.unwrap();
+        assert_eq!(o.status, AgentStatus::Completed, "{o:?}");
+        assert!(o.final_message.to_lowercase().contains("ok"), "{o:?}");
+        assert_eq!(o.cost, None);
     }
 }
