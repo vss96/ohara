@@ -9,7 +9,7 @@ use tracing::{error, info, warn};
 
 use crate::engine::RetrievalEngine;
 use crate::error::EngineError;
-use crate::ipc::{read_frame, write_frame};
+use crate::ipc::{read_frame_or_eof, write_frame};
 use crate::ipc::{ErrorCode, ErrorPayload, Request, RequestMethod, Response};
 
 /// Bind a Unix socket at `socket_path`, accept connections until `stop` is
@@ -83,7 +83,11 @@ async fn handle_connection(
     mut conn: UnixStream,
     stop: CancellationToken,
 ) -> crate::Result<()> {
-    let body = read_frame(&mut conn).await?;
+    // A connect-only probe (`Client::reachable`) closes before any frame.
+    let Some(body) = read_frame_or_eof(&mut conn).await? else {
+        tracing::debug!("connection closed before the first frame");
+        return Ok(());
+    };
     let req: Request = serde_json::from_slice(&body)
         .map_err(|e| EngineError::Internal(format!("decode request: {e}")))?;
     engine.touch();

@@ -17,6 +17,30 @@ pub async fn read_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<u
         .read_u32()
         .await
         .map_err(|e| EngineError::Internal(format!("ipc read length: {e}")))?;
+    read_body(reader, len).await
+}
+
+/// Like [`read_frame`], but `Ok(None)` when the peer closes the connection
+/// before sending any byte (e.g. a connect-only reachability probe).
+pub async fn read_frame_or_eof<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Option<Vec<u8>>> {
+    let mut header = [0u8; 4];
+    let n = reader
+        .read(&mut header)
+        .await
+        .map_err(|e| EngineError::Internal(format!("ipc read length: {e}")))?;
+    if n == 0 {
+        return Ok(None);
+    }
+    reader
+        .read_exact(&mut header[n..])
+        .await
+        .map_err(|e| EngineError::Internal(format!("ipc read length: {e}")))?;
+    read_body(reader, u32::from_be_bytes(header))
+        .await
+        .map(Some)
+}
+
+async fn read_body<R: AsyncReadExt + Unpin>(reader: &mut R, len: u32) -> Result<Vec<u8>> {
     if len > MAX_FRAME_BYTES {
         return Err(EngineError::Internal(format!(
             "ipc frame too large: {len} bytes (max {MAX_FRAME_BYTES})"
