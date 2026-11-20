@@ -574,6 +574,72 @@ mod proptests {
         matches!(token, "AND" | "OR" | "NOT" | "NEAR")
     }
 
+    #[test]
+    fn bm25_lanes_handle_empty_punctuation_and_operator_queries() {
+        // Regression for #118: these queries raised "fts5: syntax error".
+        let mut c = open_migrated_in_memory();
+        let sha = "b".repeat(40);
+        commit::put(
+            &mut c,
+            &CommitRecord {
+                ulid: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+                meta: CommitMeta {
+                    commit_sha: sha.clone(),
+                    parent_sha: None,
+                    is_merge: false,
+                    author: None,
+                    ts: 1_700_000_000,
+                    message: "m".into(),
+                },
+                message_emb: vec![0.1_f32; 384],
+            },
+        )
+        .unwrap();
+        put_many(
+            &mut c,
+            &[HunkRecord {
+                hunk: Hunk {
+                    commit_sha: sha,
+                    file_path: "src/lib.rs".into(),
+                    language: Some("rust".into()),
+                    change_kind: ChangeKind::Modified,
+                    diff_text: "+retry if not ready and near limit or bail\n".into(),
+                },
+                diff_emb: vec![0.1_f32; 384],
+                semantic_text: "retry if not ready and near limit or bail".into(),
+                symbols: vec![],
+            }],
+        )
+        .unwrap();
+
+        for q in ["", "   ", "???", "`--`"] {
+            assert!(bm25_by_text(&c, q, 5, None, None).unwrap().is_empty());
+            assert!(bm25_by_semantic_text(&c, q, 5, None, None)
+                .unwrap()
+                .is_empty());
+            assert!(symbol::bm25_by_name(&c, q, 5, None, None)
+                .unwrap()
+                .is_empty());
+        }
+        // Uppercase operators are searched as plain (case-folded) terms.
+        for q in ["NOT", "why AND", "retry AND", "foo AND OR bar", "NEAR"] {
+            bm25_by_text(&c, q, 5, None, None).unwrap();
+            bm25_by_semantic_text(&c, q, 5, None, None).unwrap();
+            symbol::bm25_by_name(&c, q, 5, None, None).unwrap();
+        }
+        assert_eq!(bm25_by_text(&c, "retry AND", 5, None, None).unwrap().len(), 1);
+        assert_eq!(bm25_by_text(&c, "NOT", 5, None, None).unwrap().len(), 1);
+        assert_eq!(
+            bm25_by_semantic_text(&c, "NEAR limit", 5, None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(bm25_by_text(&c, "why AND", 5, None, None)
+            .unwrap()
+            .is_empty());
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
@@ -655,7 +721,6 @@ mod proptests {
         }
 
         #[test]
-        #[ignore = "tracked in #118: empty/punctuation queries and uppercase FTS5 operators AND/OR/NOT/NEAR cause fts5 syntax errors in bm25 lanes"]
         fn bm25_lanes_never_error_on_arbitrary_user_queries(
             q in prop_oneof![
                 Just(String::new()),
