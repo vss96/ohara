@@ -33,9 +33,14 @@ struct ResultEvent {
     cost: Option<CostCents>,
 }
 
-/// Classify an `is_error` result event (currently by its text only).
-fn classify_error_result(result: &str, _tail: &str) -> AgentStatus {
-    classify_failure(result)
+/// Classify an `is_error` result event. The result text is preferred; when it
+/// is generic (classifies as `Crashed`) the stdout/stderr tail is consulted,
+/// since rate-limit/auth markers sometimes appear only there.
+fn classify_error_result(result: &str, tail: &str) -> AgentStatus {
+    match classify_failure(result) {
+        AgentStatus::Crashed => classify_failure(tail),
+        specific => specific,
+    }
 }
 
 impl ClaudeCodeRuntime {
