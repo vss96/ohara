@@ -166,4 +166,109 @@ mod tests {
         }
         assert_eq!(tips(&s, &id).await.len(), 16);
     }
+
+    /// Row count of `table`, read through the reader pool.
+    async fn count(s: &SqliteStorage, table: &'static str) -> i64 {
+        s.pool()
+            .get()
+            .await
+            .unwrap()
+            .interact(move |c| {
+                c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            })
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    /// One commit `sha` with one hunk carrying one attributed symbol.
+    async fn put_commit_with_hunk(s: &SqliteStorage, id: &RepoId, sha: &str) {
+        use ohara_core::storage::{CommitRecord, HunkRecord};
+        use ohara_core::types::{
+            AttributionKind, ChangeKind, CommitMeta, Hunk, HunkSymbol, SymbolKind,
+        };
+        let meta = CommitMeta {
+            commit_sha: sha.into(),
+            parent_sha: None,
+            is_merge: false,
+            author: None,
+            ts: 1,
+            message: format!("commit {sha}"),
+        };
+        s.put_commit(
+            id,
+            &CommitRecord {
+                meta,
+                message_emb: vec![0.0; 384],
+                ulid: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let mut h = HunkRecord::legacy(
+            Hunk {
+                commit_sha: sha.into(),
+                file_path: format!("src/{}.rs", &sha[..1]),
+                language: Some("rust".into()),
+                change_kind: ChangeKind::Added,
+                diff_text: "+fn x() {}\n".into(),
+            },
+            vec![0.5; 384],
+        );
+        h.symbols = vec![HunkSymbol {
+            kind: SymbolKind::Function,
+            name: "x".into(),
+            qualified_name: None,
+            attribution: AttributionKind::ExactSpan,
+        }];
+        s.put_hunks(id, &[h]).await.unwrap();
+    }
+
+    const PRUNED_TABLES: [&str; 8] = [
+        "commit_record",
+        "vec_commit",
+        "fts_commit",
+        "hunk",
+        "hunk_symbol",
+        "vec_hunk",
+        "fts_hunk_text",
+        "fts_hunk_semantic",
+    ];
+
+    #[tokio::test]
+    async fn delete_commits_removes_commit_hunks_vectors_and_fts_rows() {
+        let (_d, s, id) = setup().await;
+        put_commit_with_hunk(&s, &id, A).await;
+        put_commit_with_hunk(&s, &id, B).await;
+        let mut before = Vec::new();
+        for t in PRUNED_TABLES {
+            before.push(count(&s, t).await);
+        }
+
+        let deleted = s.delete_commits(&id, &[sha(A)]).await.unwrap();
+
+        assert_eq!(deleted, 1);
+        assert!(!s.commit_exists(A).await.unwrap());
+        assert!(s.commit_exists(B).await.unwrap());
+        for (t, b) in PRUNED_TABLES.iter().zip(before) {
+            assert_eq!(count(&s, t).await, b - 1, "{t} must drop by exactly 1");
+        }
+        let left: Vec<String> = s
+            .indexed_commit_shas(&id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.as_str().to_string())
+            .collect();
+        assert_eq!(left, vec![B.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn delete_commits_of_unknown_shas_deletes_nothing() {
+        let (_d, s, id) = setup().await;
+        put_commit_with_hunk(&s, &id, A).await;
+        assert_eq!(s.delete_commits(&id, &[sha(C)]).await.unwrap(), 0);
+        assert_eq!(s.delete_commits(&id, &[]).await.unwrap(), 0);
+        assert!(s.commit_exists(A).await.unwrap());
+    }
 }

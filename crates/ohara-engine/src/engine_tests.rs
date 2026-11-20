@@ -422,6 +422,9 @@ async fn index_checkout(path: &Path) {
     let commit_src = Arc::new(ohara_git::GitCommitSource::open(&id.worktree_path).unwrap());
     let symbol_src = Arc::new(ohara_parse::GitSymbolSource::open(&id.worktree_path).unwrap());
     let indexer = ohara_core::Indexer::new(sqlite.clone(), Arc::new(DummyEmbedder))
+        .with_runtime_metadata(crate::current_runtime_metadata(
+            ohara_core::EmbedMode::Semantic,
+        ))
         .with_tip_context(ohara_core::TipContext {
             tips: sqlite.clone(),
             worktree: id.worktree.clone(),
@@ -627,4 +630,238 @@ async fn filter_is_skipped_when_every_tip_is_visible() {
         .await
         .expect("find_pattern");
     assert_eq!(engine.ancestry_filtered_queries(), 0);
+}
+
+// ---- plan-33: daemon-side worktree indexing and prune ----
+
+/// Embedder that records every text it is asked to embed.
+#[derive(Default)]
+struct RecordingEmbedder {
+    texts: Mutex<Vec<String>>,
+}
+
+impl RecordingEmbedder {
+    fn calls(&self) -> usize {
+        self.texts.lock().unwrap().len()
+    }
+}
+
+#[async_trait::async_trait]
+impl ohara_core::EmbeddingProvider for RecordingEmbedder {
+    fn dimension(&self) -> usize {
+        384
+    }
+
+    fn model_id(&self) -> &str {
+        "recording"
+    }
+
+    async fn embed_batch(&self, texts: &[String]) -> ohara_core::Result<Vec<Vec<f32>>> {
+        self.texts.lock().unwrap().extend(texts.iter().cloned());
+        Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
+    }
+}
+
+fn recording_engine() -> (Arc<RecordingEmbedder>, RetrievalEngine) {
+    let rec = Arc::new(RecordingEmbedder::default());
+    let engine = RetrievalEngine::new(rec.clone(), Arc::new(DummyReranker));
+    (rec, engine)
+}
+
+fn sha_of(oid: git2::Oid) -> ohara_core::CommitSha {
+    ohara_core::CommitSha::parse(&oid.to_string()).unwrap()
+}
+
+/// Every commit row in the shared store of the repo at `path`.
+async fn stored_commits(path: &Path) -> Vec<String> {
+    let id = ohara_git::RepoIdentity::resolve(path).unwrap();
+    let db_path = ohara_core::paths::index_db_path(&id.repo_id).unwrap();
+    let sqlite = ohara_storage::SqliteStorage::open(&db_path).await.unwrap();
+    ohara_core::TipStore::indexed_commit_shas(&sqlite, &id.repo_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|c| c.as_str().to_string())
+        .collect()
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn ensure_indexed_is_a_noop_when_the_sha_is_covered() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (main, _slot1) = repo_with_worktree().await;
+    let repo = git2::Repository::open(main.path()).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    let parent = head.parent_id(0).unwrap();
+    let (rec, engine) = recording_engine();
+    let out = engine
+        .ensure_indexed(main.path(), &sha_of(parent))
+        .await
+        .expect("ensure_indexed");
+    assert!(!out.indexed);
+    assert_eq!(out.new_commits, 0);
+    assert_eq!(rec.calls(), 0, "a covered sha must not embed anything");
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn ensure_indexed_runs_one_incremental_index_for_an_uncovered_head() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (_main, slot1) = repo_with_worktree().await;
+    let wt_repo = git2::Repository::open(&slot1).unwrap();
+    let new = commit_file(&wt_repo, "c.rs", "fn three() {}\n", "third");
+    let (_rec, engine) = recording_engine();
+    let first = engine
+        .ensure_indexed(&slot1, &sha_of(new))
+        .await
+        .expect("first ensure_indexed");
+    assert!(first.indexed);
+    assert_eq!(first.new_commits, 1);
+    let second = engine
+        .ensure_indexed(&slot1, &sha_of(new))
+        .await
+        .expect("second ensure_indexed");
+    assert!(!second.indexed);
+    assert_eq!(second.new_commits, 0);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn indexing_a_worktree_embeds_only_its_new_commits() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (main, slot1) = repo_with_worktree().await;
+    let before = stored_commits(main.path()).await.len();
+    let wt_repo = git2::Repository::open(&slot1).unwrap();
+    commit_file(&wt_repo, "alpha.rs", "fn alpha_marker() {}\n", "add alpha");
+    commit_file(&wt_repo, "beta.rs", "fn beta_marker() {}\n", "add beta");
+    let (rec, engine) = recording_engine();
+    let out = engine.index_worktree(&slot1).await.expect("index_worktree");
+    assert!(out.indexed);
+    assert_eq!(out.new_commits, 2);
+    assert_eq!(stored_commits(main.path()).await.len(), before + 2);
+    let texts = rec.texts.lock().unwrap().clone();
+    assert!(!texts.is_empty(), "the new commits must be embedded");
+    for t in &texts {
+        assert!(
+            t.contains("alpha") || t.contains("beta"),
+            "embedded text from an already-indexed commit: {t:?}"
+        );
+    }
+    assert!(texts.iter().any(|t| t.contains("alpha_marker")));
+    assert!(texts.iter().any(|t| t.contains("beta_marker")));
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn ensure_indexed_refuses_an_unindexed_repo() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let tmp = tempfile::tempdir().unwrap();
+    build_test_repo(tmp.path());
+    let repo = git2::Repository::open(tmp.path()).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap().id();
+    let (rec, engine) = recording_engine();
+    let err = engine
+        .ensure_indexed(tmp.path(), &sha_of(head))
+        .await
+        .expect_err("never-indexed repo must refuse");
+    assert!(
+        matches!(err, EngineError::NoIndex { .. }),
+        "expected NoIndex, got: {err:?}"
+    );
+    assert_eq!(rec.calls(), 0);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn daemon_indexing_refuses_an_incompatible_index() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (main, slot1) = repo_with_worktree().await;
+    {
+        let id = ohara_git::RepoIdentity::resolve(main.path()).unwrap();
+        let db_path = ohara_core::paths::index_db_path(&id.repo_id).unwrap();
+        let sqlite = ohara_storage::SqliteStorage::open(&db_path).await.unwrap();
+        ohara_core::Storage::put_index_metadata(
+            &sqlite,
+            &id.repo_id,
+            &[("embedding_model".to_string(), "other-model".to_string())],
+        )
+        .await
+        .unwrap();
+    }
+    let before = stored_commits(main.path()).await;
+    let wt_repo = git2::Repository::open(&slot1).unwrap();
+    let new = commit_file(&wt_repo, "c.rs", "fn three() {}\n", "third");
+    let (rec, engine) = recording_engine();
+    let err = engine
+        .ensure_indexed(&slot1, &sha_of(new))
+        .await
+        .expect_err("incompatible index must refuse");
+    assert!(
+        matches!(err, EngineError::NeedsRebuild { .. }),
+        "expected NeedsRebuild, got: {err:?}"
+    );
+    let err = engine
+        .index_worktree(&slot1)
+        .await
+        .expect_err("index_worktree must refuse too");
+    assert!(matches!(err, EngineError::NeedsRebuild { .. }));
+    assert_eq!(stored_commits(main.path()).await, before);
+    assert_eq!(rec.calls(), 0);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn prune_deletes_commits_of_a_deleted_branch_and_its_tip() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (main, slot1) = repo_with_worktree().await;
+    let main_commits = stored_commits(main.path()).await;
+    let wt_repo = git2::Repository::open(&slot1).unwrap();
+    let extra = commit_file(&wt_repo, "c.rs", "fn three() {}\n", "slot only");
+    drop(wt_repo);
+    index_checkout(&slot1).await;
+    assert!(stored_commits(main.path())
+        .await
+        .contains(&extra.to_string()));
+
+    // Remove the worktree, then delete its branch.
+    std::fs::remove_dir_all(&slot1).unwrap();
+    let repo = git2::Repository::open(main.path()).unwrap();
+    repo.find_worktree("slot-1")
+        .unwrap()
+        .prune(Some(git2::WorktreePruneOptions::new().working_tree(true)))
+        .unwrap();
+    repo.find_branch("slot-1", git2::BranchType::Local)
+        .unwrap()
+        .delete()
+        .unwrap();
+
+    let engine = make_test_engine();
+    let out = engine
+        .prune_unreachable(main.path())
+        .await
+        .expect("prune_unreachable");
+    assert_eq!(out.commits_deleted, 1);
+    assert_eq!(out.tips_removed, 1);
+    let left = stored_commits(main.path()).await;
+    assert!(!left.contains(&extra.to_string()));
+    for c in &main_commits {
+        assert!(left.contains(c), "main commit {c} must survive prune");
+    }
+    let id = ohara_git::RepoIdentity::resolve(main.path()).unwrap();
+    let handle = engine.open_repo(main.path()).await.unwrap();
+    let tips = handle.store.tips.indexed_tips(&id.repo_id).await.unwrap();
+    assert_eq!(tips.len(), 1);
+    assert!(tips[0].worktree.is_main(), "the main tip is never removed");
 }
