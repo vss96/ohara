@@ -57,6 +57,11 @@ pub struct AssumptionInput {
     /// Statement of the belief.
     pub text: String,
     /// Argv that re-verifies the belief; exit 0 means it still holds.
+    ///
+    /// Agent-controlled, so the supervisor must run it with no more
+    /// authority than the agent has: argv only (never a shell), cwd fixed to
+    /// the task worktree, under a deadline. Shape is bounded by
+    /// [`MAX_CHECK_ARGS`] and [`MAX_CHECK_BYTES`].
     #[serde(default)]
     pub check: Option<Vec<String>>,
 }
@@ -132,6 +137,28 @@ fn parse_parent(raw: &str) -> Result<DecisionId, ProposeError> {
     })
 }
 
+/// Most arguments an assumption `check` argv may have.
+pub const MAX_CHECK_ARGS: usize = 64;
+
+/// Most total bytes an assumption `check` argv may have.
+pub const MAX_CHECK_BYTES: usize = 8 * 1024;
+
+fn validate_check(text: &str, argv: &[String]) -> Result<(), ProposeError> {
+    let bad = |why: &str| ProposeError::Invalid(format!("assumption {text:?} check: {why}"));
+    match argv.first() {
+        None => return Err(bad("argv is empty")),
+        Some(p) if p.is_empty() => return Err(bad("program name is empty")),
+        Some(_) => {}
+    }
+    if argv.len() > MAX_CHECK_ARGS {
+        return Err(bad(&format!("more than {MAX_CHECK_ARGS} arguments")));
+    }
+    if argv.iter().map(String::len).sum::<usize>() > MAX_CHECK_BYTES {
+        return Err(bad(&format!("more than {MAX_CHECK_BYTES} bytes in total")));
+    }
+    Ok(())
+}
+
 fn validate(input: &ProposeDecisionInput) -> Result<(), ProposeError> {
     if input.options.len() < 2 {
         return Err(ProposeError::Invalid(
@@ -143,6 +170,11 @@ fn validate(input: &ProposeDecisionInput) -> Result<(), ProposeError> {
             "chosen: {:?} is not one of the options",
             input.chosen
         )));
+    }
+    for a in &input.assumptions {
+        if let Some(argv) = &a.check {
+            validate_check(&a.text, argv)?;
+        }
     }
     Ok(())
 }
