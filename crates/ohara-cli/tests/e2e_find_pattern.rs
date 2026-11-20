@@ -60,7 +60,15 @@ async fn find_pattern_returns_retry_commit_first() {
             .unwrap()
             .unwrap(),
     );
-    let retriever = ohara_core::Retriever::new(storage, embedder);
+    // Plan-3 D.5.r: the regression assert must run the full pipeline,
+    // cross-encoder included (issue #140 hid behind its absence).
+    let reranker = std::sync::Arc::new(
+        tokio::task::spawn_blocking(ohara_embed::FastEmbedReranker::new)
+            .await
+            .unwrap()
+            .unwrap(),
+    );
+    let retriever = ohara_core::Retriever::new(storage, embedder).with_reranker(reranker);
 
     let q = ohara_core::query::PatternQuery {
         query: "retry with exponential backoff".into(),

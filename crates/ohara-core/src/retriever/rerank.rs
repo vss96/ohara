@@ -21,6 +21,15 @@ fn sigmoid(x: f32) -> f32 {
     }
 }
 
+/// The text the cross-encoder scores for one hit: commit message, blank
+/// line, diff. A diff often never names what the change is for (issue
+/// #140: the "retry with backoff" diff only says `attempt` / `sleep`), so
+/// the message carries the intent. It leads so the model's 512-token
+/// truncation cuts the diff tail, never the message.
+fn rerank_passage(hit: &HunkHit) -> String {
+    format!("{}\n\n{}", hit.commit.message, hit.hunk.diff_text)
+}
+
 /// Score `hits` with `reranker` against `query_text`, sigmoid-normalize
 /// the returned logits into `HunkHit::similarity`, and re-sort
 /// highest-first. Empty input is returned unchanged without invoking
@@ -33,7 +42,8 @@ pub async fn cross_encode(
     if hits.is_empty() {
         return Ok(hits);
     }
-    let candidates: Vec<&str> = hits.iter().map(|h| h.hunk.diff_text.as_str()).collect();
+    let passages: Vec<String> = hits.iter().map(rerank_passage).collect();
+    let candidates: Vec<&str> = passages.iter().map(String::as_str).collect();
     let scores = reranker.rerank(query_text, &candidates).await?;
     let mut scored: Vec<(HunkHit, f32)> = hits
         .into_iter()
@@ -101,6 +111,37 @@ mod tests {
         assert_eq!(out[0].hunk_id, 102, "highest score (3.0) must be first");
         assert_eq!(out[1].hunk_id, 100, "second score (2.0) must be second");
         assert_eq!(out[2].hunk_id, 101, "lowest score (1.0) must be last");
+    }
+
+    /// Records every candidate passage it is asked to score.
+    struct RecordingReranker(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait]
+    impl RerankProvider for RecordingReranker {
+        async fn rerank(&self, _: &str, candidates: &[&str]) -> crate::Result<Vec<f32>> {
+            let mut seen = self.0.lock().unwrap();
+            seen.extend(candidates.iter().map(|c| c.to_string()));
+            Ok(vec![0.0; candidates.len()])
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_encode_passage_leads_with_commit_message_then_diff() {
+        // Issue #140: a hunk's diff often never says what the change is
+        // for ("retry", "backoff" live only in the commit message), so
+        // the cross-encoder must see the message. It goes first so the
+        // 512-token truncation never cuts it off.
+        let mut hit = make_hit(1, "+for attempt in 0..3 {}");
+        hit.commit.message = "add retry with exponential backoff".into();
+        let reranker = RecordingReranker(std::sync::Mutex::new(Vec::new()));
+        cross_encode(&reranker, "retry with backoff", vec![hit])
+            .await
+            .unwrap();
+        let seen = reranker.0.lock().unwrap();
+        assert_eq!(
+            seen.as_slice(),
+            ["add retry with exponential backoff\n\n+for attempt in 0..3 {}"]
+        );
     }
 
     #[tokio::test]
