@@ -58,7 +58,8 @@ async fn explain_e2e_returns_retry_commit_for_retry_lines() {
     ohara_cli::commands::index::run(index_args).await.unwrap();
 
     // Build storage + blamer directly to avoid parsing CLI stdout.
-    let (repo_id, canonical, _) = ohara_cli::commands::resolve_repo_id(&repo).unwrap();
+    let id = ohara_cli::commands::resolve_repo_id(&repo).unwrap();
+    let (repo_id, canonical) = (id.repo_id, id.worktree_path);
     let db = ohara_cli::commands::index_db_path(&repo_id).unwrap();
     let storage = std::sync::Arc::new(ohara_storage::SqliteStorage::open(&db).await.unwrap());
     let blamer = ohara_git::Blamer::open(&canonical).unwrap();

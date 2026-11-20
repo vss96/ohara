@@ -1,6 +1,5 @@
-use anyhow::{anyhow, Result};
-use ohara_core::types::RepoId;
-use std::path::{Path, PathBuf};
+use anyhow::Result;
+use std::path::Path;
 
 pub mod daemon;
 pub mod explain;
@@ -20,14 +19,9 @@ pub mod update;
 /// `anyhow::Result`, so we map through `?` at use sites.
 pub use ohara_core::paths::{index_db_path, ohara_home};
 
-pub fn resolve_repo_id<P: AsRef<Path>>(repo_path: P) -> Result<(RepoId, PathBuf, String)> {
-    let canonical = std::fs::canonicalize(repo_path.as_ref())
-        .map_err(|e| anyhow!("canonicalize {}: {e}", repo_path.as_ref().display()))?;
-    let walker = ohara_git::GitWalker::open(&canonical).map_err(|e| anyhow!("open repo: {e}"))?;
-    let first = walker
-        .first_commit_sha()
-        .map_err(|e| anyhow!("first commit: {e}"))?;
-    let canonical_str = canonical.to_string_lossy().to_string();
-    let id = RepoId::from_parts(&first, &canonical_str);
-    Ok((id, canonical, first))
+/// Resolve the repo identity (shared id, worktree path, worktree key) of the
+/// repository containing `repo_path`. Linked worktrees map to the main
+/// clone's id.
+pub fn resolve_repo_id<P: AsRef<Path>>(repo_path: P) -> Result<ohara_git::RepoIdentity> {
+    ohara_git::RepoIdentity::resolve(repo_path.as_ref())
 }

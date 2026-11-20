@@ -143,11 +143,7 @@ fn worktree_shares_the_main_index_end_to_end() {
     );
 
     // 6. explain from the worktree names the worktree commit.
-    let o = ohara(
-        home.path(),
-        &["explain", "--file", "z.rs", "--start", "1", "--end", "1"],
-        &wt,
-    );
+    let o = ohara(home.path(), &["explain", "z.rs", "--lines", "1:1"], &wt);
     assert!(o.status.success(), "explain wt: {}", stderr(&o));
     assert!(stdout(&o).contains(&wt_sha), "explain:\n{}", stdout(&o));
 }

@@ -92,7 +92,9 @@ async fn cross_encoder_picks_better_message_among_near_duplicates() {
 
     // Build a Retriever with the bge-reranker-base cross-encoder attached.
     use std::sync::Arc;
-    let (repo_id, _, _) = ohara_cli::commands::resolve_repo_id(repo_dir.path()).unwrap();
+    let repo_id = ohara_cli::commands::resolve_repo_id(repo_dir.path())
+        .unwrap()
+        .repo_id;
     let db = ohara_cli::commands::index_db_path(&repo_id).unwrap();
     let storage = Arc::new(ohara_storage::SqliteStorage::open(&db).await.unwrap());
     let embedder = Arc::new(

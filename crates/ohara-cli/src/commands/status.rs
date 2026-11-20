@@ -1,7 +1,6 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
 use ohara_core::index_metadata::{CompatibilityStatus, RuntimeIndexMetadata};
-use ohara_core::query::compute_index_status;
 use ohara_core::{EmbedMode, Storage};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -89,11 +88,19 @@ fn count_ignore_layers(repo_root: &std::path::Path) -> (usize, usize, usize) {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let (repo_id, canonical, _) = super::resolve_repo_id(&args.path)?;
+    let id = super::resolve_repo_id(&args.path)?;
+    let (repo_id, canonical) = (id.repo_id.clone(), id.worktree_path.clone());
     let db_path = super::index_db_path(&repo_id)?;
     let storage = Arc::new(ohara_storage::SqliteStorage::open(&db_path).await?);
     let behind = ohara_git::GitCommitsBehind::open(&canonical)?;
-    let st = compute_index_status(storage.as_ref(), &repo_id, &behind).await?;
+    let st = ohara_core::query::compute_worktree_index_status(
+        storage.as_ref(),
+        storage.as_ref(),
+        &repo_id,
+        &id.worktree,
+        &behind,
+    )
+    .await?;
 
     let mut runtime = current_runtime_metadata(EmbedMode::default());
     let stored = storage.get_index_metadata(&repo_id).await?;
@@ -125,6 +132,9 @@ pub async fn run(args: Args) -> Result<()> {
         st.commits_behind_head,
         render_compatibility(&compatibility),
     );
+    if !id.worktree.is_main() {
+        println!("worktree: {} (shared index)", id.worktree.as_str());
+    }
     let (b, g, u) = count_ignore_layers(&canonical);
     println!("{}", render_ignore_summary(b, g, u));
     let cache_stats = storage.embed_cache_stats().await?;

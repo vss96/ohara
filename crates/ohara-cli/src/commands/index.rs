@@ -10,6 +10,7 @@ use crate::resources::{apply_intensity, detect_host, pick_resources, ResourcePla
 
 mod rebuild;
 mod summary;
+mod up_to_date;
 use rebuild::{assert_rebuild_safe, delete_index_files};
 use summary::{failed_commits_notice, index_summary_human, phase_timings_json};
 
@@ -199,7 +200,9 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
     // covers the whole command — embedder load (which can be 15-25s
     // on first run) is part of "how long did `ohara index` take".
     let cmd_start = std::time::Instant::now();
-    let (repo_id, canonical, first_commit) = super::resolve_repo_id(&args.path)?;
+    let id = super::resolve_repo_id(&args.path)?;
+    let repo_id = id.repo_id.clone();
+    let canonical = id.worktree_path.clone();
     let db_path = super::index_db_path(&repo_id)?;
     tracing::info!(repo = %canonical.display(), id = repo_id.as_str(), db = %db_path.display(), "indexing");
 
@@ -244,7 +247,7 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
 
     let storage = Arc::new(ohara_storage::SqliteStorage::open(&db_path).await?);
     storage
-        .open_repo(&repo_id, &canonical.to_string_lossy(), &first_commit)
+        .open_repo(&repo_id, &id.id_path, &id.first_commit_sha)
         .await?;
 
     // Plan 27: guard against embed_input_mode mismatch on incremental runs.
@@ -282,23 +285,23 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
     // commit/hunk history are untouched — only HEAD-snapshot symbols are
     // re-extracted. `force` wins over `incremental`.
     if args.force {
-        tracing::info!("force: clearing existing HEAD symbol rows");
-        storage.clear_head_symbols(&repo_id).await?;
+        match id.worktree.is_main() {
+            true => {
+                tracing::info!("force: clearing existing HEAD symbol rows");
+                storage.clear_head_symbols(&repo_id).await?;
+            }
+            false => println!("HEAD symbols follow the main worktree; not clearing them here"),
+        }
     }
 
-    // Fast path: when --incremental is set and storage's last_indexed_commit
-    // matches HEAD, return immediately without booting the FastEmbed model
-    // (which costs ~hundreds of ms even when cached). This is what makes the
-    // post-commit hook nearly free on no-op re-indexes.
-    if args.incremental && !args.force {
-        let st = storage.get_index_status(&repo_id).await?;
-        let walker = ohara_git::GitWalker::open(&canonical)?;
-        let head = walker.head_commit_sha()?;
-        if st.last_indexed_commit.as_deref() == Some(head.as_str()) {
-            tracing::info!(sha = %head, "incremental: index up-to-date, skipping embedder init");
-            println!("index up-to-date at {head}");
-            return Ok(noop_report());
-        }
+    // Fast path: with --incremental and nothing to walk (every commit is under
+    // an indexed tip), return without booting the embedder.
+    if args.incremental && !args.force && up_to_date::nothing_to_walk(storage.as_ref(), &id).await?
+    {
+        let head = up_to_date::head_sha(&id)?;
+        tracing::info!(sha = %head.as_str(), "incremental: index up-to-date, skipping embedder init");
+        println!("index up-to-date at {}", head.as_str());
+        return Ok(noop_report());
     }
 
     // Apply --threads before the embedder loads so the ort runtime
@@ -398,6 +401,11 @@ pub async fn run(args: Args) -> Result<IndexerReport> {
         // Plan 26: load `.oharaignore` / `.gitattributes` from the repo
         // root so the indexer respects the ignore filter automatically.
         .with_repo_root(canonical.clone())
+        .with_tip_context(ohara_core::TipContext {
+            tips: storage.clone(),
+            worktree: id.worktree.clone(),
+            head: up_to_date::head_sha(&id)?,
+        })
         // Plan 27: wire the chosen embed-cache mode into the indexer so
         // the coordinator picks the right cache key strategy.
         .with_embed_mode(args.embed_cache.into());

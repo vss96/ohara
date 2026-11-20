@@ -243,7 +243,9 @@ async fn index_force_rebuilds_chunked_symbols_and_reembeds() {
     // Inspect the database directly: the rebuilt rows must include at
     // least one symbol whose `sibling_names` is non-empty (the AST
     // chunker merged the three trio fns).
-    let (repo_id, _, _) = ohara_cli::commands::resolve_repo_id(repo_dir.path()).unwrap();
+    let repo_id = ohara_cli::commands::resolve_repo_id(repo_dir.path())
+        .unwrap()
+        .repo_id;
     let db = ohara_cli::commands::index_db_path(&repo_id).unwrap();
     let storage = ohara_storage::SqliteStorage::open(&db).await.unwrap();
     let pool = storage.pool().clone();

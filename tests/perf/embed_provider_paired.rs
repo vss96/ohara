@@ -90,7 +90,7 @@ async fn run_retry_pattern(arg: ProviderArg) -> RetryResult {
         .await
         .expect("index run");
 
-    let (repo_id, _, _) = ohara_cli::commands::resolve_repo_id(&repo).unwrap();
+    let repo_id = ohara_cli::commands::resolve_repo_id(&repo).unwrap().repo_id;
     let db = ohara_cli::commands::index_db_path(&repo_id).unwrap();
     let storage = Arc::new(ohara_storage::SqliteStorage::open(&db).await.unwrap());
     // Resolve the same way `commands::query::run` does so the test
