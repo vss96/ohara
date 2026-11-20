@@ -1207,3 +1207,87 @@ async fn reused_slot_merged_into_main_does_not_leak_the_old_run() {
     assert!(leaked.is_empty(), "run A leaked into main: {leaked:?}");
     assert!(engine.ancestry_filtered_queries() >= 1);
 }
+
+/// All tips of the shared store behind `path`, as `(key, sha)`.
+async fn all_tips(path: &Path) -> Vec<(String, String)> {
+    let id = ohara_git::RepoIdentity::resolve(path).unwrap();
+    let db_path = ohara_core::paths::index_db_path(&id.repo_id).unwrap();
+    let sqlite = ohara_storage::SqliteStorage::open(&db_path).await.unwrap();
+    ohara_core::TipStore::indexed_tips(&sqlite, &id.repo_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| (t.worktree.as_str().to_string(), t.sha.as_str().to_string()))
+        .collect()
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn prune_keeps_a_reachable_retired_tip_and_drops_it_once_its_branch_is_gone() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (main, slot1) = repo_with_worktree().await;
+    let main_repo = git2::Repository::open(main.path()).unwrap();
+    let main_head = main_repo.head().unwrap().peel_to_commit().unwrap().id();
+    let wt = git2::Repository::open(&slot1).unwrap();
+    let a1 = commit_file(&wt, "c.rs", "fn three() {}\n", "run A").to_string();
+    index_checkout(&slot1).await;
+    switch_to_new_branch(&wt, "run-b", main_head);
+    commit_file(&wt, "d.rs", "fn four() {}\n", "run B");
+    index_checkout(&slot1).await;
+    let retired = format!("slot-1/{a1}");
+    assert!(all_tips(main.path())
+        .await
+        .contains(&(retired.clone(), a1.clone())));
+
+    // Branch `slot-1` still holds run A: nothing is pruned.
+    let engine = make_test_engine();
+    let out = engine.prune_unreachable(main.path()).await.unwrap();
+    assert_eq!((out.commits_deleted, out.tips_removed), (0, 0));
+    assert!(all_tips(main.path())
+        .await
+        .contains(&(retired.clone(), a1.clone())));
+
+    // Delete the branch: run A's commit and its retired tip go.
+    main_repo
+        .find_branch("slot-1", git2::BranchType::Local)
+        .unwrap()
+        .delete()
+        .unwrap();
+    let out = engine.prune_unreachable(main.path()).await.unwrap();
+    assert_eq!((out.commits_deleted, out.tips_removed), (1, 1));
+    let tips = all_tips(main.path()).await;
+    assert!(tips.iter().all(|(k, _)| k != &retired), "got {tips:?}");
+    assert!(tips.iter().any(|(k, _)| k == "slot-1"), "live tip stays");
+    assert!(!stored_commits(main.path()).await.contains(&a1));
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn prune_retires_a_removed_worktrees_tip_while_its_branch_survives() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let (main, slot1) = repo_with_worktree().await;
+    let wt = git2::Repository::open(&slot1).unwrap();
+    let a1 = commit_file(&wt, "c.rs", "fn three() {}\n", "run A").to_string();
+    drop(wt);
+    index_checkout(&slot1).await;
+    std::fs::remove_dir_all(&slot1).unwrap();
+    let repo = git2::Repository::open(main.path()).unwrap();
+    repo.find_worktree("slot-1")
+        .unwrap()
+        .prune(Some(git2::WorktreePruneOptions::new().working_tree(true)))
+        .unwrap();
+
+    let engine = make_test_engine();
+    let out = engine.prune_unreachable(main.path()).await.unwrap();
+    assert_eq!((out.commits_deleted, out.tips_removed), (0, 1));
+    let tips = all_tips(main.path()).await;
+    assert!(tips.iter().all(|(k, _)| k != "slot-1"), "got {tips:?}");
+    assert!(
+        tips.contains(&(format!("slot-1/{a1}"), a1.clone())),
+        "branch slot-1 still reaches {a1}: its tip must stay as a retired tip, got {tips:?}"
+    );
+}
