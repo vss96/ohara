@@ -12,8 +12,9 @@ use ohara_core::task::{Deadline, Role, RuntimeName, StepRecord, StepState, TaskR
 
 use crate::agent::roles::RoleRunner;
 use crate::agent::{AgentRequest, AgentStatus};
-use crate::contract::{Budget, Contract};
+use crate::contract::{normalize_glob, Budget, Contract};
 use crate::error::{Error, Result};
+use crate::git::Git;
 use crate::workflow::Workflow;
 
 const PROMPT: &str = include_str!("prompts/contract.md");
@@ -53,12 +54,16 @@ fn render(template: &str, values: &[(&str, &str)]) -> String {
     out
 }
 
-fn repo_hints(cwd: &Path) -> String {
-    let found: Vec<&str> = HINT_FILES
+fn found_hints(cwd: &Path) -> Vec<&'static str> {
+    HINT_FILES
         .iter()
         .copied()
         .filter(|f| cwd.join(f).is_file())
-        .collect();
+        .collect()
+}
+
+fn repo_hints(cwd: &Path) -> String {
+    let found = found_hints(cwd);
     if found.is_empty() {
         return "none of Cargo.toml, package.json or pyproject.toml found".to_string();
     }
@@ -83,6 +88,50 @@ fn template_contract(task: &TaskRecord, wf: &Workflow) -> Result<Contract> {
     Contract::parse(&c.to_toml())
 }
 
+/// The template as a fallback: starter `cargo` scripts are kept only when the
+/// repo has a `Cargo.toml`, else dropped (a contract that fails by
+/// construction is worse than one the user must complete). Returns the
+/// contract and, when scripts were dropped, a note for `TaskRecord.detail`.
+fn fallback_for_repo(template: Contract, cwd: &Path) -> (Contract, Option<String>) {
+    let found = found_hints(cwd);
+    let is_rust = found.contains(&"Cargo.toml");
+    let (keep, drop): (Vec<_>, Vec<_>) = template
+        .scripts
+        .into_iter()
+        .partition(|s| is_rust || s.run.first().map(String::as_str) != Some("cargo"));
+    let note = (!drop.is_empty()).then(|| {
+        let missing: Vec<&str> = HINT_FILES
+            .iter()
+            .copied()
+            .filter(|f| !found.contains(f))
+            .collect();
+        format!(
+            "starter scripts do not match this repo (found: {}; missing: {}); supply scripts before approval",
+            if found.is_empty() { "none".to_string() } else { found.join(", ") },
+            missing.join(", ")
+        )
+    });
+    (
+        Contract {
+            scripts: keep,
+            ..template
+        },
+        note,
+    )
+}
+
+/// Template protections first, then any extra paths the draft names.
+fn union_protected(template: &[String], drafted: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = drafted;
+    for p in template {
+        let n = normalize_glob(p);
+        if !out.iter().any(|d| normalize_glob(d) == n) {
+            out.push(p.clone());
+        }
+    }
+    out
+}
+
 fn read_draft(path: &Path) -> Result<Contract> {
     let len = std::fs::metadata(path)
         .map_err(|e| Error::Contract(format!("agent wrote no draft at {}: {e}", path.display())))?
@@ -97,6 +146,11 @@ fn read_draft(path: &Path) -> Result<Contract> {
 
 /// Draft the contract for `task`, running the agent with `cwd` as its working
 /// directory. Task directory is `$OHARA_HOME/tasks/<task-id>`.
+///
+/// `cwd` MUST be the task's own worktree (created at `base_sha` before
+/// drafting), never the user's checkout: the agent runs unsandboxed. HEAD and
+/// `git status` are snapshotted first (the worktree must be clean) and any
+/// change by the agent is reset and cleaned, then reported in `detail`.
 ///
 /// The outcome and budget always come from the task. If the agent fails or
 /// its draft does not parse, the template is returned and the task's `detail`
@@ -124,6 +178,15 @@ pub(crate) async fn draft_in(
     task_dir: &Path,
 ) -> Result<Contract> {
     let template = template_contract(task, wf)?;
+    let git = Git::new(cwd);
+    git.ensure_own_toplevel()?;
+    if !git.status_porcelain()?.trim().is_empty() {
+        return Err(Error::Git(format!(
+            "{} has uncommitted changes; refusing to draft there",
+            cwd.display()
+        )));
+    }
+    let head = git.head()?;
     let scratch = task_dir.join("draft");
     std::fs::create_dir_all(&scratch)?;
     let draft_path = scratch.join("contract.draft.toml");
@@ -169,28 +232,44 @@ pub(crate) async fn draft_in(
         summary: None,
     };
     // The agent only writes to the scratch dir, so a failover needs no reset.
-    let (outcome, _) = runner
+    let ran = runner
         .run(Role::Contract, req, step, store, || Ok(()))
-        .await?;
+        .await;
+    // Undo anything the agent did to the worktree, even if the run errored.
+    let modified = git.head()? != head || git.status_porcelain()?.trim() != "";
+    if modified {
+        git.reset_hard(&head)?;
+        git.clean()?;
+    }
+    let (outcome, _) = ran?;
 
     let drafted = match outcome.status {
         AgentStatus::Completed => read_draft(&draft_path),
         other => Err(Error::Runtime(format!("contract agent ended {other:?}"))),
     };
     match drafted {
-        Ok(c) => Ok(Contract {
+        Ok(c) if !modified => Ok(Contract {
             outcome: template.outcome,
             budget: template.budget,
+            protected_paths: union_protected(&template.protected_paths, c.protected_paths),
             ..c
         }),
-        Err(e) => {
-            tracing::warn!(error = %e, task = %task.id, "contract draft unusable; using template");
-            let detail = TaskRecord {
-                detail: Some(FALLBACK_DETAIL.to_string()),
+        other => {
+            let mut parts = vec![FALLBACK_DETAIL.to_string()];
+            if modified {
+                parts = vec!["drafting agent modified the worktree; changes discarded".to_string()];
+            }
+            if let Err(e) = other {
+                tracing::warn!(error = %e, task = %task.id, "contract draft unusable; using template");
+            }
+            let (fallback, note) = fallback_for_repo(template, cwd);
+            parts.extend(note);
+            let record = TaskRecord {
+                detail: Some(parts.join("; ")),
                 ..task.clone()
             };
-            store.update_task(&detail).await?;
-            Ok(template)
+            store.update_task(&record).await?;
+            Ok(fallback)
         }
     }
 }

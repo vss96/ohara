@@ -124,7 +124,8 @@ impl Workflow {
         Self::load_from(&workflows_dir()?, name)
     }
 
-    /// Load every workflow in `$OHARA_HOME/workflows`, sorted by name.
+    /// Load every workflow in `$OHARA_HOME/workflows`, sorted by name. A
+    /// malformed file is skipped with a warning rather than failing the list.
     pub fn list() -> Result<Vec<Self>> {
         Self::list_from(&workflows_dir()?)
     }
@@ -156,7 +157,16 @@ impl Workflow {
             }
         }
         names.sort();
-        names.iter().map(|n| Self::load_from(dir, n)).collect()
+        let mut out = Vec::new();
+        for name in &names {
+            match Self::load_from(dir, name) {
+                Ok(wf) => out.push(wf),
+                Err(e) => {
+                    tracing::warn!(workflow = %name, error = %e, "skipping unusable workflow")
+                }
+            }
+        }
+        Ok(out)
     }
 }
 
