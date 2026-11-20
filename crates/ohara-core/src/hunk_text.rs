@@ -248,6 +248,13 @@ mod tests {
                 prop_assert_eq!(out.contains("symbols: "), !symbols.is_empty());
                 prop_assert!(out.contains("change: "));
                 prop_assert_eq!(out.contains("added_lines:\n"), !added_lines.is_empty());
+                if !added_lines.is_empty() {
+                    let expected_tail = format!("added_lines:\n{}", added_lines.join("\n"));
+                    prop_assert!(
+                        out.ends_with(&expected_tail),
+                        "added_lines payload mismatch in:\n{out}"
+                    );
+                }
                 prop_assert!(!out.contains("+++ b/file"));
 
                 let headers = [

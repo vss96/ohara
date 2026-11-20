@@ -633,8 +633,10 @@ mod tests {
         proptest! {
             #[test]
             fn parse_query_is_deterministic_and_serde_round_trips(q in "\\PC{0,150}") {
+                let before = chrono::Utc::now().timestamp();
                 let first = parse_query(&q);
                 let second = parse_query(&q);
+                let after = chrono::Utc::now().timestamp();
                 prop_assert_eq!(first.intent, second.intent);
                 prop_assert_eq!(first.confidence, second.confidence);
                 prop_assert_eq!(&first.language, &second.language);
@@ -642,7 +644,9 @@ mod tests {
                 prop_assert_eq!(&first.symbol_terms, &second.symbol_terms);
                 prop_assert_eq!(&first.matched_rules, &second.matched_rules);
                 if let (Some(t1), Some(t2)) = (first.since_unix, second.since_unix) {
-                    prop_assert!((t1 - t2).abs() <= 1);
+                    // Each parse derives its cutoff from its own `Utc::now()`, so the
+                    // two cutoffs may differ by at most the wall-clock time elapsed.
+                    prop_assert!((t1 - t2).abs() <= after - before);
                 } else {
                     prop_assert_eq!(first.since_unix, second.since_unix);
                 }
@@ -664,6 +668,11 @@ mod tests {
                     Just("kotlin"),
                 ]),
             ) {
+                // A language word in the prefix would compete with the `in <lang>` hint.
+                let lower_prefix = prefix.to_lowercase();
+                prop_assume!(!["rust", "python", "java", "kotlin"]
+                    .iter()
+                    .any(|l| lower_prefix.contains(l)));
                 let quoted: Vec<String> = symbols.iter().map(|s| format!("`{s}`")).collect();
                 let lang_suffix = lang.map(|l| format!(" in {l}")).unwrap_or_default();
                 let query = format!("{prefix} {} {lang_suffix}", quoted.join(" "));

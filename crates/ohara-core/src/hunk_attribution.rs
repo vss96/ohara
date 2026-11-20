@@ -433,11 +433,16 @@ mod tests {
         proptest! {
             #[test]
             fn byte_span_to_line_span_is_ordered_and_monotonic(
-                source in "\\PC{0,300}",
+                lines in proptest::collection::vec("[a-z ]{0,20}", 0..=15),
+                trailing_newline in any::<bool>(),
                 a in 0u32..=350,
                 b in 0u32..=350,
                 c in 0u32..=350,
             ) {
+                let mut source = lines.join("\n");
+                if trailing_newline && !lines.is_empty() {
+                    source.push('\n');
+                }
                 let mut pts = [a, b, c];
                 pts.sort_unstable();
                 let (s1, e1) = byte_span_to_line_span(pts[0], pts[1], &source);
