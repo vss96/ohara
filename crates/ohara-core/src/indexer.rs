@@ -1522,6 +1522,16 @@ mod phase_timing_tests {
         }
     }
 
+    /// Every commit is an ancestor of every head: no tip is ever retired.
+    struct AllVisible;
+
+    #[async_trait]
+    impl crate::visibility::CommitVisibility for AllVisible {
+        async fn visible(&self, _: &CommitSha, commits: &[CommitSha]) -> Result<Vec<bool>> {
+            Ok(vec![true; commits.len()])
+        }
+    }
+
     fn tip_indexer(storage: Arc<FakeStorage>, tips: Arc<FakeTips>, wt: WorktreeKey) -> Indexer {
         Indexer::new(
             storage,
@@ -1531,6 +1541,7 @@ mod phase_timing_tests {
         )
         .with_tip_context(TipContext {
             tips,
+            visibility: Arc::new(AllVisible),
             worktree: wt,
             head: sha40('f'),
         })

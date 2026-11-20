@@ -272,6 +272,7 @@ async fn seed_index(path: &Path) {
         ))
         .with_tip_context(ohara_core::TipContext {
             tips: sqlite.clone(),
+            visibility: Arc::new(ohara_git::GitVisibility::open(&id.worktree_path).unwrap()),
             worktree: id.worktree.clone(),
             head: ohara_core::CommitSha::parse(&head).unwrap(),
         });

@@ -1,6 +1,7 @@
 //! Per-worktree tip bookkeeping for `Indexer::run` (plan-33).
 
 use crate::types::RepoId;
+use crate::visibility::CommitVisibility;
 use crate::worktree::{CommitSha, TipStore, WorktreeKey};
 use crate::Result;
 use std::sync::Arc;
@@ -12,6 +13,9 @@ use std::sync::Arc;
 pub struct TipContext {
     /// Store of per-worktree indexed tips.
     pub tips: Arc<dyn TipStore>,
+    /// Ancestry oracle used to tell a fast-forward from a move to a
+    /// non-descendant (branch switch, reset, slot reuse).
+    pub visibility: Arc<dyn CommitVisibility>,
     /// The worktree being indexed.
     pub worktree: WorktreeKey,
     /// The worktree's HEAD when the run started.
@@ -27,13 +31,45 @@ impl TipContext {
 
     /// Record `head` as this worktree's tip after a clean run. A run with
     /// failed commits leaves the tip untouched so the next run retries.
+    ///
+    /// When the previous tip is not an ancestor of `head`, it is kept as a
+    /// retired tip first: its commits stay indexed, so it must keep counting
+    /// as a tip (walk hiding, the "every tip visible" fast path, coverage)
+    /// until prune finds it unreachable.
     pub(crate) async fn record(&self, repo_id: &RepoId, commits_failed: usize) -> Result<()> {
         if commits_failed > 0 {
             return Ok(());
         }
+        self.retire_previous(repo_id).await?;
         self.tips
             .set_indexed_tip(repo_id, &self.worktree, &self.head)
             .await
+    }
+
+    /// Keep the worktree's previous tip under a retired key when `head`
+    /// does not descend from it.
+    async fn retire_previous(&self, repo_id: &RepoId) -> Result<()> {
+        let tips = self.tips.indexed_tips(repo_id).await?;
+        let Some(prev) = tips.into_iter().find(|t| t.worktree == self.worktree) else {
+            return Ok(());
+        };
+        if prev.sha == self.head {
+            return Ok(());
+        }
+        let verdict = self
+            .visibility
+            .visible(&self.head, std::slice::from_ref(&prev.sha))
+            .await?;
+        if verdict.first().copied().unwrap_or(false) {
+            return Ok(());
+        }
+        tracing::info!(
+            worktree = self.worktree.as_str(),
+            retired = prev.sha.as_str(),
+            "worktree moved off its indexed tip; retiring it"
+        );
+        let key = WorktreeKey::retired(&self.worktree, &prev.sha);
+        self.tips.set_indexed_tip(repo_id, &key, &prev.sha).await
     }
 
     /// Only the main checkout owns the HEAD-symbol snapshot.

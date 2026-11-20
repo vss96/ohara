@@ -398,6 +398,13 @@ async fn index_locked(engine: &RetrievalEngine, handle: &RepoHandle) -> crate::R
         .with_embed_mode(mode)
         .with_tip_context(TipContext {
             tips: store.tips.clone(),
+            visibility: Arc::new(CachedVisibility::new(
+                Arc::new(
+                    ohara_git::GitVisibility::open(&handle.repo_path)
+                        .map_err(|e| EngineError::Git(format!("open visibility oracle: {e:#}")))?,
+                ),
+                engine.ancestry_cache(),
+            )),
             worktree: handle.worktree.clone(),
             head,
         });

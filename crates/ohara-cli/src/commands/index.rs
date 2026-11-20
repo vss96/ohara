@@ -398,6 +398,7 @@ pub async fn run(args: Args, no_daemon: bool) -> Result<IndexerReport> {
         .with_repo_root(canonical.clone())
         .with_tip_context(ohara_core::TipContext {
             tips: storage.clone(),
+            visibility: Arc::new(ohara_git::GitVisibility::open(&canonical)?),
             worktree: id.worktree.clone(),
             head: up_to_date::head_sha(&id)?,
         })
