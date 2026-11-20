@@ -13,7 +13,7 @@
 pub mod hydrator;
 
 use crate::perf_trace::timed_phase;
-use crate::storage::Storage;
+use crate::storage::StorageExplain;
 use crate::types::{Provenance, RepoId};
 use crate::Result;
 use async_trait::async_trait;
@@ -156,7 +156,7 @@ pub struct ExplainMeta {
 /// always runs the blamer; it is the engine's responsibility to short-
 /// circuit when cached ranges are available.
 pub async fn explain_change(
-    storage: &dyn Storage,
+    storage: &dyn StorageExplain,
     blamer: &dyn BlameSource,
     repo_id: &RepoId,
     query: &ExplainQuery,

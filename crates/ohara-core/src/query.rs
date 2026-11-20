@@ -274,31 +274,6 @@ mod tests {
         > {
             unreachable!("compute_index_status should not exercise get_hunk_symbols_batch")
         }
-        async fn get_commit(
-            &self,
-            _: &RepoId,
-            _: &str,
-        ) -> crate::Result<Option<crate::types::CommitMeta>> {
-            unreachable!("compute_index_status should not exercise get_commit")
-        }
-        async fn get_hunks_for_file_in_commit(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: &str,
-        ) -> crate::Result<Vec<crate::types::Hunk>> {
-            unreachable!("compute_index_status should not exercise get_hunks_for_file_in_commit")
-        }
-        async fn get_neighboring_file_commits(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: &str,
-            _: u8,
-            _: u8,
-        ) -> crate::Result<Vec<(u32, crate::types::CommitMeta)>> {
-            unreachable!("compute_index_status should not exercise get_neighboring_file_commits")
-        }
         async fn get_index_metadata(
             &self,
             _: &RepoId,
@@ -311,6 +286,37 @@ mod tests {
             _: &[(String, String)],
         ) -> crate::Result<()> {
             Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl crate::storage::StorageExplain for FakeStorage {
+        async fn get_commit(
+            &self,
+            _: &RepoId,
+            _: &str,
+        ) -> crate::Result<Option<crate::types::CommitMeta>> {
+            unreachable!("compute_index_status should not exercise get_commit")
+        }
+
+        async fn get_hunks_for_file_in_commit(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: &str,
+        ) -> crate::Result<Vec<crate::types::Hunk>> {
+            unreachable!("compute_index_status should not exercise get_hunks_for_file_in_commit")
+        }
+
+        async fn get_neighboring_file_commits(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: &str,
+            _: u8,
+            _: u8,
+        ) -> crate::Result<Vec<(u32, crate::types::CommitMeta)>> {
+            unreachable!("compute_index_status should not exercise get_neighboring_file_commits")
         }
     }
 

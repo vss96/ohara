@@ -186,9 +186,23 @@ impl crate::Storage for FakeStorage {
         *self.batch_calls.lock().unwrap() += 1;
         Ok(std::collections::HashMap::new())
     }
+    async fn get_index_metadata(
+        &self,
+        _: &RepoId,
+    ) -> crate::Result<crate::index_metadata::StoredIndexMetadata> {
+        Ok(crate::index_metadata::StoredIndexMetadata::default())
+    }
+    async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> crate::Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl crate::storage::StorageExplain for FakeStorage {
     async fn get_commit(&self, _: &RepoId, _: &str) -> crate::Result<Option<CommitMeta>> {
         unreachable!("retriever tests should not exercise get_commit")
     }
+
     async fn get_hunks_for_file_in_commit(
         &self,
         _: &RepoId,
@@ -197,6 +211,7 @@ impl crate::Storage for FakeStorage {
     ) -> crate::Result<Vec<crate::types::Hunk>> {
         unreachable!("retriever tests should not exercise get_hunks_for_file_in_commit")
     }
+
     async fn get_neighboring_file_commits(
         &self,
         _: &RepoId,
@@ -206,15 +221,6 @@ impl crate::Storage for FakeStorage {
         _: u8,
     ) -> crate::Result<Vec<(u32, crate::types::CommitMeta)>> {
         Ok(Vec::new())
-    }
-    async fn get_index_metadata(
-        &self,
-        _: &RepoId,
-    ) -> crate::Result<crate::index_metadata::StoredIndexMetadata> {
-        Ok(crate::index_metadata::StoredIndexMetadata::default())
-    }
-    async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> crate::Result<()> {
-        Ok(())
     }
 }
 

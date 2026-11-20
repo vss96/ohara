@@ -186,8 +186,77 @@ pub trait StorageCache: Send + Sync {
     }
 }
 
+/// Read-side lookups `explain_change` needs to hydrate blame results:
+/// commit metadata, a commit's hunks for one file, and neighbouring
+/// commits on the same file.
+///
+/// Split out of [`Storage`] (issue #98) so the explain hydrator and
+/// orchestrator, and their test fakes, depend only on this seam.
 #[async_trait]
-pub trait Storage: StorageCache + Send + Sync {
+pub trait StorageExplain: Send + Sync {
+    // --- Explain support ---
+
+    /// Fetch a single commit's metadata. Returns `Ok(None)` if the SHA
+    /// isn't indexed (e.g., commit is older than the watermark). Used by
+    /// the `explain_change` orchestrator to enrich blame results with
+    /// commit message + author + date for display.
+    async fn get_commit(&self, repo_id: &RepoId, sha: &str) -> Result<Option<CommitMeta>>;
+
+    /// Plan 21: fetch multiple commits by SHA in one call. Returns a
+    /// `HashMap` mapping each found SHA to its `CommitMeta`. SHAs that
+    /// are not indexed produce no entry — callers treat absence as
+    /// "unindexed" (same semantics as `get_commit` returning `Ok(None)`).
+    ///
+    /// The default implementation calls `get_commit` once per SHA
+    /// (preserves backward compatibility for `MockStorage` and other
+    /// test fakes that don't override this method). Production callers
+    /// should use `SqliteStorage` whose override issues a single SQL
+    /// statement with `IN (?, …)`.
+    async fn get_commits_by_sha(
+        &self,
+        repo_id: &RepoId,
+        shas: &[String],
+    ) -> Result<std::collections::HashMap<String, CommitMeta>> {
+        let mut out = std::collections::HashMap::with_capacity(shas.len());
+        for sha in shas {
+            if let Some(cm) = self.get_commit(repo_id, sha).await? {
+                out.insert(sha.clone(), cm);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Fetch the hunks of a commit that touch a specific file path. Used
+    /// by `explain_change` to attach a diff excerpt per blame hit.
+    /// JOINs `hunk` against `file_path` filtered by sha + path.
+    async fn get_hunks_for_file_in_commit(
+        &self,
+        repo_id: &RepoId,
+        sha: &str,
+        file_path: &str,
+    ) -> Result<Vec<Hunk>>;
+
+    /// Plan 12 Task 3.1: commits that touched `file_path` near
+    /// `anchor_sha`, with their per-commit touched-hunk count for
+    /// the file. `limit_before` is the cap on commits older than
+    /// the anchor (newest-first); `limit_after` is the cap on
+    /// commits newer than the anchor (oldest-first → chronological
+    /// after the anchor). The anchor itself is never returned.
+    /// Returns an empty Vec when the anchor isn't indexed (so the
+    /// orchestrator can fall back to "no contextual commits" rather
+    /// than error).
+    async fn get_neighboring_file_commits(
+        &self,
+        repo_id: &RepoId,
+        file_path: &str,
+        anchor_sha: &str,
+        limit_before: u8,
+        limit_after: u8,
+    ) -> Result<Vec<(u32, CommitMeta)>>;
+}
+
+#[async_trait]
+pub trait Storage: StorageCache + StorageExplain + Send + Sync {
     // --- Repo lifecycle ---
 
     /// Register a repository in the index. Idempotent on `repo_id`:
@@ -330,66 +399,6 @@ pub trait Storage: StorageCache + Send + Sync {
         repo_id: &RepoId,
         hunk_ids: &[HunkId],
     ) -> Result<std::collections::HashMap<HunkId, Vec<HunkSymbol>>>;
-
-    // --- Explain support ---
-
-    /// Fetch a single commit's metadata. Returns `Ok(None)` if the SHA
-    /// isn't indexed (e.g., commit is older than the watermark). Used by
-    /// the `explain_change` orchestrator to enrich blame results with
-    /// commit message + author + date for display.
-    async fn get_commit(&self, repo_id: &RepoId, sha: &str) -> Result<Option<CommitMeta>>;
-
-    /// Plan 21: fetch multiple commits by SHA in one call. Returns a
-    /// `HashMap` mapping each found SHA to its `CommitMeta`. SHAs that
-    /// are not indexed produce no entry — callers treat absence as
-    /// "unindexed" (same semantics as `get_commit` returning `Ok(None)`).
-    ///
-    /// The default implementation calls `get_commit` once per SHA
-    /// (preserves backward compatibility for `MockStorage` and other
-    /// test fakes that don't override this method). Production callers
-    /// should use `SqliteStorage` whose override issues a single SQL
-    /// statement with `IN (?, …)`.
-    async fn get_commits_by_sha(
-        &self,
-        repo_id: &RepoId,
-        shas: &[String],
-    ) -> Result<std::collections::HashMap<String, CommitMeta>> {
-        let mut out = std::collections::HashMap::with_capacity(shas.len());
-        for sha in shas {
-            if let Some(cm) = self.get_commit(repo_id, sha).await? {
-                out.insert(sha.clone(), cm);
-            }
-        }
-        Ok(out)
-    }
-
-    /// Fetch the hunks of a commit that touch a specific file path. Used
-    /// by `explain_change` to attach a diff excerpt per blame hit.
-    /// JOINs `hunk` against `file_path` filtered by sha + path.
-    async fn get_hunks_for_file_in_commit(
-        &self,
-        repo_id: &RepoId,
-        sha: &str,
-        file_path: &str,
-    ) -> Result<Vec<Hunk>>;
-
-    /// Plan 12 Task 3.1: commits that touched `file_path` near
-    /// `anchor_sha`, with their per-commit touched-hunk count for
-    /// the file. `limit_before` is the cap on commits older than
-    /// the anchor (newest-first); `limit_after` is the cap on
-    /// commits newer than the anchor (oldest-first → chronological
-    /// after the anchor). The anchor itself is never returned.
-    /// Returns an empty Vec when the anchor isn't indexed (so the
-    /// orchestrator can fall back to "no contextual commits" rather
-    /// than error).
-    async fn get_neighboring_file_commits(
-        &self,
-        repo_id: &RepoId,
-        file_path: &str,
-        anchor_sha: &str,
-        limit_before: u8,
-        limit_after: u8,
-    ) -> Result<Vec<(u32, CommitMeta)>>;
 
     // --- Index metadata (plan 13) ---
 

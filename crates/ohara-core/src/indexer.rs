@@ -658,27 +658,6 @@ mod phase_timing_tests {
         {
             Ok(std::collections::HashMap::new())
         }
-        async fn get_commit(&self, _: &RepoId, _: &str) -> Result<Option<CommitMeta>> {
-            Ok(None)
-        }
-        async fn get_hunks_for_file_in_commit(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: &str,
-        ) -> Result<Vec<Hunk>> {
-            Ok(vec![])
-        }
-        async fn get_neighboring_file_commits(
-            &self,
-            _: &RepoId,
-            _: &str,
-            _: &str,
-            _: u8,
-            _: u8,
-        ) -> Result<Vec<(u32, CommitMeta)>> {
-            Ok(vec![])
-        }
         async fn get_index_metadata(
             &self,
             _: &RepoId,
@@ -692,6 +671,33 @@ mod phase_timing_tests {
         ) -> Result<()> {
             *self.last_metadata.lock().unwrap() = Some(components.to_vec());
             Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl crate::storage::StorageExplain for FakeStorage {
+        async fn get_commit(&self, _: &RepoId, _: &str) -> Result<Option<CommitMeta>> {
+            Ok(None)
+        }
+
+        async fn get_hunks_for_file_in_commit(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<Hunk>> {
+            Ok(vec![])
+        }
+
+        async fn get_neighboring_file_commits(
+            &self,
+            _: &RepoId,
+            _: &str,
+            _: &str,
+            _: u8,
+            _: u8,
+        ) -> Result<Vec<(u32, CommitMeta)>> {
+            Ok(vec![])
         }
     }
 
@@ -1496,27 +1502,6 @@ mod plan_26_repo_root_tests {
             > {
                 Ok(std::collections::HashMap::new())
             }
-            async fn get_commit(&self, _: &RepoId, _: &str) -> crate::Result<Option<CommitMeta>> {
-                Ok(None)
-            }
-            async fn get_hunks_for_file_in_commit(
-                &self,
-                _: &RepoId,
-                _: &str,
-                _: &str,
-            ) -> crate::Result<Vec<Hunk>> {
-                Ok(vec![])
-            }
-            async fn get_neighboring_file_commits(
-                &self,
-                _: &RepoId,
-                _: &str,
-                _: &str,
-                _: u8,
-                _: u8,
-            ) -> crate::Result<Vec<(u32, CommitMeta)>> {
-                Ok(vec![])
-            }
             async fn get_index_metadata(
                 &self,
                 _: &RepoId,
@@ -1529,6 +1514,33 @@ mod plan_26_repo_root_tests {
                 _: &[(String, String)],
             ) -> crate::Result<()> {
                 Ok(())
+            }
+        }
+
+        #[async_trait]
+        impl crate::storage::StorageExplain for MinStorage {
+            async fn get_commit(&self, _: &RepoId, _: &str) -> crate::Result<Option<CommitMeta>> {
+                Ok(None)
+            }
+
+            async fn get_hunks_for_file_in_commit(
+                &self,
+                _: &RepoId,
+                _: &str,
+                _: &str,
+            ) -> crate::Result<Vec<Hunk>> {
+                Ok(vec![])
+            }
+
+            async fn get_neighboring_file_commits(
+                &self,
+                _: &RepoId,
+                _: &str,
+                _: &str,
+                _: u8,
+                _: u8,
+            ) -> crate::Result<Vec<(u32, CommitMeta)>> {
+                Ok(vec![])
             }
         }
 
@@ -1701,31 +1713,6 @@ mod plan_28_workers_tests {
             > {
                 Ok(std::collections::HashMap::new())
             }
-            async fn get_commit(
-                &self,
-                _: &crate::types::RepoId,
-                _: &str,
-            ) -> crate::Result<Option<crate::types::CommitMeta>> {
-                Ok(None)
-            }
-            async fn get_hunks_for_file_in_commit(
-                &self,
-                _: &crate::types::RepoId,
-                _: &str,
-                _: &str,
-            ) -> crate::Result<Vec<crate::types::Hunk>> {
-                Ok(vec![])
-            }
-            async fn get_neighboring_file_commits(
-                &self,
-                _: &crate::types::RepoId,
-                _: &str,
-                _: &str,
-                _: u8,
-                _: u8,
-            ) -> crate::Result<Vec<(u32, crate::types::CommitMeta)>> {
-                Ok(vec![])
-            }
             async fn get_index_metadata(
                 &self,
                 _: &crate::types::RepoId,
@@ -1738,6 +1725,37 @@ mod plan_28_workers_tests {
                 _: &[(String, String)],
             ) -> crate::Result<()> {
                 Ok(())
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl crate::storage::StorageExplain for MinStorage {
+            async fn get_commit(
+                &self,
+                _: &crate::types::RepoId,
+                _: &str,
+            ) -> crate::Result<Option<crate::types::CommitMeta>> {
+                Ok(None)
+            }
+
+            async fn get_hunks_for_file_in_commit(
+                &self,
+                _: &crate::types::RepoId,
+                _: &str,
+                _: &str,
+            ) -> crate::Result<Vec<crate::types::Hunk>> {
+                Ok(vec![])
+            }
+
+            async fn get_neighboring_file_commits(
+                &self,
+                _: &crate::types::RepoId,
+                _: &str,
+                _: &str,
+                _: u8,
+                _: u8,
+            ) -> crate::Result<Vec<(u32, crate::types::CommitMeta)>> {
+                Ok(vec![])
             }
         }
 
