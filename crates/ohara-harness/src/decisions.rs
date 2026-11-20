@@ -50,7 +50,7 @@ pub struct Settlement<'a> {
 /// there (never in the user's repo) as plain argv under a deadline, with
 /// their output logged under `logs`. A decision is
 /// rejected when a check exits non-zero (or cannot run) or when a
-/// `parent_id` names no decision of this task. Otherwise it is settled with
+/// `parent_id` names no settled decision of this task. Otherwise it is settled with
 /// the checkpoint, the contract `scripts` results and the `runtime`, and
 /// gains a parent edge to every earlier settled decision whose checkpoint
 /// diff touches a file this round's diff touches (over-link, never
@@ -81,7 +81,12 @@ pub async fn settle_round(
     if proposed.is_empty() {
         return Ok(report);
     }
-    let known: HashSet<DecisionId> = all.iter().map(|d| d.id).collect();
+    let mut known: HashSet<DecisionId> = all
+        .iter()
+        .filter(|d| d.state == DecisionState::Settled)
+        .map(|d| d.id)
+        .collect();
+    let all_ids: HashSet<DecisionId> = all.iter().map(|d| d.id).collect();
     let overlaps = overlapping_ancestors(git, task, &all, round, checkpoint_sha).await?;
     let evidence = Evidence {
         script_results: scripts.iter().map(Into::into).collect(),
@@ -91,7 +96,7 @@ pub async fn settle_round(
         let mut next = d.clone();
         let verdict = match Utc::now() >= deadline.0 {
             true => Some("settlement deadline exceeded".to_string()),
-            false => rejection(d, &known, git.cwd(), logs, deadline).await?,
+            false => rejection(d, &known, &all_ids, git.cwd(), logs, deadline).await?,
         };
         match verdict {
             Some(reason) => {
@@ -108,6 +113,7 @@ pub async fn settle_round(
                         next.parent_ids.push(*id);
                     }
                 }
+                known.insert(next.id);
                 report.settled += 1;
             }
         }
@@ -120,12 +126,17 @@ pub async fn settle_round(
 async fn rejection(
     d: &DecisionRecord,
     known: &HashSet<DecisionId>,
+    all_ids: &HashSet<DecisionId>,
     cwd: &Path,
     logs: &Path,
     deadline: Deadline,
 ) -> Result<Option<String>> {
     if let Some(p) = d.parent_ids.iter().find(|p| !known.contains(p)) {
-        return Ok(Some(format!("parent decision {} does not exist", p.0)));
+        let why = match all_ids.contains(p) {
+            true => "was not settled",
+            false => "does not exist",
+        };
+        return Ok(Some(format!("parent decision {} {why}", p.0)));
     }
     for (i, a) in d.assumptions.iter().enumerate() {
         let Some(argv) = &a.check else {
