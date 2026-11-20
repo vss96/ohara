@@ -2,9 +2,7 @@
 //! to keep `mod.rs` under the 500-line limit (plan-21 D.1).
 
 use super::*;
-use crate::query::IndexStatus;
-use crate::storage::{CommitRecord, HunkHit, HunkRecord};
-use crate::types::{ChangeKind, CommitMeta, Hunk, Symbol};
+use crate::types::{ChangeKind, CommitMeta, Hunk};
 use std::collections::HashMap;
 use std::sync::Mutex;
 

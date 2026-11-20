@@ -6,7 +6,7 @@
 
 use crate::diff_text::{truncate_diff, DIFF_EXCERPT_MAX_LINES};
 use crate::explain::{ExplainHit, RelatedCommit};
-use crate::storage::Storage;
+use crate::storage::StorageExplain;
 use crate::types::{Provenance, RepoId};
 use crate::Result;
 use chrono::{DateTime, Utc};
@@ -42,7 +42,7 @@ pub struct HydratedBlame {
 /// it explicitly — the rest can leave the field at its default once
 /// one is supplied.
 pub struct HydrateInputs<'a> {
-    pub storage: &'a dyn Storage,
+    pub storage: &'a dyn StorageExplain,
     pub blame_ranges: Vec<super::BlameRange>,
     pub query: &'a super::ExplainQuery,
     pub repo_id: &'a RepoId,
@@ -230,7 +230,7 @@ pub(crate) fn build_limitation(
 /// (2 before / 2 after) and overall dedup-by-sha keep the response
 /// payload bounded. Returns `(related, enrichment_limitation)`.
 pub(crate) async fn collect_related_commits(
-    storage: &dyn Storage,
+    storage: &dyn StorageExplain,
     repo_id: &RepoId,
     file: &str,
     hits: &[ExplainHit],
@@ -281,10 +281,7 @@ pub(crate) async fn collect_related_commits(
 mod tests {
     use super::*;
     use crate::explain::{BlameRange, ExplainQuery};
-    use crate::index_metadata::StoredIndexMetadata;
-    use crate::query::IndexStatus;
-    use crate::storage::{CommitRecord, HunkHit, HunkRecord};
-    use crate::types::{CommitMeta, Hunk, HunkSymbol, RepoId, Symbol};
+    use crate::types::{CommitMeta, Hunk, RepoId};
     use async_trait::async_trait;
     use std::collections::HashMap;
 

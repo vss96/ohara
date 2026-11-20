@@ -231,9 +231,20 @@ mod tests {
         ) -> Result<std::collections::HashMap<HunkId, Vec<HunkSymbol>>> {
             Ok(std::collections::HashMap::new())
         }
+        async fn get_index_metadata(&self, _: &RepoId) -> Result<StoredIndexMetadata> {
+            Ok(StoredIndexMetadata::default())
+        }
+        async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl crate::storage::StorageExplain for RecordingStorage {
         async fn get_commit(&self, _: &RepoId, _: &str) -> Result<Option<CommitMeta>> {
             Ok(None)
         }
+
         async fn get_hunks_for_file_in_commit(
             &self,
             _: &RepoId,
@@ -242,6 +253,7 @@ mod tests {
         ) -> Result<Vec<Hunk>> {
             Ok(vec![])
         }
+
         async fn get_neighboring_file_commits(
             &self,
             _: &RepoId,
@@ -251,12 +263,6 @@ mod tests {
             _: u8,
         ) -> Result<Vec<(u32, CommitMeta)>> {
             Ok(vec![])
-        }
-        async fn get_index_metadata(&self, _: &RepoId) -> Result<StoredIndexMetadata> {
-            Ok(StoredIndexMetadata::default())
-        }
-        async fn put_index_metadata(&self, _: &RepoId, _: &[(String, String)]) -> Result<()> {
-            Ok(())
         }
     }
 
