@@ -22,7 +22,7 @@ pub use engine::ExplainResult;
 pub use engine::FindPatternResult;
 pub use engine::RetrievalEngine;
 pub use error::EngineError;
-pub use handle::RepoHandle;
+pub use handle::{RepoHandle, RepoStore};
 pub use runtime_metadata::current_runtime_metadata;
 pub use server::serve_unix;
 

@@ -277,17 +277,20 @@ impl OharaService {
             .await
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
 
-        let behind = ohara_git::GitCommitsBehind::open(&self.server.repo_path)
+        let behind = ohara_git::GitCommitsBehind::open(&handle.repo_path)
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        let st = ohara_core::query::compute_index_status(
-            handle.storage.as_ref(),
+        let st = ohara_core::query::compute_worktree_index_status(
+            handle.store.storage.as_ref(),
+            handle.store.tips.as_ref(),
             &handle.repo_id,
+            &handle.worktree,
             &behind,
         )
         .await
         .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
 
         let stored = handle
+            .store
             .storage
             .get_index_metadata(&handle.repo_id)
             .await
