@@ -4,6 +4,7 @@
 //! them in `harness.sqlite`. Nested fields are stored as JSON, so every type
 //! here derives `Serialize` / `Deserialize`.
 
+/// Decision-trace records and their ids.
 pub mod decision;
 
 use crate::{OhraError, Result};
@@ -21,6 +22,7 @@ use ulid::Ulid;
 pub struct TaskId(pub Ulid);
 
 impl TaskId {
+    /// Generates a new, unique task id.
     pub fn new() -> Self {
         Self(Ulid::new())
     }
@@ -51,16 +53,24 @@ impl FromStr for TaskId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskState {
+    /// Contract is being drafted; not yet submitted for approval.
     Drafting,
+    /// Contract is waiting for a human to approve it.
     AwaitingApproval,
+    /// Supervisor loop is running rounds.
     Running,
+    /// Task finished with its checks satisfied.
     Succeeded,
+    /// Task hit its deadline before succeeding.
     TimedOut,
+    /// Task was aborted before completion.
     Aborted,
+    /// Task was stopped by the user.
     Stopped,
 }
 
 impl TaskState {
+    /// The snake_case name used in storage and serialization.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Drafting => "drafting",
@@ -104,7 +114,7 @@ pub struct Deadline(pub DateTime<Utc>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CostCents(pub u64);
 
-/// SHA-256 of the frozen contract, displayed (and serialized) as 64 hex chars.
+/// Blake3 hash of the frozen contract, displayed (and serialized) as 64 hex chars.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ContractHash(pub [u8; 32]);
 
@@ -146,21 +156,37 @@ pub struct RuntimeName(pub String);
 /// One harness task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskRecord {
+    /// Task id.
     pub id: TaskId,
+    /// The user's stated outcome.
     pub outcome: Outcome,
+    /// Name of the workflow driving the task.
     pub workflow: String,
+    /// Root of the repository the task runs in.
     pub repo_root: PathBuf,
+    /// Commit the task branch was started from.
     pub base_sha: String,
+    /// Branch the task works on.
     pub branch: String,
+    /// Current lifecycle state.
     pub state: TaskState,
+    /// Wall-clock deadline.
     pub deadline: Deadline,
+    /// Spending limit, if one is set.
     pub cost_ceiling: Option<CostCents>,
+    /// Money spent so far.
     pub cost_spent: CostCents,
+    /// Hash of the frozen contract, once approved.
     pub contract_hash: Option<ContractHash>,
+    /// Last heartbeat from the supervisor.
     pub heartbeat_at: Option<DateTime<Utc>>,
+    /// Current round number.
     pub round: u32,
+    /// When the task was created.
     pub created_at: DateTime<Utc>,
+    /// When the task finished, if it has.
     pub finished_at: Option<DateTime<Utc>>,
+    /// Free-form detail about the final state.
     pub detail: Option<String>,
 }
 
@@ -168,10 +194,15 @@ pub struct TaskRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
+    /// Drafts and freezes the contract.
     Contract,
+    /// Plans the work for a round.
     Planner,
+    /// Writes the code changes.
     Builder,
+    /// Judges whether the round met the contract.
     Judge,
+    /// Reviews the round's changes.
     Reviewer,
 }
 
@@ -179,28 +210,46 @@ pub enum Role {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StepState {
+    /// Step is in progress.
     Running,
+    /// Step completed successfully.
     Passed,
+    /// Step completed with a failure.
     Failed,
+    /// Step was aborted before completion.
     Aborted,
 }
 
 /// One agent invocation within a task round.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepRecord {
+    /// Task this step belongs to.
     pub task_id: TaskId,
+    /// Round the step ran in.
     pub round: u32,
+    /// Position of the step within its round.
     pub seq: u32,
+    /// Role the agent played.
     pub role: Role,
+    /// Runtime that executed the step.
     pub runtime: RuntimeName,
+    /// Model used, if reported.
     pub model: Option<String>,
+    /// Current state of the step.
     pub state: StepState,
+    /// When the step started.
     pub started_at: DateTime<Utc>,
+    /// When the step finished, if it has.
     pub finished_at: Option<DateTime<Utc>>,
+    /// Git HEAD after the step, if recorded.
     pub head_sha: Option<String>,
+    /// Cost of the step, if known.
     pub cost: Option<CostCents>,
+    /// Runtime this attempt failed over from, if any.
     pub failover_from: Option<RuntimeName>,
+    /// Path to the step's transcript.
     pub transcript: PathBuf,
+    /// Short summary of the step's result.
     pub summary: Option<String>,
 }
 
