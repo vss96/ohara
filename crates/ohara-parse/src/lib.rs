@@ -57,7 +57,13 @@ const CHUNK_MAX_TOKENS: usize = 500;
 /// `hunk_symbol` rows that v0.7 retrieval expects — so we bump to
 /// trigger a `query-compatible, refresh recommended` verdict for
 /// pre-plan-11 indexes.
-pub const CHUNKER_VERSION: &str = "2";
+///
+/// v3 (#121): the sibling-merge budget now counts the gap bytes
+/// (comments, docstrings, whitespace) between atoms, so merged chunks
+/// can split differently. Bumped so existing indexes report
+/// `refresh recommended` and pick up the new chunk boundaries via
+/// `ohara index --force`.
+pub const CHUNKER_VERSION: &str = "3";
 
 /// Returns `language -> parser_version` for every language this crate
 /// can index. Used by the indexer to record per-parser metadata so the

@@ -2,7 +2,8 @@
 //!
 //! Walks a list of source-order top-level symbol "atoms" left-to-right,
 //! greedily merging consecutive atoms into a single chunk while the
-//! running token total stays under `max_tokens`. An atom that already
+//! merged chunk's `source_text` (atoms *and* the gaps between them)
+//! stays under `max_tokens`. An atom that already
 //! exceeds the budget on its own is emitted as a single-symbol chunk
 //! (no subdivision).
 //!
@@ -21,8 +22,8 @@ use ohara_core::types::Symbol;
 /// costs or downstream model budgets — so the approximation is fine.
 const CHARS_PER_TOKEN: usize = 4;
 
-fn estimate_tokens(text: &str) -> usize {
-    text.chars().count() / CHARS_PER_TOKEN
+fn tokens_for_chars(chars: usize) -> usize {
+    chars / CHARS_PER_TOKEN
 }
 
 /// Merge `atoms` (already in source byte order) into AST-aware chunks
@@ -30,36 +31,40 @@ fn estimate_tokens(text: &str) -> usize {
 ///
 /// Algorithm (depth-first source-byte-order traversal):
 /// 1. Walk atoms left-to-right. Maintain a "current chunk" of
-///    `(primary, siblings, running_tokens)`.
-/// 2. For each next atom A:
-///    - If `running_tokens + A.tokens <= max_tokens`, append A to the
-///      current chunk's siblings and extend the span.
-///    - Otherwise close the current chunk (if non-empty) and start a
-///      new one with A as primary.
+///    `(primary, siblings, running_chars)`, where `running_chars` is
+///    the char count of the chunk's eventual `source_text` — the
+///    slice of `source` from the primary's start to the last
+///    sibling's end, *including* any gap bytes (comments, docstrings,
+///    whitespace, uncaptured declarations) between atoms.
+/// 2. For each next atom A, let `extra` be the chars from the current
+///    chunk's end up to A's end (gap + A):
+///    - If `estimate(running_chars + extra) <= max_tokens`, append A
+///      to the current chunk's siblings and extend the span.
+///    - Otherwise close the current chunk and start a new one with A
+///      as primary.
 ///    - If A alone exceeds `max_tokens`, emit it as its own
 ///      single-atom chunk (no subdivision).
 /// 3. Flush any non-empty chunk at end of input.
+///
+/// Counting the gap keeps every merged chunk's `source_text` within
+/// `max_tokens` (#121); single-atom chunks may still exceed it.
 pub fn chunk_symbols(atoms: Vec<Symbol>, max_tokens: usize, source: &str) -> Vec<Symbol> {
     let mut out: Vec<Symbol> = Vec::new();
     let mut current: Option<ChunkBuilder> = None;
 
     for atom in atoms {
-        let atom_tokens = estimate_tokens(&atom.source_text);
-
-        match current.take() {
-            None => {
-                current = Some(ChunkBuilder::start(atom, atom_tokens));
-            }
-            Some(mut buf) => {
-                if buf.running_tokens + atom_tokens <= max_tokens {
-                    buf.append(atom, atom_tokens);
-                    current = Some(buf);
-                } else {
-                    out.push(buf.finish(source));
-                    current = Some(ChunkBuilder::start(atom, atom_tokens));
-                }
-            }
+        let Some(mut buf) = current.take() else {
+            current = Some(ChunkBuilder::start(atom, source));
+            continue;
+        };
+        let extra = buf.extra_chars(&atom, source);
+        if tokens_for_chars(buf.running_chars + extra) <= max_tokens {
+            buf.append(atom, extra);
+            current = Some(buf);
+            continue;
         }
+        out.push(buf.finish(source));
+        current = Some(ChunkBuilder::start(atom, source));
     }
 
     if let Some(buf) = current {
@@ -68,29 +73,57 @@ pub fn chunk_symbols(atoms: Vec<Symbol>, max_tokens: usize, source: &str) -> Vec
     out
 }
 
+/// Char count of `source[start..end]`, or of `fallback` when the span
+/// doesn't slice `source` cleanly (mismatched source / overlapping or
+/// out-of-order atoms).
+fn span_chars(source: &str, start: u32, end: u32, fallback: &str) -> usize {
+    source
+        .get(start as usize..end as usize)
+        .unwrap_or(fallback)
+        .chars()
+        .count()
+}
+
 /// Accumulator for a single in-progress chunk during the merge walk.
 struct ChunkBuilder {
     primary: Symbol,
     sibling_names: Vec<String>,
     span_end: u32,
-    running_tokens: usize,
+    running_chars: usize,
 }
 
 impl ChunkBuilder {
-    fn start(primary: Symbol, tokens: usize) -> Self {
+    fn start(primary: Symbol, source: &str) -> Self {
         let span_end = primary.span_end;
+        let running_chars = span_chars(
+            source,
+            primary.span_start,
+            primary.span_end,
+            &primary.source_text,
+        );
         Self {
             primary,
             sibling_names: Vec::new(),
             span_end,
-            running_tokens: tokens,
+            running_chars,
         }
     }
 
-    fn append(&mut self, sibling: Symbol, tokens: usize) {
+    /// Chars `sibling` would add to this chunk's `source_text`: the
+    /// gap after the current end plus the sibling itself.
+    fn extra_chars(&self, sibling: &Symbol, source: &str) -> usize {
+        span_chars(
+            source,
+            self.span_end,
+            sibling.span_end,
+            &sibling.source_text,
+        )
+    }
+
+    fn append(&mut self, sibling: Symbol, extra_chars: usize) {
         self.sibling_names.push(sibling.name);
         self.span_end = sibling.span_end;
-        self.running_tokens += tokens;
+        self.running_chars += extra_chars;
     }
 
     fn finish(self, source: &str) -> Symbol {
@@ -121,6 +154,10 @@ impl ChunkBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn estimate_tokens(text: &str) -> usize {
+        tokens_for_chars(text.chars().count())
+    }
     use ohara_core::types::{Symbol, SymbolKind};
 
     /// Build a synthetic atom with `tok` tokens worth of source. Each
