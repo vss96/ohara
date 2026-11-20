@@ -113,7 +113,13 @@ impl Contract {
             )));
         }
         for g in &c.protected_paths {
-            globset::Glob::new(&normalize_glob(g)).map_err(|e| {
+            let n = normalize_glob(g);
+            if n.is_empty() || n == "." {
+                return Err(Error::Contract(format!(
+                    "invalid contract: protected path {g:?} is empty or matches everything"
+                )));
+            }
+            globset::Glob::new(&n).map_err(|e| {
                 Error::Contract(format!("invalid contract: protected path {g:?}: {e}"))
             })?;
         }

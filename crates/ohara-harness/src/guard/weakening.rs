@@ -94,8 +94,19 @@ fn test_count(text: &str) -> u32 {
     count(text, &TEST_TOKENS).saturating_sub(count(text, &DISABLED_TEST_TOKENS))
 }
 
+/// A single-line comment: `//`, or `#` that is not a Rust attribute or shebang.
+fn is_comment_line(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("//") || (t.starts_with('#') && !t.starts_with("#[") && !t.starts_with("#!"))
+}
+
 fn count(text: &str, tokens: &[&str]) -> u32 {
-    let n: usize = tokens.iter().map(|t| text.matches(t).count()).sum();
+    let code = text
+        .lines()
+        .filter(|l| !is_comment_line(l))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let n: usize = tokens.iter().map(|t| code.matches(t).count()).sum();
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
@@ -206,11 +217,15 @@ mod tests {
         let rust_before = "#[test]\nfn a() {}\n";
         let rust_after = "// #[test]\nfn a() {}\n";
         let v = compare("t.rs", Some(rust_before), Some(rust_after), false);
-        assert!(v.iter().any(|x| matches!(x, Violation::TestCountDropped { .. })));
+        assert!(v
+            .iter()
+            .any(|x| matches!(x, Violation::TestCountDropped { .. })));
         let py_before = "def test_foo():\n    pass\n";
         let py_after = "# def test_foo():\n    pass\n";
         let v = compare("test_a.py", Some(py_before), Some(py_after), false);
-        assert!(v.iter().any(|x| matches!(x, Violation::TestCountDropped { .. })));
+        assert!(v
+            .iter()
+            .any(|x| matches!(x, Violation::TestCountDropped { .. })));
     }
 
     #[test]
