@@ -94,6 +94,13 @@ pub struct Contract {
     pub rubrics: Vec<Rubric>,
 }
 
+/// Normalise a protected-path pattern: strip a leading `./` and a trailing
+/// `/` (so `ci/` names the directory `ci`).
+pub(crate) fn normalize_glob(g: &str) -> String {
+    let g = g.strip_prefix("./").unwrap_or(g);
+    g.trim_end_matches('/').to_string()
+}
+
 impl Contract {
     /// Parse a `contract.toml` document.
     pub fn parse(s: &str) -> Result<Self> {
@@ -104,6 +111,11 @@ impl Contract {
                 "invalid contract: script {:?} has an empty run command",
                 bad.name
             )));
+        }
+        for g in &c.protected_paths {
+            globset::Glob::new(&normalize_glob(g)).map_err(|e| {
+                Error::Contract(format!("invalid contract: protected path {g:?}: {e}"))
+            })?;
         }
         Ok(c)
     }

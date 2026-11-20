@@ -191,7 +191,8 @@ fn unreadable_blob_fails_closed() {
 
 #[test]
 fn deleting_inline_rust_test_module_is_violation() {
-    let with = "pub fn f() {}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { assert!(true); }\n}\n";
+    let with =
+        "pub fn f() {}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { assert!(true); }\n}\n";
     let v = run(&contract(false), &[("src/lib.rs", with)], |d| {
         write(d, "src/lib.rs", "pub fn f() {}\n")
     });

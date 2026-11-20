@@ -8,7 +8,11 @@ use super::Violation;
 use crate::error::{Error, Result};
 
 /// Globs identifying test files.
-const TEST_GLOBS: [&str; 7] = [
+const TEST_GLOBS: [&str; 11] = [
+    "**/__tests__/**",
+    "**/test/**",
+    "**/*_spec.*",
+    "**/tests.rs",
     "**/tests/**",
     "**/*_test.*",
     "**/*_tests.rs",
@@ -26,12 +30,33 @@ const TEST_TOKENS: [&str; 6] = [
     "test(",
     "@Test",
 ];
-const IGNORE_TOKENS: [&str; 5] = [
+/// Markers that disable a test. Counts are approximate: overlapping forms
+/// such as `@unittest.skip(` match two tokens, which only inflates `added`.
+const IGNORE_TOKENS: [&str; 12] = [
     "#[ignore",
-    "@pytest.mark.skip",
+    "#[cfg(any())]",
+    "pytest.mark.skip",
+    "unittest.skip",
     ".skip(",
     "xit(",
+    "xtest(",
+    "xdescribe(",
+    "@Ignore",
     "@Disabled",
+    "t.Skip(",
+    "t.Skipf(",
+];
+/// Disabled forms that also contain a live-test token (`it(`, `test(`);
+/// subtracted from the test count so disabling can't offset a removal.
+const DISABLED_TEST_TOKENS: [&str; 2] = ["xit(", "xtest("];
+/// Unambiguous markers that make any file a test file (inline tests).
+const CONTENT_MARKERS: [&str; 6] = [
+    "#[test]",
+    "#[cfg(test)]",
+    "#[tokio::test]",
+    "def test_",
+    "@Test",
+    "describe(",
 ];
 const ASSERT_TOKENS: [&str; 3] = ["assert", "expect(", "assertEquals"];
 
@@ -50,9 +75,23 @@ impl TestFiles {
         Ok(Self(set))
     }
 
-    pub(super) fn is_test_file(&self, path: &str) -> bool {
+    /// A test file by path, or by containing a test marker at either revision.
+    pub(super) fn is_test_file(
+        &self,
+        path: &str,
+        before: Option<&str>,
+        after: Option<&str>,
+    ) -> bool {
         self.0.is_match(path)
+            || [before, after]
+                .into_iter()
+                .flatten()
+                .any(|t| CONTENT_MARKERS.iter().any(|m| t.contains(m)))
     }
+}
+
+fn test_count(text: &str) -> u32 {
+    count(text, &TEST_TOKENS).saturating_sub(count(text, &DISABLED_TEST_TOKENS))
 }
 
 fn count(text: &str, tokens: &[&str]) -> u32 {
@@ -82,7 +121,7 @@ pub(super) fn compare(
     if allow_removal {
         return out;
     }
-    let (tb, ta) = (count(before, &TEST_TOKENS), count(after, &TEST_TOKENS));
+    let (tb, ta) = (test_count(before), test_count(after));
     if ta < tb {
         out.push(Violation::TestCountDropped {
             file: file.clone(),
@@ -131,12 +170,24 @@ mod tests {
             "web/a.test.ts",
             "web/a.spec.js",
             "app/src/test/java/A.java",
+            "web/__tests__/a.js",
+            "x/test/a.go",
+            "a_spec.rb",
+            "src/tests.rs",
         ] {
-            assert!(t.is_test_file(p), "{p}");
+            assert!(t.is_test_file(p, None, None), "{p}");
         }
         for p in ["src/lib.rs", "contest.rs", "src/testing.rs"] {
-            assert!(!t.is_test_file(p), "{p}");
+            assert!(!t.is_test_file(p, None, None), "{p}");
         }
+    }
+
+    #[test]
+    fn inline_markers_make_a_test_file() {
+        let t = TestFiles::new().unwrap();
+        assert!(t.is_test_file("src/lib.rs", Some("#[cfg(test)] mod t {}"), None));
+        assert!(t.is_test_file("src/lib.rs", None, Some("#[test] fn a() {}")));
+        assert!(!t.is_test_file("src/lib.rs", Some("fn a() {}"), Some("fn b() {}")));
     }
 
     #[test]
@@ -147,5 +198,6 @@ mod tests {
             2
         );
         assert_eq!(count("xit('a'); describe.skip(", &IGNORE_TOKENS), 2);
+        assert_eq!(test_count("xtest('a'); test('b')"), 1);
     }
 }

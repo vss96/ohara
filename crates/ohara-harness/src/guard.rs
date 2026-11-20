@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
-use crate::contract::Contract;
+use crate::contract::{normalize_glob, Contract};
 use crate::error::{Error, Result};
 use crate::git::Git;
 
@@ -56,7 +56,8 @@ pub struct GuardReport {
     pub violations: Vec<Violation>,
 }
 
-/// One path's content at both revisions. `None` means absent there.
+/// One path's content at both revisions. `None` means the path does not
+/// exist at that revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileChange {
     /// Repo-relative path.
@@ -69,19 +70,25 @@ pub struct FileChange {
 
 /// Check the work between commits `from` and `to`.
 ///
-/// `Git::diff_names` runs with `--no-renames`, so a rename or deletion lists
-/// both the old and the new path and no extra old-path lookup is needed.
+/// Fails closed: whether a path exists at each revision comes from
+/// `git diff --name-status` (authoritative), and any failure to read a blob
+/// that should exist is an error, never a clean report. `--no-renames` makes a
+/// rename or deletion list both the old and the new path.
 pub fn guard(git: &Git, c: &Contract, from: &str, to: &str) -> Result<GuardReport> {
     let protected = protected_set(c)?;
     let tests = TestFiles::new()?;
-    let mut names = git.diff_names(from, to)?;
-    names.sort();
+    let out = git.run(&["diff", "--name-status", "-z", "--no-renames", from, to])?;
+    let mut entries = parse_name_status(&out)?;
+    entries.sort();
     let mut files = Vec::new();
-    for path in names {
-        // Only test files need contents; skip the `git show` for the rest.
-        let (before, after) = match tests.is_test_file(&path) {
-            true => (show(git, from, &path), show(git, to, &path)),
-            false => (None, None),
+    for (status, path) in entries {
+        let before = match status {
+            'A' => None,
+            _ => Some(show(git, from, &path)?),
+        };
+        let after = match status {
+            'D' => None,
+            _ => Some(show(git, to, &path)?),
         };
         files.push(FileChange {
             path,
@@ -90,6 +97,20 @@ pub fn guard(git: &Git, c: &Contract, from: &str, to: &str) -> Result<GuardRepor
         });
     }
     Ok(evaluate(c, &protected, &tests, &files))
+}
+
+/// `(status, path)` pairs from `diff --name-status -z --no-renames`.
+fn parse_name_status(out: &str) -> Result<Vec<(char, String)>> {
+    let mut parts = out.split('\0').filter(|p| !p.is_empty());
+    let mut entries = Vec::new();
+    while let Some(status) = parts.next() {
+        let path = parts
+            .next()
+            .ok_or_else(|| Error::Guard(format!("malformed diff output near {status:?}")))?;
+        let letter = status.chars().next().unwrap_or('M');
+        entries.push((letter, path.to_string()));
+    }
+    Ok(entries)
 }
 
 /// Pure core of [`guard`]: violations for already-gathered changes.
@@ -109,7 +130,7 @@ fn evaluate(
         if protected.is_match(&f.path) {
             violations.push(Violation::ProtectedPathChanged(PathBuf::from(&f.path)));
         }
-        if tests.is_test_file(&f.path) {
+        if tests.is_test_file(&f.path, f.before.as_deref(), f.after.as_deref()) {
             violations.extend(weakening::compare(
                 &f.path,
                 f.before.as_deref(),
@@ -123,21 +144,24 @@ fn evaluate(
 
 fn protected_set(c: &Contract) -> Result<GlobSet> {
     let mut b = GlobSetBuilder::new();
-    for g in c
+    let patterns = c
         .protected_paths
         .iter()
-        .map(String::as_str)
-        .chain(IMPLICIT_PROTECTED)
-    {
-        b.add(Glob::new(g).map_err(|e| Error::Guard(format!("protected path {g}: {e}")))?);
+        .map(|g| normalize_glob(g))
+        .chain(IMPLICIT_PROTECTED.map(str::to_string));
+    for g in patterns {
+        // Each pattern also protects everything beneath it, so a bare
+        // directory name covers its contents.
+        for p in [g.clone(), format!("{g}/**")] {
+            b.add(Glob::new(&p).map_err(|e| Error::Guard(format!("protected path {p}: {e}")))?);
+        }
     }
     b.build()
         .map_err(|e| Error::Guard(format!("protected paths: {e}")))
 }
 
-/// File content at `rev`, or `None` when the path does not exist there.
-fn show(git: &Git, rev: &str, path: &str) -> Option<String> {
-    let spec = format!("{rev}:{path}");
-    git.run(&["cat-file", "-e", &spec]).ok()?;
-    git.run(&["show", &spec]).ok()
+/// File content at `rev`. Called only for paths git says exist there, so any
+/// failure is an error.
+fn show(git: &Git, rev: &str, path: &str) -> Result<String> {
+    git.run(&["show", &format!("{rev}:{path}")])
 }
