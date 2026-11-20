@@ -1813,3 +1813,50 @@ async fn main_reset_to_an_ancestor_refreshes_the_head_symbol_snapshot() {
     );
     assert_eq!(tip_of(main.path()).await, Some(a.to_string()));
 }
+
+// ---- PR #138 review round 2: the snapshot's provenance, not the tip ----
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn linked_worktree_refreshes_a_snapshot_another_linked_worktree_replaced() {
+    let _g = env_lock();
+    let ohara_home = tempfile::tempdir().unwrap();
+    std::env::set_var("OHARA_HOME", ohara_home.path());
+    let main = tempfile::tempdir().unwrap();
+    build_test_repo(main.path());
+    let repo = git2::Repository::open(main.path()).unwrap();
+    let mut slots = Vec::new();
+    for name in ["slot-1", "slot-2"] {
+        let wt_path = main.path().join(".wt").join(name);
+        std::fs::create_dir_all(wt_path.parent().unwrap()).unwrap();
+        repo.worktree(name, &wt_path, None).unwrap();
+        slots.push(std::fs::canonicalize(wt_path).unwrap());
+    }
+    let l1 = git2::Repository::open(&slots[0]).unwrap();
+    let a = commit_file(&l1, "one_only.rs", "fn one_only() {}\n", "slot-1 only");
+    let l2 = git2::Repository::open(&slots[1]).unwrap();
+    commit_file(&l2, "two_only.rs", "fn two_only() {}\n", "slot-2 only");
+
+    // No main tip: each linked run replaces the shared snapshot, so after
+    // slot-2's run it describes slot-2's HEAD while slot-1's tip is still A.
+    index_checkout(&slots[0]).await;
+    index_checkout(&slots[1]).await;
+    assert!(tip_of(main.path()).await.is_none());
+    let names = head_symbol_names(main.path()).await;
+    assert!(names.contains(&"two_only".to_string()), "got {names:?}");
+
+    // slot-1 at A: every commit is covered and its own tip is A, yet the
+    // snapshot describes slot-2's commit, so slot-1 must not skip.
+    let (_rec, engine) = recording_engine();
+    let out = engine
+        .ensure_indexed(&slots[0], &sha_of(a))
+        .await
+        .expect("ensure_indexed");
+    assert!(
+        out.indexed,
+        "slot-1 must refresh the snapshot slot-2 replaced"
+    );
+    let names = head_symbol_names(main.path()).await;
+    assert!(names.contains(&"one_only".to_string()), "got {names:?}");
+    assert!(!names.contains(&"two_only".to_string()), "got {names:?}");
+}
