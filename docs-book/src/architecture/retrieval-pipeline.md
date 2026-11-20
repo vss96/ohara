@@ -50,10 +50,13 @@ querying worktree's `HEAD` or one of its ancestors. It runs before the
 rerank pool is cut, so invisible hits never crowd out visible ones;
 lane sizes are unchanged.
 
-- **Fast path.** First the engine checks every worktree's indexed tip
-  against the querying `HEAD`. When all of them are reachable (always
-  the case with a single checkout) no candidate can be invisible, and
-  the filter is skipped entirely.
+- **Fast path.** First the engine checks every indexed tip (each
+  worktree's, plus [retired tips](./indexing.md#retired-tips) left
+  behind when a worktree moved off indexed commits) against the
+  querying `HEAD`. When all of them are reachable (always the case with
+  a single checkout that never rewrote history) no candidate can be
+  invisible, and the filter is skipped entirely. An unborn `HEAD`
+  returns no hits.
 - **Filtered path.** Otherwise the distinct commits among the
   candidates are checked in one batch with libgit2 ancestry tests.
   Verdicts are kept in an engine-wide LRU keyed by

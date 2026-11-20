@@ -63,7 +63,7 @@ table at successful completion.
 
 | Table / column | Kind | Purpose |
 |----------------|------|---------|
-| `indexed_tip(repo_id, worktree_key, sha, updated_at)` | new table | One row per worktree of the repo: the `HEAD` its last clean index pass covered. `worktree_key` is `''` for the main checkout and the git admin-dir name (`.git/worktrees/<name>`) for a linked worktree. Primary key `(repo_id, worktree_key)`. |
+| `indexed_tip(repo_id, worktree_key, sha, updated_at)` | new table | One row per worktree of the repo: the `HEAD` its last clean index pass covered. `worktree_key` is `''` for the main checkout and the git admin-dir name (`.git/worktrees/<name>`) for a linked worktree; `<worktree>/<sha>` keys hold retired tips (see below). Primary key `(repo_id, worktree_key)`. |
 
 V7 backfills the main checkout's row (`worktree_key = ''`) from
 `repo.last_indexed_commit` for every repo that has one, so an existing
@@ -97,10 +97,20 @@ crash mid-walk costs a re-walk but no re-embedding of stored commits.
 Combined with `put_hunks`'s DELETE-then-INSERT semantics, a commit
 interrupted mid-write is redone without duplicate rows.
 
+When a worktree moves to a commit that does not descend from its tip
+(branch switch, reset, slot reuse), the old tip is kept in
+`indexed_tip` as a *retired tip* under the reserved key
+`<worktree>/<sha>` before the new tip is written. A git worktree name
+is a directory name and never contains `/`, so a retired key cannot
+collide with a worktree. Retired tips count as tips (walk hiding,
+coverage, the retrieval visibility fast path) but not as worktrees.
+
 Pruning (the daemon's `PruneUnreachable`) deletes the commits no ref
 or worktree `HEAD` reaches, together with their hunks, vectors and
-FTS rows, in batches of 500 per transaction, then removes the
-`indexed_tip` rows of linked worktrees that no longer exist.
+FTS rows, in batches of 500 per transaction, then tidies
+`indexed_tip`: retired tips nothing reaches are removed; a linked
+worktree that no longer exists has its row turned into a retired tip
+while a ref still reaches it, and removed otherwise.
 
 Schema version (`repo.schema_version`) is bumped when migrations land.
 A v0.3 binary on a v0.2 index runs migration V2; a v0.2 binary on a

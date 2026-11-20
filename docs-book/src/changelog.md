@@ -21,9 +21,17 @@ A git clone and all of its linked worktrees now share one index.
   querying worktree's `HEAD` can reach. When every indexed tip is
   reachable — always the case with one checkout — the filter is
   skipped, so single-checkout results are unchanged.
-- **HEAD symbols follow the main checkout.** Indexing from a linked
-  worktree never replaces the head-snapshot symbols; `--force` there
-  says so and leaves them alone.
+- **HEAD symbols follow the main checkout.** Once the main checkout
+  is indexed, indexing from a linked worktree never replaces the
+  head-snapshot symbols; `--force` there says so and leaves them
+  alone. Until then linked worktrees write them, and main's first
+  incremental pass always runs and takes them over.
+- **Retired tips.** When a worktree moves off its indexed commits
+  (branch switch, reset, a reused slot), its old tip is kept as a
+  retired tip so those commits stay behind the visibility filter;
+  prune drops it once its branch is gone.
+- **`--rebuild` in a linked worktree** warns that it drops the index
+  shared by every worktree of the clone.
 - **The daemon indexes incremental work.** When a same-version
   `ohara serve` daemon is running, `ohara index --incremental` hands
   the pass to it. The daemon also serves `EnsureIndexed`, `IndexTip`
@@ -34,6 +42,25 @@ A git clone and all of its linked worktrees now share one index.
 - **`explain_change`** returns commits that blame finds but the index
   doesn't have yet, with metadata from git and no diff excerpt, and
   says so in `limitation`.
+
+### Upgrading
+
+- **Old per-worktree indexes are orphaned.** Earlier versions gave each
+  linked worktree its own index at
+  `$OHARA_HOME/<repo-id>/index.sqlite` (default `OHARA_HOME` is
+  `~/.ohara`), keyed by the worktree's path. A linked worktree now uses
+  its main clone's index, so those directories are no longer read and
+  can be deleted. `ohara status` in the main checkout prints the `id`
+  that is still in use; every other `<repo-id>` directory belonging to
+  one of the clone's worktrees is safe to remove.
+- **Index the main checkout first.** After upgrading, a linked worktree
+  reads the main clone's index. Run `ohara index` in the main checkout
+  (or a full `ohara index` anywhere in the clone) before querying from
+  a worktree, otherwise the worktree sees an empty or missing index.
+- **Downgrading.** Older binaries write `repo.last_indexed_commit`,
+  which this version no longer reads (it uses `indexed_tip`). The data
+  stays consistent, but after going back and forth some work is
+  redone.
 
 Known limits: a failed index pass can leave stored commits without a
 tip, which other worktrees may see until the next clean pass or a

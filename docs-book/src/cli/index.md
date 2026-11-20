@@ -110,11 +110,18 @@ the main clone's index, embeds only the commits no other worktree has
 indexed yet, and records the worktree's own indexed tip. Queries from
 each worktree only see commits its own `HEAD` reaches.
 
-- The head-snapshot symbol lane always describes the main checkout.
-  Indexing from a linked worktree never extracts or replaces HEAD
-  symbols, and `--force` there prints
+- The head-snapshot symbol lane describes the main checkout. Once the
+  main checkout has been indexed, indexing from a linked worktree
+  never extracts or replaces HEAD symbols, and `--force` there prints
   `HEAD symbols follow the main worktree; not clearing them here`
-  instead of clearing them.
+  instead of clearing them. Until then (the shared index was first
+  built from a linked worktree) linked worktrees write them, and the
+  main checkout's first `ohara index --incremental` always runs a pass
+  that records its tip and takes the HEAD symbols over.
+- `--rebuild` inside a linked worktree deletes the index shared by the
+  main clone and every linked worktree. It prints
+  `warning: --rebuild from linked worktree '<name>' drops the index shared by all worktrees of this clone`
+  on stderr before deleting.
 - `--incremental` runs in a running same-version `ohara serve` daemon
   when there is one, so the daemon stays the single writer and its
   warm embedder is reused. `ohara index` never starts a daemon for

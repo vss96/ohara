@@ -36,19 +36,29 @@ A full pass, in order:
     4. `put_hunks` (hunk rows + `vec_hunk` + `fts_hunk_text`,
        DELETE-then-INSERT scoped by `commit_sha`).
     5. Every 100 commits, emit a `tracing::info!` progress event.
-5. **Extract HEAD symbols (main checkout only).**
-   `SymbolSource::extract_head_symbols` walks the working tree,
-   parses each supported file with tree-sitter, runs the AST
-   sibling-merge chunker, and produces one `Symbol` per chunk. A
-   linked worktree skips this step: the head-snapshot symbol lane
-   always describes the main checkout's `HEAD`.
-6. **`put_head_symbols`.** Replaces the entire `symbol` /
-   `vec_symbol` / `fts_symbol` / `fts_symbol_name` content for the
-   repo (HEAD is a snapshot, not history). Main checkout only.
+5. **Extract HEAD symbols (main checkout, or any worktree until main
+   has a tip).** `SymbolSource::extract_head_symbols` walks the
+   working tree, parses each supported file with tree-sitter, runs
+   the AST sibling-merge chunker, and produces one `Symbol` per
+   chunk. The head-snapshot symbol lane describes the main
+   checkout's `HEAD`, so once the main checkout has a tip a linked
+   worktree skips this step. Until then (a shared index first built
+   from a linked worktree, or a bare repo with only linked
+   worktrees) whichever worktree indexes writes it, so the lane is
+   never empty.
+6. **`put_head_symbols`.** Writes the `symbol` / `vec_symbol` /
+   `fts_symbol` / `fts_symbol_name` content for the repo (HEAD is a
+   snapshot, not history). The main checkout's first pass clears
+   whatever a linked worktree wrote before taking it over.
 7. **Record the tip.** When every commit indexed cleanly, set this
    worktree's row in `indexed_tip` to the `HEAD` the pass started
-   from. A pass with failed commits leaves the tip where it was, so
-   the next pass retries them.
+   from (the walk in step 3 also starts from that commit, not from a
+   `HEAD` that moved mid-pass). If the worktree's previous tip is not
+   an ancestor of the new one (branch switch, `reset`, a slot reused
+   for another run), the previous tip is kept as a *retired tip*
+   first; see [Retired tips](#retired-tips). A pass with failed
+   commits leaves the tip where it was, so the next pass retries
+   them.
 
 ## Chunk-level embed cache (`--embed-cache`)
 
@@ -159,8 +169,31 @@ The daemon's index work:
   Repeated requests for a worktree coalesce while it waits.
 - **`PruneUnreachable`** — delete indexed commits that no ref and no
   worktree `HEAD` (detached ones included) reaches any more, then
-  drop the tips of linked worktrees that no longer exist. The main
-  tip is never dropped.
+  tidy the tips: a retired tip is dropped once nothing reaches it; a
+  linked worktree that no longer exists has its tip retired while a
+  ref still reaches it, and dropped otherwise. The main tip is never
+  dropped.
+
+The main checkout is never treated as covered before it has its own
+tip: its first `EnsureIndexed` (or `ohara index --incremental`) runs a
+pass that records the tip and takes over the HEAD symbols, even when
+linked worktrees' tips already reach its `HEAD`.
+
+### Retired tips
+
+A worktree's commits stay in the index after the worktree moves to a
+commit that does not descend from its old tip, so the old tip keeps
+counting as a tip: it is stored in `indexed_tip` under the reserved key
+`<worktree>/<sha>` (git worktree names never contain `/`, so it cannot
+collide with a real worktree). Retired tips are hidden by the walk,
+count for coverage, and — the reason they exist — make retrieval apply
+the visibility filter whenever one is not reachable from the querying
+`HEAD`. Without them a reused slot whose new run was merged into main
+would make every tip visible from main, the filter would be skipped,
+and the old run's unmerged commits would leak into main's results.
+They are not worktrees: `status`, a worktree's own-tip lookup and
+`_meta.index_status` ignore them. Prune drops a retired tip once no
+ref reaches it (its commits are pruned in the same pass).
 
 Jobs are serialised per repository. The daemon never builds an index
 from scratch (run `ohara index` once first), and it refuses to write
@@ -300,7 +333,10 @@ becomes the dominant per-commit cost, fanning out across workers.
   commits stores the rest but doesn't record a tip. When every tip is
   visible from a querying worktree's `HEAD`, retrieval skips the
   visibility filter, so those stored commits can show up in results
-  from other worktrees until the next clean pass or a prune.
+  from other worktrees until the next clean pass or a prune. (A
+  worktree that *moves* off indexed commits is covered: its old tip is
+  kept as a [retired tip](#retired-tips). Commits that never got a tip
+  at all are not.)
 - **No cross-process writer lock.** The daemon serialises its own
   jobs, but a CLI `--force` or `--rebuild`, or a second daemon
   briefly overlapping the first during shutdown or a version upgrade,
