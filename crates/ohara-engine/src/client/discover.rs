@@ -1,6 +1,6 @@
-use crate::client::spawn::{runtime_dir, spawn_daemon};
 use crate::error::EngineError;
-use crate::registry::{DaemonRecord, Registry};
+use crate::lifecycle::{DaemonLifecycle, ProcessLauncher};
+use crate::registry::Registry;
 use std::path::{Path, PathBuf};
 
 /// A live or newly-spawned daemon the client can connect to.
@@ -36,49 +36,14 @@ pub fn find_or_spawn_daemon(
     }
     let reg = Registry::open(registry_path)
         .map_err(|e| EngineError::Internal(format!("registry open: {e}")))?;
-
-    enum Pick {
-        Existing(DaemonRecord),
-        Spawned(DaemonRecord),
-        SpawnFailed(String),
-    }
-
-    let pick = reg
-        .locked_update(|daemons| {
-            if let Some(existing) = daemons.iter().find(|d| d.ohara_version == ohara_version) {
-                return Pick::Existing(existing.clone());
-            }
-            match spawn_daemon(ohara_binary, &runtime_dir(), ohara_version, registry_path) {
-                Ok(sd) => {
-                    let rec = DaemonRecord {
-                        pid: sd.pid,
-                        socket_path: sd.socket_path,
-                        ohara_version: ohara_version.into(),
-                        ohara_git_sha: Some(ohara_git_sha.into()),
-                        started_at_unix: now_unix(),
-                        last_health_unix: now_unix(),
-                    };
-                    daemons.push(rec.clone());
-                    Pick::Spawned(rec)
-                }
-                Err(e) => Pick::SpawnFailed(e.to_string()),
-            }
-        })
-        .map_err(|e| EngineError::Internal(format!("registry locked_update: {e}")))?;
-
-    match pick {
-        Pick::Existing(d) => Ok(Some(DaemonHandle {
-            socket_path: d.socket_path,
-            pid: d.pid,
-            spawned: false,
-        })),
-        Pick::Spawned(d) => Ok(Some(DaemonHandle {
-            socket_path: d.socket_path,
-            pid: d.pid,
-            spawned: true,
-        })),
-        Pick::SpawnFailed(e) => Err(EngineError::Internal(format!("spawn daemon: {e}"))),
-    }
+    let launcher = ProcessLauncher {
+        ohara_binary: ohara_binary.to_path_buf(),
+        ohara_version: ohara_version.into(),
+        registry_path: registry_path.to_path_buf(),
+    };
+    DaemonLifecycle::new(reg, ohara_version, ohara_git_sha, launcher)
+        .acquire()
+        .map(Some)
 }
 
 /// Return the platform-appropriate path for the daemon registry file.
@@ -105,13 +70,6 @@ fn registry_base() -> crate::Result<PathBuf> {
     let home =
         std::env::var_os("HOME").ok_or_else(|| EngineError::Internal("HOME not set".into()))?;
     Ok(PathBuf::from(home).join(".cache/ohara"))
-}
-
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
