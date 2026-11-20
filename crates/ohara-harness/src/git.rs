@@ -122,6 +122,18 @@ impl Git {
         self.run(&["reset", "--hard", sha]).map(|_| ())
     }
 
+    /// Remove untracked files and directories (`git clean -ffd`; ignored
+    /// files are kept). Refused outside the work tree root.
+    pub fn clean(&self) -> Result<()> {
+        self.ensure_own_toplevel()?;
+        self.run(&["clean", "-ffd"]).map(|_| ())
+    }
+
+    /// `git status --porcelain` output (empty when the tree is clean).
+    pub fn status_porcelain(&self) -> Result<String> {
+        self.run(&["status", "--porcelain"])
+    }
+
     /// Stage everything (`git add -A`, tracked and untracked) and commit it,
     /// returning the new `HEAD`. An empty change set still yields a commit.
     ///
@@ -155,6 +167,20 @@ impl Git {
         let path = path.to_string_lossy();
         self.run(&["worktree", "add", "-b", branch, &path, base])
             .map(|_| ())
+    }
+
+    /// `git worktree remove --force <path>`, run from the main checkout.
+    pub fn worktree_remove(&self, path: &Path) -> Result<()> {
+        self.ensure_own_toplevel()?;
+        let path = path.to_string_lossy();
+        self.run(&["worktree", "remove", "--force", &path])
+            .map(|_| ())
+    }
+
+    /// `git branch -D <branch>`, run from the main checkout.
+    pub fn branch_delete(&self, branch: &str) -> Result<()> {
+        self.ensure_own_toplevel()?;
+        self.run(&["branch", "-D", branch]).map(|_| ())
     }
 
     /// Paths changed between two commits.

@@ -1,0 +1,23 @@
+description = "Build a feature: tests pass, the design matches existing patterns, behaviour is documented."
+default_budget_minutes = 120
+diff_budget_lines = 400
+
+[contract]
+protected_paths = []
+
+[[contract.script]]
+name = "tests"
+run = ["cargo", "test", "--workspace"]
+kind = "test"
+
+[[contract.rubric]]
+id = "design-fit"
+criterion = "design matches existing patterns"
+pass_mark = 7
+scale_max = 10
+
+[[contract.rubric]]
+id = "docs"
+criterion = "user-facing behaviour documented"
+pass_mark = 7
+scale_max = 10

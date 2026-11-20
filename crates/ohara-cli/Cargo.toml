@@ -21,6 +21,7 @@ ohara-embed = { path = "../ohara-embed" }
 ohara-engine = { path = "../ohara-engine" }
 ohara-git = { path = "../ohara-git" }
 ohara-parse = { path = "../ohara-parse" }
+ohara-harness = { path = "../ohara-harness" }
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
@@ -45,3 +46,5 @@ cuda = ["ohara-embed/cuda"]
 
 [dev-dependencies]
 tempfile.workspace = true
+async-trait.workspace = true
+ohara-harness = { path = "../ohara-harness", features = ["test-util"] }

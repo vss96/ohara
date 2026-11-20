@@ -2424,6 +2424,7 @@ name = "ohara-cli"
 version = "0.14.3"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axoupdater",
  "chrono",
  "clap",
@@ -2434,6 +2435,7 @@ dependencies = [
  "ohara-embed",
  "ohara-engine",
  "ohara-git",
+ "ohara-harness",
  "ohara-parse",
  "ohara-storage",
  "serde_json",

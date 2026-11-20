@@ -1,0 +1,19 @@
+description = "Research a question: no scripts, every claim cites a source."
+default_budget_minutes = 60
+# No diff budget: research produces notes, not a large diff.
+diff_budget_lines = 0
+
+[contract]
+protected_paths = []
+
+[[contract.rubric]]
+id = "cited"
+criterion = "every claim cites a source"
+pass_mark = 7
+scale_max = 10
+
+[[contract.rubric]]
+id = "answered"
+criterion = "the question is answered"
+pass_mark = 7
+scale_max = 10

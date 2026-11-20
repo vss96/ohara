@@ -22,6 +22,7 @@
 - [`ohara explain`](./cli/explain.md)
 - [`ohara status`](./cli/status.md)
 - [`ohara prune`](./cli/prune.md)
+- [`ohara task`](./cli/task.md)
 - [`ohara update`](./cli/update.md)
 
 # Architecture

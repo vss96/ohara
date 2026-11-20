@@ -14,6 +14,7 @@ pub mod prune;
 pub mod query;
 pub mod serve;
 pub mod status;
+pub mod task;
 pub mod update;
 
 /// Re-export of `ohara_core::paths::ohara_home`. CLI callers expect an
